@@ -2,3 +2,13 @@
 # SPDX-FileCopyrightText: 2025 This source file is part of the OpenTSLM open-source project.
 #
 # SPDX-License-Identifier: MIT
+
+from .OpenTSLMSP import OpenTSLMSP
+from .OpenTSLMFlamingo import OpenTSLMFlamingo
+from .GenerativeClassifier import GenerativeClassifier
+
+__all__ = [
+    "OpenTSLMSP",
+    "OpenTSLMFlamingo",
+    "GenerativeClassifier",
+]
