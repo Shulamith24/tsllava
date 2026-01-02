@@ -252,10 +252,12 @@ def main():
         collate_fn=lambda batch: collate_fn_classification(batch, patch_size=args.patch_size),
     )
     
-    # 优化器
+    # 优化器 - 重要：包含embedding层用于训练类别token
     param_groups = [
         {"params": model.encoder.parameters(), "lr": args.lr_encoder, "weight_decay": args.weight_decay},
         {"params": model.projector.parameters(), "lr": args.lr_projector, "weight_decay": args.weight_decay},
+        # embedding层用于学习类别token
+        {"params": [model.llm.get_input_embeddings().weight], "lr": args.lr_lora, "weight_decay": 0.0},
     ]
     
     if args.use_lora:

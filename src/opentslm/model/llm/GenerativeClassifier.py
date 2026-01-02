@@ -86,7 +86,17 @@ class GenerativeClassifier(TimeSeriesLLM):
         )
         self.llm.resize_token_embeddings(len(self.tokenizer))
         
-        # 4) 编码器
+        # 4) 初始化新添加的类别token embedding
+        with torch.no_grad():
+            embeddings = self.llm.get_input_embeddings()
+            old_embeddings = embeddings.weight[:-num_classes, :]
+            mean_emb = old_embeddings.mean(dim=0)
+            std_emb = old_embeddings.std()
+            for cls_id in self.class_token_ids:
+                embeddings.weight[cls_id] = mean_emb + torch.randn_like(mean_emb) * std_emb * 0.02
+        print(f"📝 类别token embedding已初始化")
+        
+        # 5) 编码器
         self.encoder_type = encoder_type
         if encoder_type == "tslanet":
             config = tslanet_config or {}
@@ -108,18 +118,19 @@ class GenerativeClassifier(TimeSeriesLLM):
             self.encoder = TransformerCNNEncoder().to(device)
             self.patch_size = 4
         
-        # 5) Projector
+        # 6) Projector
         self.projector = MLPProjector(
             ENCODER_OUTPUT_DIM, self.llm.config.hidden_size, device=device
         ).to(device)
         
-        # 6) LoRA相关
+        # 7) LoRA相关
         self.lora_enabled = False
         self.original_llm = None
         
-        # 7) 冻结LLM骨干
+        # 8) 冻结LLM骨干，但让embedding层可训练
         for p in self.llm.parameters():
             p.requires_grad = False
+        self.llm.get_input_embeddings().weight.requires_grad = True
     
     def enable_lora(
         self,
@@ -302,8 +313,10 @@ class GenerativeClassifier(TimeSeriesLLM):
         约束解码预测
         
         只进行一次forward，对next_token_logits做mask，只允许类别token
+        使用attention_mask找到每个样本的实际最后位置
         """
         inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
+        B = inputs_embeds.size(0)
         
         # Forward得到logits
         outputs = self.llm(
@@ -312,8 +325,16 @@ class GenerativeClassifier(TimeSeriesLLM):
             return_dict=True,
         )
         
-        # 获取最后一个位置的logits
-        next_token_logits = outputs.logits[:, -1, :]  # [B, vocab_size]
+        # 获取每个样本的实际最后位置（attention_mask为1的最后一个位置）
+        # attention_mask: [B, L], 1表示有效位置
+        seq_lengths = attention_mask.sum(dim=1)  # [B] 每个样本的实际长度
+        
+        # 收集每个样本最后位置的logits
+        next_token_logits_list = []
+        for i in range(B):
+            last_pos = seq_lengths[i].item() - 1  # 0-indexed
+            next_token_logits_list.append(outputs.logits[i, last_pos, :])
+        next_token_logits = torch.stack(next_token_logits_list, dim=0)  # [B, vocab_size]
         
         # 约束解码：只保留类别token的logits
         mask = torch.full_like(next_token_logits, float("-inf"))
