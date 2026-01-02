@@ -1,0 +1,34 @@
+# UCR测试数据集列表 (30个)
+# 用于跨域能力测试
+# 随机种子: 42
+#
+AllGestureWiimoteZ
+GestureMidAirD3
+GesturePebbleZ1
+GesturePebbleZ2
+MelbournePedestrian
+PickupGestureWiimoteZ
+ShakeGestureWiimoteZ
+SonyAIBORobotSurface1
+SonyAIBORobotSurface2
+StarLightCurves
+Strawberry
+SwedishLeaf
+Symbols
+SyntheticControl
+ToeSegmentation1
+ToeSegmentation2
+Trace
+TwoLeadECG
+TwoPatterns
+UMD
+UWaveGestureLibraryAll
+UWaveGestureLibraryX
+UWaveGestureLibraryY
+UWaveGestureLibraryZ
+Wafer
+Wine
+WordSynonyms
+Worms
+WormsTwoClass
+Yoga

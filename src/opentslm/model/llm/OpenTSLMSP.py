@@ -32,6 +32,9 @@ class OpenTSLMSP(TimeSeriesLLM):
         self,
         llm_id: str = "meta-llama/Llama-3.2-1B",
         device: str = "cuda",
+        encoder_type: str = "transformer_cnn",  # "transformer_cnn" or "tslanet"
+        encoder_pretrained_path: Optional[str] = None,  # 预训练权重路径
+        tslanet_config: Optional[Dict] = None,  # TSLANet配置
     ):
         super().__init__(device)
 
@@ -49,13 +52,35 @@ class OpenTSLMSP(TimeSeriesLLM):
         )
         self.llm.resize_token_embeddings(len(self.tokenizer))
 
-        # 3) encoder + projector (now internal)
-        self.encoder = TransformerCNNEncoder().to(device)
+        # 3) encoder + projector
+        self.encoder_type = encoder_type
+        if encoder_type == "tslanet":
+            from ..encoder.TSLANetEncoder import TSLANetEncoder
+            config = tslanet_config or {}
+            # 默认TSLANet配置
+            default_config = {
+                "output_dim": ENCODER_OUTPUT_DIM,
+                "patch_size": 8,
+                "emb_dim": 128,
+                "depth": 2,
+                "dropout": 0.15,
+            }
+            default_config.update(config)
+            self.encoder = TSLANetEncoder(**default_config).to(device)
+            self.patch_size = default_config.get("patch_size", 8)
+            
+            # 加载预训练权重
+            if encoder_pretrained_path:
+                self.encoder.load_pretrained(encoder_pretrained_path)
+                print(f"✅ Loaded TSLANet pretrained weights from: {encoder_pretrained_path}")
+        else:
+            # 默认使用原有编码器
+            self.encoder = TransformerCNNEncoder().to(device)
+            self.patch_size = 4
+        
         self.projector = MLPProjector(
             ENCODER_OUTPUT_DIM, self.llm.config.hidden_size, device=device
         ).to(device)
-
-        self.patch_size = 4
 
         # LoRA-related attributes
         self.lora_enabled = False
