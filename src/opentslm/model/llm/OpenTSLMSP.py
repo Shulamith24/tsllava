@@ -27,6 +27,42 @@ from opentslm.time_series_datasets.util import (
 )
 
 
+class ClassificationLogitsProcessor:
+    """
+    约束解码的LogitsProcessor
+    
+    只允许输出指定的token（类别标签token + EOS token）
+    """
+    
+    def __init__(self, allowed_token_ids: List[int], eos_token_id: Optional[int] = None):
+        """
+        Args:
+            allowed_token_ids: 允许输出的token ID列表
+            eos_token_id: EOS token ID（可选，会自动添加到allowed列表）
+        """
+        self.allowed_token_ids = set(allowed_token_ids)
+        if eos_token_id is not None:
+            self.allowed_token_ids.add(eos_token_id)
+    
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        """
+        屏蔽非允许token的logits
+        
+        Args:
+            input_ids: [batch_size, seq_len]
+            scores: [batch_size, vocab_size]
+        
+        Returns:
+            修改后的scores
+        """
+        # 创建掩码
+        mask = torch.full_like(scores, float('-inf'))
+        for tid in self.allowed_token_ids:
+            if tid < scores.shape[-1]:
+                mask[:, tid] = 0.0
+        return scores + mask
+
+
 class OpenTSLMSP(TimeSeriesLLM):
     def __init__(
         self,
@@ -87,10 +123,82 @@ class OpenTSLMSP(TimeSeriesLLM):
         self.original_llm = (
             None  # Keep reference to original model for backward compatibility
         )
+        
+        # Classification token attributes
+        self.cls_token_ids: Optional[List[int]] = None  # 类别token的ID列表
 
         # Freeze the LLM backbone for SP model (internally)
         for p in self.llm.parameters():
             p.requires_grad = False
+
+    def add_classification_tokens(self, cls_tokens: List[str]) -> List[int]:
+        """
+        添加分类专用token到tokenizer并resize embedding
+        
+        Args:
+            cls_tokens: 类别token列表，如["<cls_0>", "<cls_1>", ...]
+        
+        Returns:
+            类别token的ID列表
+        """
+        # 添加特殊token
+        num_added = self.tokenizer.add_special_tokens({
+            "additional_special_tokens": cls_tokens
+        })
+        
+        if num_added > 0:
+            # Resize LLM embedding
+            self.llm.resize_token_embeddings(len(self.tokenizer))
+            
+            # 获取新token的ID
+            self.cls_token_ids = [
+                self.tokenizer.convert_tokens_to_ids(t) for t in cls_tokens
+            ]
+            
+            # 初始化新token的embedding
+            self._initialize_cls_embeddings(cls_tokens)
+            
+            print(f"✅ 添加了 {num_added} 个分类token: {cls_tokens}")
+            print(f"   Token IDs: {self.cls_token_ids}")
+        else:
+            # Token已存在
+            self.cls_token_ids = [
+                self.tokenizer.convert_tokens_to_ids(t) for t in cls_tokens
+            ]
+            print(f"ℹ️ 分类token已存在: {cls_tokens}")
+        
+        return self.cls_token_ids
+    
+    def _initialize_cls_embeddings(self, cls_tokens: List[str]):
+        """
+        初始化类别token的embedding
+        
+        使用现有token的平均值加少量噪声初始化
+        """
+        embeddings = self.llm.get_input_embeddings()
+        
+        # 获取一些参考token的embedding平均值
+        ref_tokens = ["label", "class", "category", "type", "answer"]
+        ref_ids = []
+        for t in ref_tokens:
+            tid = self.tokenizer.convert_tokens_to_ids(t)
+            if tid != self.tokenizer.unk_token_id:
+                ref_ids.append(tid)
+        
+        if ref_ids:
+            ref_embeds = embeddings.weight.data[ref_ids].mean(dim=0)
+        else:
+            # 使用所有embedding的平均值
+            ref_embeds = embeddings.weight.data.mean(dim=0)
+        
+        # 为每个类别token设置初始值（加少量噪声以区分）
+        with torch.no_grad():
+            for i, token in enumerate(cls_tokens):
+                tid = self.tokenizer.convert_tokens_to_ids(token)
+                noise = torch.randn_like(ref_embeds) * 0.01
+                # 添加一个与类别索引相关的偏移
+                offset = (i / len(cls_tokens)) * 0.1
+                embeddings.weight.data[tid] = ref_embeds + noise + offset
 
     def enable_lora(
         self,
@@ -341,16 +449,29 @@ class OpenTSLMSP(TimeSeriesLLM):
         return inputs_embeds, attention_mask
 
     def generate(
-        self, batch: List[Dict[str, any]], max_new_tokens: int = 50, **generate_kwargs
+        self, 
+        batch: List[Dict[str, any]], 
+        max_new_tokens: int = 50,
+        allowed_token_ids: Optional[List[int]] = None,  # 约束解码：只允许这些token
+        **generate_kwargs
     ) -> List[str]:
         inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
+        
+        # 如果指定了allowed_token_ids，使用约束解码
+        if allowed_token_ids is not None:
+            from transformers import LogitsProcessorList
+            processor = ClassificationLogitsProcessor(allowed_token_ids, self.tokenizer.eos_token_id)
+            generate_kwargs["logits_processor"] = LogitsProcessorList([processor])
+            # 分类任务只需要生成一个token
+            max_new_tokens = 1
+        
         gen_ids = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             **generate_kwargs,
         )
-        return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
 
     def compute_loss(self, batch: List[Dict[str, any]]) -> torch.Tensor:
         """
