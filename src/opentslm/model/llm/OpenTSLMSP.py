@@ -31,18 +31,16 @@ class ClassificationLogitsProcessor:
     """
     约束解码的LogitsProcessor
     
-    只允许输出指定的token（类别标签token + EOS token）
+    只允许输出指定的类别标签token
+    注意：不包含EOS token，强制模型输出类别标签
     """
     
-    def __init__(self, allowed_token_ids: List[int], eos_token_id: Optional[int] = None):
+    def __init__(self, allowed_token_ids: List[int]):
         """
         Args:
-            allowed_token_ids: 允许输出的token ID列表
-            eos_token_id: EOS token ID（可选，会自动添加到allowed列表）
+            allowed_token_ids: 允许输出的token ID列表（仅类别token）
         """
         self.allowed_token_ids = set(allowed_token_ids)
-        if eos_token_id is not None:
-            self.allowed_token_ids.add(eos_token_id)
     
     def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
         """
@@ -55,7 +53,7 @@ class ClassificationLogitsProcessor:
         Returns:
             修改后的scores
         """
-        # 创建掩码
+        # 创建掩码：所有token设为-inf，只有allowed的设为0
         mask = torch.full_like(scores, float('-inf'))
         for tid in self.allowed_token_ids:
             if tid < scores.shape[-1]:
@@ -462,7 +460,7 @@ class OpenTSLMSP(TimeSeriesLLM):
         # 如果指定了allowed_token_ids，使用约束解码
         if allowed_token_ids is not None:
             from transformers import LogitsProcessorList
-            processor = ClassificationLogitsProcessor(allowed_token_ids, self.tokenizer.eos_token_id)
+            processor = ClassificationLogitsProcessor(allowed_token_ids)  # 只允许cls token
             generate_kwargs["logits_processor"] = LogitsProcessorList([processor])
             # 分类任务只需要生成一个token
             max_new_tokens = 1
