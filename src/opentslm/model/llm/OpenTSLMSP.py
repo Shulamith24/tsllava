@@ -453,9 +453,11 @@ class OpenTSLMSP(TimeSeriesLLM):
         batch: List[Dict[str, any]], 
         max_new_tokens: int = 50,
         allowed_token_ids: Optional[List[int]] = None,  # 约束解码：只允许这些token
+        return_generated_only: bool = False,  # 是否只返回新生成的token
         **generate_kwargs
     ) -> List[str]:
         inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
+        input_length = inputs_embeds.size(1)  # 记录输入长度
         
         # 如果指定了allowed_token_ids，使用约束解码
         if allowed_token_ids is not None:
@@ -464,6 +466,7 @@ class OpenTSLMSP(TimeSeriesLLM):
             generate_kwargs["logits_processor"] = LogitsProcessorList([processor])
             # 分类任务只需要生成一个token
             max_new_tokens = 1
+            return_generated_only = True  # 约束解码时默认只返回新token
         
         gen_ids = self.llm.generate(
             inputs_embeds=inputs_embeds,
@@ -471,7 +474,21 @@ class OpenTSLMSP(TimeSeriesLLM):
             max_new_tokens=max_new_tokens,
             **generate_kwargs,
         )
-        return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
+        
+        if return_generated_only:
+            # 只返回新生成的token
+            # 注意：使用inputs_embeds时，gen_ids可能只包含生成部分
+            # 但为了安全起见，我们检查长度并只取后面的部分
+            outputs = []
+            for i, gen_id in enumerate(gen_ids):
+                # 生成的序列长度可能与输入不同
+                # 取最后max_new_tokens个token
+                new_tokens = gen_id[-max_new_tokens:] if len(gen_id) > 0 else gen_id
+                decoded = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
+                outputs.append(decoded)
+            return outputs
+        else:
+            return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
 
     def compute_loss(self, batch: List[Dict[str, any]]) -> torch.Tensor:
         """

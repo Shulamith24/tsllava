@@ -202,7 +202,9 @@ def evaluate(
     model: OpenTSLMSP,
     data_loader: DataLoader,
     cls_token_ids: List[int],
+    cls_tokens: List[str],
     args,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """评估模型"""
     model.eval()
@@ -213,7 +215,7 @@ def evaluate(
     predictions = []
     labels = []
     
-    for batch in tqdm(data_loader, desc="Evaluating"):
+    for batch_idx, batch in enumerate(tqdm(data_loader, desc="Evaluating")):
         # 计算损失
         loss = model.compute_loss(batch)
         total_loss += loss.item()
@@ -223,6 +225,7 @@ def evaluate(
             batch,
             max_new_tokens=1,
             allowed_token_ids=cls_token_ids,
+            do_sample=False,  # 贪婪解码
         )
         
         # 解析预测结果
@@ -230,12 +233,23 @@ def evaluate(
             true_label = sample["label_idx"]
             
             # 从输出中提取预测的类别token
+            # 现在output只包含生成的1个token（因为return_generated_only=True）
+            output_clean = output.strip()
             pred_label = -1
-            for j, token_id in enumerate(cls_token_ids):
-                token = model.tokenizer.convert_ids_to_tokens(token_id)
-                if token in output:
+            
+            # 直接匹配cls token
+            for j, cls_token in enumerate(cls_tokens):
+                if cls_token in output_clean:
                     pred_label = j
                     break
+            
+            # 如果没找到任何cls token
+            if pred_label == -1:
+                if debug or (batch_idx == 0 and i < 3):
+                    print(f"\n[DEBUG] 样本 {total}:")
+                    print(f"  真实标签: {true_label} ({cls_tokens[true_label]})")
+                    print(f"  模型输出: {repr(output)}")
+                    print(f"  期望answer: {repr(sample['answer'])}")
             
             predictions.append(pred_label)
             labels.append(true_label)
@@ -243,12 +257,24 @@ def evaluate(
             if pred_label == true_label:
                 correct += 1
             total += 1
+            
+            # 调试输出前几个样本
+            if debug and total <= 5:
+                print(f"\n[DEBUG] 样本 {total}:")
+                print(f"  真实标签: {true_label} ({cls_tokens[true_label]})")
+                print(f"  预测标签: {pred_label} ({cls_tokens[pred_label] if pred_label >= 0 else 'NONE'})")
+                print(f"  输出片段: {repr(output[-50:])}")
         
         if args.dry_run:
             break
     
     accuracy = correct / max(total, 1)
     avg_loss = total_loss / max(len(data_loader), 1)
+    
+    # 统计预测失败的样本
+    invalid_preds = sum(1 for p in predictions if p == -1)
+    if invalid_preds > 0:
+        print(f"\n⚠️ 警告: {invalid_preds}/{total} 个样本预测失败（未找到有效的类别token）")
     
     return {
         "accuracy": accuracy,
@@ -257,6 +283,7 @@ def evaluate(
         "labels": labels,
         "correct": correct,
         "total": total,
+        "invalid_predictions": invalid_preds,
     }
 
 
@@ -389,7 +416,7 @@ def main():
         train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, args)
         
         # 验证
-        val_results = evaluate(model, val_loader, cls_token_ids, args)
+        val_results = evaluate(model, val_loader, cls_token_ids, cls_tokens, args)
         
         print(f"Train Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_results['loss']:.4f} | Val Acc: {val_results['accuracy']:.4f}")
@@ -443,7 +470,7 @@ def main():
             model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
     
     # 测试
-    test_results = evaluate(model, test_loader, cls_token_ids, args)
+    test_results = evaluate(model, test_loader, cls_token_ids, cls_tokens, args, debug=True)
     
     print("\n" + "=" * 60)
     print("📊 最终结果")
