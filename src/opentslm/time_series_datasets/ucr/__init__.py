@@ -4,3 +4,12 @@
 # SPDX-License-Identifier: MIT
 
 from .ucr_loader import get_ucr_loader, load_ucr_dataset, UCRDataset, collate_fn
+from .UCRClassificationDataset import UCRClassificationDataset
+
+__all__ = [
+    "get_ucr_loader",
+    "load_ucr_dataset",
+    "UCRDataset",
+    "collate_fn",
+    "UCRClassificationDataset",
+]

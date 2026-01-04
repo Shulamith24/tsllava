@@ -84,7 +84,7 @@ def parse_args():
     parser.add_argument("--mask_ratio", type=float, default=0.4, help="掩码比例")
     
     # 模型结构
-    parser.add_argument("--patch_size", type=int, default=8, help="patch大小")
+    parser.add_argument("--patch_size", type=int, default=4, help="patch大小")
     parser.add_argument("--emb_dim", type=int, default=128, help="嵌入维度")
     parser.add_argument("--depth", type=int, default=2, help="编码器深度")
     parser.add_argument("--dropout", type=float, default=0.15, help="dropout比例")
