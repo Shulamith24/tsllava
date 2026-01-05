@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-UEA多变量时间序列数据集加载器
+UEA多变量时间序列数据集加载器,在 train_uea_classification.py时使用
 
 使用aeon库加载UEA数据集。
 """
@@ -33,7 +33,7 @@ def ensure_uea_data():
 
 def load_uea_dataset(
     dataset_name: str,
-    extract_path: Optional[str] = "C:\\Users\\QYH\\Downloads\\tsllava\\data\\Multivariate_ts",
+    extract_path: Optional[str] = "/mnt/data/qyh/codes/tsllava/data/Multivariate_ts",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     加载UEA多变量时间序列数据集

@@ -26,12 +26,16 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.optim as optim
+from torch.utils.data import dataset
 from tqdm.auto import tqdm
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
+dataset_list_path = (project_root / "data" / "Multivariate_ts" / "uea_datasets.txt").resolve()
+uea_path = str(dataset_list_path.parent)
 
+from opentslm import data
 from opentslm.model.encoder.TSLANetEncoder import TSLANetEncoder
 # 复用加载器逻辑
 from opentslm.time_series_datasets.uea.uea_pretrain_loader import (
@@ -46,7 +50,7 @@ def parse_args():
     
     # 数据相关
     parser.add_argument("--dataset", type=str, default=None, help="单个UEA数据集名称")
-    parser.add_argument("--dataset_list", type=str, default=None, help="数据集列表文件")
+    parser.add_argument("--dataset_list", type=str, default=str(dataset_list_path), help="数据集列表文件")
     parser.add_argument("--save_path", type=str, default="pretrained/tslanet_uea.pt", help="保存路径")
     
     # 训练配置
@@ -155,7 +159,7 @@ def main():
     if args.dataset:
         # 单数据集模式
         print(f"📂 Loading Single Dataset: {args.dataset}")
-        X_train, _ = load_classification(args.dataset, split="train") # [N, C, L]
+        X_train, _ = load_classification(args.dataset, split="train", extract_path=uea_path) # [N, C, L]
         # 注意：这里我们仅使用 train split 进行预训练，
         # 并从中划分出一部分作为 valid 监控 loss 变化
         
@@ -193,6 +197,7 @@ def main():
         # 实际生产中建议专门留出验证数据集
         train_loader = get_uea_pretrain_loader(
             args.dataset_list, 
+            extract_path=uea_path,
             batch_size=args.batch_size, 
             patch_size=args.patch_size, 
             split="train", 

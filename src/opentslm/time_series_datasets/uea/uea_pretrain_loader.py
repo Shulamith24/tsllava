@@ -160,6 +160,7 @@ class UEAMultiDatasetForPretrain(Dataset):
         self,
         dataset_names: List[str],
         split: str = "train",
+        extract_path: str = "", 
         max_channels: int = 32,
         max_length: int = 512,
         skip_variable_length: bool = False,
@@ -176,7 +177,7 @@ class UEAMultiDatasetForPretrain(Dataset):
         
         for name in dataset_names:
             try:
-                X, _ = load_classification(name, split=split)
+                X, _ = load_classification(name, split=split, extract_path=extract_path)
                 
                 # 检查是否为变长序列
                 if is_variable_length(X):
@@ -265,6 +266,7 @@ def collate_fn_pretrain(batch: List[torch.Tensor], patch_size: int = 8) -> torch
 
 def get_uea_pretrain_loader(
     dataset_list_file: str,
+    extract_path: str = "", 
     batch_size: int = 16,
     patch_size: int = 8,
     split: str = "train",
@@ -290,6 +292,7 @@ def get_uea_pretrain_loader(
     dataset = UEAMultiDatasetForPretrain(
         dataset_names, 
         split=split,
+        extract_path=extract_path,
         max_channels=max_channels,
         max_length=max_length,
         skip_variable_length=skip_variable_length,
