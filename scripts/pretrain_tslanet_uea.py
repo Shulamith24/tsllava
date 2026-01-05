@@ -33,13 +33,13 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from opentslm.model.encoder.TSLANetEncoder import TSLANetEncoder
-# 复用正确的加载器逻辑
+# 复用加载器逻辑
 from opentslm.time_series_datasets.uea.uea_pretrain_loader import (
     get_uea_pretrain_loader, 
     UEAPretrainDataset,
     collate_fn_pretrain,
-    load_classification
 )
+from aeon.datasets import load_classification
 
 def parse_args():
     parser = argparse.ArgumentParser(description="TSLANet UEA预训练")
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--mask_ratio", type=float, default=0.4)
     
     # 模型结构
-    parser.add_argument("--patch_size", type=int, default=8)
+    parser.add_argument("--patch_size", type=int, default=4)
     parser.add_argument("--emb_dim", type=int, default=128)
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.15)
@@ -68,6 +68,11 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--early_stop", type=int, default=10)
     parser.add_argument("--val_ratio", type=float, default=0.1, help="验证集比例(仅当单数据集模式有效)")
+    
+    # 动态采样参数（解决OOM问题）
+    parser.add_argument("--max_channels", type=int, default=32, help="最大通道数，超过则随机采样")
+    parser.add_argument("--max_length", type=int, default=512, help="最大序列长度，超过则随机裁剪")
+    parser.add_argument("--skip_variable_length", action="store_true", help="跳过变长数据集")
     
     return parser.parse_args()
 
@@ -165,8 +170,8 @@ def main():
         print(f"   Val samples:   {len(X_val)}")
         print(f"   Channels:      {X_train.shape[1]}")
         
-        train_dataset = UEAPretrainDataset(X_train)
-        val_dataset = UEAPretrainDataset(X_val)
+        train_dataset = UEAPretrainDataset(X_train, max_channels=args.max_channels, max_length=args.max_length)
+        val_dataset = UEAPretrainDataset(X_val, max_channels=args.max_channels, max_length=args.max_length)
         
         train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=True, 
@@ -187,7 +192,14 @@ def main():
         # 为简化，这里我们将 train_loader 视为 val_loader (仅用于打印 loss 趋势)
         # 实际生产中建议专门留出验证数据集
         train_loader = get_uea_pretrain_loader(
-            args.dataset_list, batch_size=args.batch_size, patch_size=args.patch_size, split="train", num_workers=args.num_workers
+            args.dataset_list, 
+            batch_size=args.batch_size, 
+            patch_size=args.patch_size, 
+            split="train", 
+            num_workers=args.num_workers,
+            max_channels=args.max_channels,
+            max_length=args.max_length,
+            skip_variable_length=args.skip_variable_length,
         )
         val_loader = train_loader 
     else:

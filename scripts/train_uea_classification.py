@@ -320,7 +320,7 @@ def main():
         json.dump(vars(args), f, indent=2)
     
     print("\n🔧 创建模型...")
-    tslanet_config = {"patch_size": 8}
+    tslanet_config = {"patch_size": 4}
     
     model = OpenTSLMSP(
         llm_id=args.llm_id,

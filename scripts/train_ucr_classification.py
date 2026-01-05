@@ -369,7 +369,7 @@ def main():
     # 创建模型
     print("\n🔧 创建模型...")
     tslanet_config = {
-        "patch_size": 8,  # TSLANet使用patch_size=8
+        "patch_size": 4,  # TSLANet使用patch_size=8
     }
     
     model = OpenTSLMSP(

@@ -213,7 +213,7 @@ if __name__ == "__main__":
     dataset = UEAClassificationDataset(
         split="train",
         EOS_TOKEN="<eos>",
-        dataset_name="Epilepsy",
+        dataset_name="AtrialFibrillation",
     )
     
     print(f"\nDataset size: {len(dataset)}")
@@ -225,7 +225,7 @@ if __name__ == "__main__":
         sample = dataset[0]
         print("\n" + "="*50)
         print("Sample keys:", sample.keys())
-        print("Pre-prompt:", sample["pre_prompt"][:300] + "..." if len(sample["pre_prompt"]) > 300 else sample["pre_prompt"])
+        print("Pre-prompt:", sample["pre_prompt"])
         print("Post-prompt:", sample["post_prompt"])
         print("Answer:", sample["answer"])
         print("Letter label:", sample.get("letter_label", "N/A"))
