@@ -92,6 +92,37 @@ class OpenTSLMSP(TimeSeriesLLM):
         for p in self.llm.parameters():
             p.requires_grad = False
 
+    def enable_gradient_checkpointing(self):
+        """
+        Enable gradient checkpointing for the LLM to reduce memory usage.
+        
+        This trades compute for memory by recomputing activations during
+        the backward pass instead of storing them.
+        """
+        if hasattr(self.llm, "gradient_checkpointing_enable"):
+            self.llm.gradient_checkpointing_enable()
+            print("✅ Gradient checkpointing enabled for LLM")
+        else:
+            print("⚠️ LLM does not support gradient_checkpointing_enable()")
+
+    def forward(self, batch: List[Dict[str, any]]) -> torch.Tensor:
+        """
+        Forward pass for DDP compatibility.
+        
+        This method wraps compute_loss to make the model compatible with
+        DistributedDataParallel, which requires forward() to be called
+        for proper gradient synchronization.
+        
+        Args:
+            batch: List of dictionaries containing the batch data
+            
+        Returns:
+            Loss tensor
+        """
+        return self.compute_loss(batch)
+
+
+
     def enable_lora(
         self,
         lora_r: int = 16,
