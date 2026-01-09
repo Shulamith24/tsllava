@@ -66,33 +66,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="M1: UEA多变量数据集分类训练")
     
     # 数据相关
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="Epilepsy",
-        help="UEA数据集名称",
-    )
+    parser.add_argument("--dataset", type=str, default="Epilepsy", help="UEA数据集名称")
     
     # 模型相关
-    parser.add_argument(
-        "--encoder_type",
-        type=str,
-        default="tslanet",
-        choices=["transformer_cnn", "tslanet"],
-        help="编码器类型",
-    )
-    parser.add_argument(
-        "--encoder_pretrained",
-        type=str,
-        default=None,
-        help="TSLANet预训练权重路径",
-    )
-    parser.add_argument(
-        "--llm_id",
-        type=str,
-        default="meta-llama/Llama-3.2-1B",
-        help="LLM模型ID",
-    )
+    parser.add_argument("--encoder_type", type=str, default="tslanet", choices=["transformer_cnn", "tslanet"], help="编码器类型")
+    parser.add_argument("--encoder_pretrained", type=str, default=None, help="TSLANet预训练权重路径")
+    parser.add_argument("--llm_id", type=str, default="meta-llama/Llama-3.2-1B", help="LLM模型ID")
     
     # LoRA相关
     parser.add_argument("--use_lora", action="store_true", help="是否使用LoRA")
@@ -101,7 +80,7 @@ def parse_args():
     
     # 训练相关
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=4, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
     parser.add_argument("--lr_encoder", type=float, default=2e-4, help="编码器学习率")
     parser.add_argument("--lr_projector", type=float, default=1e-4, help="投影层学习率")
     parser.add_argument("--lr_lora", type=float, default=1e-4, help="LoRA学习率")
@@ -110,16 +89,12 @@ def parse_args():
     parser.add_argument("--warmup_ratio", type=float, default=0.03, help="预热比例")
     
     # 保存相关
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="results/m1_uea_classification",
-        help="结果保存目录",
-    )
+    parser.add_argument("--save_dir", type=str, default="results/m1_uea_classification", help="结果保存目录")
     
     # DDP和梯度相关
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
+    parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
     
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
@@ -431,6 +406,13 @@ def main():
     if args.gradient_checkpointing:
         model.enable_gradient_checkpointing()
     
+    # 冻结编码器
+    if args.freeze_encoder:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        if rank == 0:
+            print("🧊 编码器参数已冻结")
+    
     # 启用LoRA
     if args.use_lora:
         if rank == 0:
@@ -460,10 +442,12 @@ def main():
     if rank == 0:
         print("\n⚙️ 创建优化器...")
     underlying_model = get_model(model)
-    param_groups = [
-        {"params": underlying_model.encoder.parameters(), "lr": args.lr_encoder},
-        {"params": underlying_model.projector.parameters(), "lr": args.lr_projector},
-    ]
+    
+    # 根据是否冻结编码器决定参数组
+    param_groups = []
+    if not args.freeze_encoder:
+        param_groups.append({"params": underlying_model.encoder.parameters(), "lr": args.lr_encoder})
+    param_groups.append({"params": underlying_model.projector.parameters(), "lr": args.lr_projector})
     
     if args.use_lora:
         lora_params = underlying_model.get_lora_parameters()

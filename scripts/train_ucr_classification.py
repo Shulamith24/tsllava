@@ -56,56 +56,29 @@ from opentslm.model_config import PATCH_SIZE
 
 def parse_args():
     parser = argparse.ArgumentParser(description="M1: UCR单数据集分类训练")
-    
+
+    #必须指定
+    parser.add_argument("--use_lora", action="store_true", help="是否使用LoRA")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
+    parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
+
     # 数据相关
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="ECG5000",
-        help="UCR数据集名称",
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="./data",
-        help="UCR数据根目录",
-    )
-    parser.add_argument(
-        "--val_ratio",
-        type=float,
-        default=0.1,
-        help="验证集比例（从训练集划分）",
-    )
+    parser.add_argument("--dataset", type=str, default="CricketZ", help="UCR数据集名称")
+    parser.add_argument("--data_path", type=str, default="./data", help="UCR数据根目录")
     
     # 模型相关
-    parser.add_argument(
-        "--encoder_type",
-        type=str,
-        default="tslanet",
-        choices=["transformer_cnn", "tslanet"],
-        help="编码器类型",
-    )
-    parser.add_argument(
-        "--encoder_pretrained",
-        type=str,
-        default=None,
-        help="TSLANet预训练权重路径",
-    )
-    parser.add_argument(
-        "--llm_id",
-        type=str,
-        default="meta-llama/Llama-3.2-1B",
-        help="LLM模型ID",
-    )
+    parser.add_argument("--encoder_type", type=str, default="tslanet", choices=["transformer_cnn", "tslanet"], help="编码器类型")
+    parser.add_argument("--encoder_pretrained", type=str, default=None, help="TSLANet预训练权重路径")
+    parser.add_argument("--llm_id", type=str, default="meta-llama/Llama-3.2-1B", help="LLM模型ID")
     
     # LoRA相关
-    parser.add_argument("--use_lora", action="store_true", help="是否使用LoRA")
+    # parser.add_argument("--use_lora", action="store_true", help="是否使用LoRA")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
     
     # 训练相关
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=4, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=32, help="批次大小")
     parser.add_argument("--lr_encoder", type=float, default=2e-4, help="编码器学习率")
     parser.add_argument("--lr_projector", type=float, default=1e-4, help="投影层学习率")
     parser.add_argument("--lr_lora", type=float, default=1e-4, help="LoRA学习率")
@@ -114,16 +87,12 @@ def parse_args():
     parser.add_argument("--warmup_ratio", type=float, default=0.03, help="预热比例")
     
     # 保存相关
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="results/m1_classification",
-        help="结果保存目录",
-    )
+    parser.add_argument("--save_dir", type=str, default="results/m1_classification", help="结果保存目录")
     
     # DDP和梯度相关
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
+    # parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
+    # parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
     
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
@@ -158,16 +127,6 @@ def cleanup_distributed():
 def get_model(model):
     """获取底层模型（兼容DDP包装）"""
     return model.module if hasattr(model, "module") else model
-
-
-def compute_loss_ddp(model, batch):
-    """
-    通过DDP包装的模型计算loss
-    
-    使用model(batch)调用forward方法（它内部调用compute_loss），
-    这样DDP可以正确追踪参数使用并同步梯度。
-    """
-    return model(batch)
 
 
 def set_seed(seed: int):
@@ -218,7 +177,6 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         EOS_TOKEN=eos_token,
         dataset_name=args.dataset,
         raw_data_path=args.data_path,
-        val_ratio=args.val_ratio,
     )
     
     val_dataset = UCRClassificationDataset(
@@ -226,7 +184,6 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         EOS_TOKEN=eos_token,
         dataset_name=args.dataset,
         raw_data_path=args.data_path,
-        val_ratio=args.val_ratio,
     )
     
     test_dataset = UCRClassificationDataset(
@@ -234,7 +191,6 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         EOS_TOKEN=eos_token,
         dataset_name=args.dataset,
         raw_data_path=args.data_path,
-        val_ratio=args.val_ratio,
     )
     
     # Collate函数
@@ -295,8 +251,8 @@ def train_one_epoch(
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}", disable=(rank != 0))
     for step, batch in enumerate(pbar):
         # 计算损失（缩放用于梯度累积）
-        # 注意：DDP梯度同步在backward()时自动进行
-        loss = compute_loss_ddp(model, batch)
+        # 使用model(batch)调用forward方法，DDP梯度同步在backward()时自动进行
+        loss = model(batch)
         loss = loss / gradient_accumulation_steps
         
         # 反向传播
@@ -469,6 +425,13 @@ def main():
     if args.gradient_checkpointing:
         model.enable_gradient_checkpointing()
     
+    # 冻结编码器
+    if args.freeze_encoder:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        if rank == 0:
+            print("🧊 编码器参数已冻结")
+    
     # 启用LoRA
     if args.use_lora:
         if rank == 0:
@@ -498,10 +461,12 @@ def main():
     if rank == 0:
         print("\n⚙️ 创建优化器...")
     underlying_model = get_model(model)
-    param_groups = [
-        {"params": underlying_model.encoder.parameters(), "lr": args.lr_encoder},
-        {"params": underlying_model.projector.parameters(), "lr": args.lr_projector},
-    ]
+    
+    # 根据是否冻结编码器决定参数组
+    param_groups = []
+    if not args.freeze_encoder:
+        param_groups.append({"params": underlying_model.encoder.parameters(), "lr": args.lr_encoder})
+    param_groups.append({"params": underlying_model.projector.parameters(), "lr": args.lr_projector})
     
     if args.use_lora:
         lora_params = underlying_model.get_lora_parameters()

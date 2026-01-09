@@ -393,9 +393,9 @@ class OpenTSLMSP(TimeSeriesLLM):
         inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
         B, L, H = inputs_embeds.size()
 
-        # tokenize answers
+        # tokenize answers,但不添加bos token
         ans_tok = self.tokenizer(
-            answers, return_tensors="pt", padding=True, truncation=True
+            answers, return_tensors="pt", padding=True, truncation=True,add_special_tokens=False
         )
         ans_ids = ans_tok.input_ids.to(self.device, non_blocking=True)
         ans_mask = ans_tok.attention_mask.to(self.device, non_blocking=True)
