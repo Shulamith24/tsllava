@@ -395,7 +395,7 @@ class OpenTSLMSP(TimeSeriesLLM):
 
         # tokenize answers,但不添加bos token
         ans_tok = self.tokenizer(
-            answers, return_tensors="pt", padding=True, truncation=True,add_special_tokens=False
+            answers, return_tensors="pt", padding=True, truncation=True, add_special_tokens=False
         )
         ans_ids = ans_tok.input_ids.to(self.device, non_blocking=True)
         ans_mask = ans_tok.attention_mask.to(self.device, non_blocking=True)

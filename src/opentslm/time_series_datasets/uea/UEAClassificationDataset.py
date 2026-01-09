@@ -20,6 +20,34 @@ from opentslm.time_series_datasets.QADataset import QADataset
 from opentslm.time_series_datasets.uea.uea_loader import load_uea_dataset, ensure_uea_data
 
 
+def index_to_excel_label(index: int) -> str:
+    """
+    将整数索引转换为类似Excel列名的字母标签。
+    
+    映射规则：
+    0-25: A, B, ..., Z
+    26-51: AA, AB, ..., AZ
+    52-77: BA, BB, ..., BZ
+    ...
+    
+    Args:
+        index: 非负整数索引 (从0开始)
+    
+    Returns:
+        对应的字母标签
+    """
+    if index < 0:
+        raise ValueError(f"Index must be non-negative, got {index}")
+    
+    if index < 26:
+        return chr(ord('A') + index)
+    else:
+        adjusted = index - 26
+        prefix_idx = adjusted // 26
+        suffix_idx = adjusted % 26
+        return chr(ord('A') + prefix_idx) + chr(ord('A') + suffix_idx)
+
+
 class UEAClassificationDataset(QADataset):
     """
     UEA多变量时间序列分类Dataset
@@ -75,8 +103,8 @@ class UEAClassificationDataset(QADataset):
         num_classes = len(all_labels)
         num_channels = X_train.shape[1]
         
-        # 创建标签到字母的映射
-        letters = list(string.ascii_uppercase)[:num_classes]
+        # 创建标签到字母的映射 (0->A, 1->B, ... 26->AA, 27->AB, ...)
+        letters = [index_to_excel_label(i) for i in range(num_classes)]
         label_to_letter = {label: letters[i] for i, label in enumerate(all_labels)}
         letter_to_label = {v: k for k, v in label_to_letter.items()}
         
