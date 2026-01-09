@@ -100,6 +100,7 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=5, help="每N轮评估一次")
     parser.add_argument("--early_stop", type=int, default=10, help="早停耐心值")
     parser.add_argument("--max_new_tokens", type=int, default=10, help="生成最大token数")
+    parser.add_argument("--eval_batch_size", type=int, default=8, help="评估批次大小")
     
     return parser.parse_args()
 
@@ -214,16 +215,19 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         collate_fn=collate_fn,
     )
     
+    # 评估用DataLoader（支持批量评估）
+    eval_batch_size = getattr(args, 'eval_batch_size', 8)
+    
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=eval_batch_size,
         shuffle=False,
         collate_fn=collate_fn,
     )
     
     test_loader = DataLoader(
         test_dataset,
-        batch_size=1,
+        batch_size=eval_batch_size,
         shuffle=False,
         collate_fn=collate_fn,
     )
