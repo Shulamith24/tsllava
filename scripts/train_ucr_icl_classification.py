@@ -186,25 +186,38 @@ def load_tslanet_for_retrieval(checkpoint_path: str, device: str):
     """加载TSLANet用于检索"""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", {})
+    encoder_state = checkpoint["encoder_state"]
+    patch_size = config.get("patch_size", 8)
+    
+    # 获取max_seq_len: 优先使用保存的值，否则从pos_embed推断
+    if "max_seq_len" in checkpoint:
+        max_seq_len = checkpoint["max_seq_len"]
+    else:
+        # 从pos_embed形状推断 (兼容旧版本checkpoint)
+        pos_embed_shape = encoder_state["pos_embed"].shape  # [1, num_patches, emb_dim]
+        num_patches = pos_embed_shape[1]
+        stride = patch_size // 2
+        max_seq_len = (num_patches - 1) * stride + patch_size
     
     # 创建encoder
     encoder = TSLANetEncoder(
         output_dim=config.get("emb_dim", 128),
         dropout=config.get("dropout", 0.15),
-        patch_size=config.get("patch_size", 8),
+        patch_size=patch_size,
         emb_dim=config.get("emb_dim", 128),
         depth=config.get("depth", 2),
-        max_seq_len=max(checkpoint.get("seq_len", 512) * 2, 4096)
+        max_seq_len=max_seq_len
     )
     
     # 加载权重
-    encoder.load_state_dict(checkpoint["encoder_state"])
+    encoder.load_state_dict(encoder_state)
     encoder = encoder.to(device)
     encoder.eval()
     
     print(f"✅ 加载TSLANet检索器: {checkpoint_path}")
     print(f"   序列长度: {checkpoint.get('seq_len', 'unknown')}")
     print(f"   类别数: {checkpoint.get('num_classes', 'unknown')}")
+    print(f"   max_seq_len: {max_seq_len}")
     
     return encoder, checkpoint
 

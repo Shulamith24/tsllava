@@ -423,7 +423,8 @@ def main():
             best_val_acc = val_results["accuracy"]
             patience_counter = 0
             
-            # 保存checkpoint
+            # 保存checkpoint (包含max_seq_len以便加载时使用)
+            max_seq_len = max(padded_seq_len, 512)
             checkpoint = {
                 "encoder_state": model.encoder.state_dict(),
                 "classifier_state": model.classifier.state_dict(),
@@ -431,6 +432,7 @@ def main():
                 "val_acc": best_val_acc,
                 "num_classes": num_classes,
                 "seq_len": seq_len,
+                "max_seq_len": max_seq_len,  # 保存用于加载
                 "label_to_idx": label_to_idx,
                 "config": vars(args)
             }
