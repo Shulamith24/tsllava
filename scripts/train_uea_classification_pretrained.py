@@ -55,9 +55,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 from opentslm.model.llm.OpenTSLM import OpenTSLM
+from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
 from opentslm.time_series_datasets.uea.UEAClassificationDataset import UEAClassificationDataset
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
-from opentslm.model_config import PATCH_SIZE
+from opentslm.model_config import PATCH_SIZE, ENCODER_OUTPUT_DIM
 
 
 def parse_args():
@@ -66,9 +67,20 @@ def parse_args():
     # 数据相关
     parser.add_argument("--dataset", type=str, default="Epilepsy", help="UEA数据集名称")
     
-    # 模型相关 - 使用预训练模型
-    parser.add_argument("--pretrained_model", type=str, required=True,
+    # 模型相关 - 使用HuggingFace预训练模型
+    parser.add_argument("--pretrained_model", type=str, default=None,
                         help="预训练模型ID (HuggingFace repo_id，如 OpenTSLM/llama-3.2-1b-m4-sp)")
+    
+    # 模型相关 - 使用本地checkpoint（如train_curriculum_pretrain.py产生的）
+    parser.add_argument("--local_checkpoint", type=str, default=None,
+                        help="本地checkpoint路径 (如 results/curriculum_pretrain/.../best_model.pt)")
+    parser.add_argument("--encoder_type", type=str, default="transformer_cnn",
+                        choices=["transformer_cnn", "tslanet"],
+                        help="编码器类型（使用local_checkpoint时必须指定）")
+    parser.add_argument("--llm_id", type=str, default="meta-llama/Llama-3.2-1B",
+                        help="LLM模型ID（使用local_checkpoint时需要）")
+    parser.add_argument("--tslanet_patch_size", type=int, default=8,
+                        help="TSLANet的patch_size（使用tslanet编码器时）")
     
     # LoRA相关 (默认启用)
     parser.add_argument("--no_lora", action="store_true", help="禁用LoRA（不推荐）")
@@ -389,25 +401,64 @@ def main():
     if world_size > 1:
         dist.barrier()
     
-    # 加载预训练模型
+    # 加载模型
     if rank == 0:
-        print("\n🔧 加载预训练模型...")
+        print("\n🔧 加载模型...")
     
-    # 使用OpenTSLM.load_pretrained加载stage2预训练模型
     use_lora = not args.no_lora
-    model = OpenTSLM.load_pretrained(
-        repo_id=args.pretrained_model,
-        device=device,
-        enable_lora=use_lora,
-    )
     
-    # 如果需要自定义LoRA参数
-    if use_lora:
-        if args.lora_r != 16 or args.lora_alpha != 32:
+    if args.local_checkpoint:
+        # 使用本地checkpoint加载（如train_curriculum_pretrain.py产生的）
+        if rank == 0:
+            print(f"📂 从本地checkpoint加载: {args.local_checkpoint}")
+            print(f"   编码器类型: {args.encoder_type}")
+            print(f"   LLM: {args.llm_id}")
+        
+        # 创建模型
+        tslanet_config = {
+            "patch_size": args.tslanet_patch_size,
+            "output_dim": ENCODER_OUTPUT_DIM,
+        }
+        model = OpenTSLMSP(
+            llm_id=args.llm_id,
+            device=device,
+            encoder_type=args.encoder_type,
+            tslanet_config=tslanet_config if args.encoder_type == "tslanet" else None,
+        )
+        
+        # 加载checkpoint权重
+        checkpoint = torch.load(args.local_checkpoint, map_location=device, weights_only=False)
+        model.encoder.load_state_dict(checkpoint["encoder_state"])
+        model.projector.load_state_dict(checkpoint["projector_state"])
+        if rank == 0:
+            print(f"✅ 已加载encoder和projector权重")
+        
+        # 启用LoRA
+        if use_lora:
+            model.enable_lora(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
+            # 尝试加载checkpoint中的LoRA权重（如果有）
+            model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
+    
+    elif args.pretrained_model:
+        # 使用HuggingFace预训练模型
+        if rank == 0:
+            print(f"📂 从HuggingFace加载: {args.pretrained_model}")
+        
+        model = OpenTSLM.load_pretrained(
+            repo_id=args.pretrained_model,
+            device=device,
+            enable_lora=use_lora,
+        )
+        
+        # 如果需要自定义LoRA参数
+        if use_lora and (args.lora_r != 16 or args.lora_alpha != 32):
             model.disable_lora()
             model.enable_lora(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
             if rank == 0:
                 print(f"📎 重新配置LoRA: r={args.lora_r}, alpha={args.lora_alpha}")
+    
+    else:
+        raise ValueError("必须指定 --pretrained_model 或 --local_checkpoint 之一")
     
     # 启用梯度检查点
     if args.gradient_checkpointing:
