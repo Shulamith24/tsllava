@@ -73,7 +73,7 @@ def parse_args():
     
     # 预训练阶段（可选）
     parser.add_argument("--pretrain", action="store_true", help="是否进行掩码预训练")
-    parser.add_argument("--pretrain_epochs", type=int, default=50, help="预训练轮数")
+    parser.add_argument("--pretrain_epochs", type=int, default=200, help="预训练轮数")
     parser.add_argument("--mask_ratio", type=float, default=0.4, help="掩码比例")
     
     # 保存相关
@@ -393,7 +393,7 @@ def main():
     # 训练阶段
     print("\n🚀 开始分类训练...")
     best_val_acc = 0.0
-    patience = 20
+    patience = 30
     patience_counter = 0
     loss_history = []
     

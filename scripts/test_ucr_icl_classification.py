@@ -89,7 +89,7 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
     
     # 测试相关
-    parser.add_argument("--batch_size", type=int, default=8, help="测试批次大小")
+    parser.add_argument("--batch_size", type=int, default=4, help="测试批次大小")
     parser.add_argument("--max_new_tokens", type=int, default=10, help="生成最大token数")
     
     # 保存相关
