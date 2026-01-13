@@ -42,6 +42,8 @@ from typing import List, Dict, Tuple, Optional, Literal, Any
 from torch.utils.data import Dataset
 
 from opentslm.prompt.text_time_series_prompt import TextTimeSeriesPrompt
+from opentslm.prompt.text_prompt import TextPrompt
+from opentslm.prompt.prompt_with_answer import PromptWithAnswer
 from opentslm.time_series_datasets.ucr.UCRClassificationDataset import index_to_excel_label
 
 
@@ -109,15 +111,16 @@ class UCRICLClassificationDataset(Dataset):
         Returns:
             Dict包含:
             - pre_prompt: 指令部分
-            - text_time_series_prompt_list: 时间序列prompt列表 (支持样本 + 查询样本)
+            - time_series: 时间序列列表
+            - time_series_text: 时间序列对应的文本描述列表
             - post_prompt: 查询提示部分
             - answer: 答案 (查询样本的标签)
-            - query_idx: 查询样本的索引
-            - query_label: 查询样本的原始标签
+            - letter_label: 字母标签
+            - original_label: 原始标签
         """
         # 获取query
         query_ts = self.time_series[idx]
-        query_label = self.labels[idx].item()
+        query_label = int(self.labels[idx].item())
         query_letter = self.label_to_letter[query_label]
         
         # 检索支持样本
@@ -144,6 +147,8 @@ class UCRICLClassificationDataset(Dataset):
         sample["query_label"] = query_label
         sample["support_indices"] = support_indices
         sample["support_labels"] = support_labels
+        sample["letter_label"] = query_letter
+        sample["original_label"] = query_label
         
         return sample
     
@@ -166,7 +171,7 @@ class UCRICLClassificationDataset(Dataset):
             support_labels: 支持样本的标签列表
         
         Returns:
-            包含pre_prompt, text_time_series_prompt_list, post_prompt, answer的字典
+            PromptWithAnswer.to_dict()格式的字典
         """
         # 预处理函数
         def preprocess_ts(ts: torch.Tensor) -> torch.Tensor:
@@ -196,34 +201,27 @@ Only output the class label.
         # ===== 时间序列prompt列表 =====
         text_time_series_prompt_list = []
         
-        # 添加支持样本
+        # 添加支持样本 - 每个样本包含文本描述(含标签)和时间序列
         for i, (support_ts, support_label) in enumerate(zip(support_ts_list, support_labels)):
             support_letter = self.label_to_letter[support_label]
             support_ts_processed = preprocess_ts(support_ts)
             
-            # 支持样本的文本描述
-            text_prompt = f"\nExample {i+1}:"
+            # 文本描述：包含示例编号和标签
+            text = f"\nExample {i+1} (Class: {support_letter}):"
             
             # 创建TextTimeSeriesPrompt
             ts_prompt = TextTimeSeriesPrompt(
-                text_prompt=text_prompt,
+                text=text,
                 time_series=support_ts_processed.tolist()
             )
             text_time_series_prompt_list.append(ts_prompt)
-            
-            # 添加标签 (作为纯文本prompt)
-            label_prompt = TextTimeSeriesPrompt(
-                text_prompt=f"\nClass: {support_letter}",
-                time_series=None
-            )
-            text_time_series_prompt_list.append(label_prompt)
         
         # 添加Query
         query_ts_processed = preprocess_ts(query_ts)
         
-        query_text_prompt = "\n\n[Query]\nQuery time series:"
+        query_text = "\n\n[Query]\nQuery time series:"
         query_ts_prompt = TextTimeSeriesPrompt(
-            text_prompt=query_text_prompt,
+            text=query_text,
             time_series=query_ts_processed.tolist()
         )
         text_time_series_prompt_list.append(query_ts_prompt)
@@ -234,14 +232,15 @@ Only output the class label.
         # ===== Answer =====
         answer = f" {query_letter}{self.eos_token}"
         
-        return {
-            "pre_prompt": pre_prompt,
-            "text_time_series_prompt_list": text_time_series_prompt_list,
-            "post_prompt": post_prompt,
-            "answer": answer,
-            "letter_label": query_letter,
-            "original_label": query_label
-        }
+        # 使用PromptWithAnswer构建标准格式
+        prompt_with_answer = PromptWithAnswer(
+            pre_prompt=TextPrompt(pre_prompt),
+            text_time_series_prompt_list=text_time_series_prompt_list,
+            post_prompt=TextPrompt(post_prompt),
+            answer=answer
+        )
+        
+        return prompt_with_answer.to_dict()
     
     @staticmethod
     def get_label_from_letter(letter: str, letter_to_label: Dict[str, int]) -> int:
