@@ -129,7 +129,8 @@ class TSLANetRetriever:
         query_idx: Optional[int] = None,
         k_shot: int = 1,
         top_m: int = 10,
-        exclude_query: bool = True
+        exclude_query: bool = True,
+        target_labels: Optional[List[int]] = None
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         """
         按类别检索支持样本
@@ -145,6 +146,7 @@ class TSLANetRetriever:
             k_shot: 每个类别选取的支持样本数
             top_m: 每个类别检索的候选数量
             exclude_query: 是否排除query自身
+            target_labels: 目标类别列表 (只从这些类别中检索, None表示检索所有类别)
         
         Returns:
             support_indices: 支持样本的全局索引列表
@@ -154,15 +156,21 @@ class TSLANetRetriever:
         if self.embeddings is None:
             raise RuntimeError("请先调用 build_index() 构建索引")
         
-        # 确保query_emb归一化
+        # 确定query_emb归一化
         query_emb = F.normalize(query_emb.cpu().unsqueeze(0), p=2, dim=-1).squeeze(0)
         
         support_indices = []
         support_ts = []
         support_labels = []
         
+        # 确定要检索的类别
+        if target_labels is not None:
+            classes_to_search = [cls for cls in target_labels if cls in self.class_indices]
+        else:
+            classes_to_search = sorted(self.class_indices.keys())
+        
         # 对每个类别检索
-        for cls in sorted(self.class_indices.keys()):
+        for cls in classes_to_search:
             cls_global_indices = self.class_indices[cls]
             
             if len(cls_global_indices) == 0:
@@ -208,7 +216,8 @@ class TSLANetRetriever:
         query_idx: Optional[int] = None,
         k_shot: int = 1,
         top_m: int = 10,
-        exclude_query: bool = True
+        exclude_query: bool = True,
+        target_labels: Optional[List[int]] = None
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         """
         给定query时间序列，检索支持样本
@@ -219,6 +228,7 @@ class TSLANetRetriever:
             k_shot: 每个类别选取的支持样本数
             top_m: 每个类别检索的候选数量
             exclude_query: 是否排除query自身
+            target_labels: 目标类别列表 (只从这些类别中检索, None表示检索所有类别)
         
         Returns:
             同 retrieve()
@@ -234,7 +244,7 @@ class TSLANetRetriever:
         
         query_emb = query_emb.squeeze(0).cpu()  # [emb_dim]
         
-        return self.retrieve(query_emb, query_idx, k_shot, top_m, exclude_query)
+        return self.retrieve(query_emb, query_idx, k_shot, top_m, exclude_query, target_labels)
     
     def save_index(self, path: str):
         """保存索引到文件"""

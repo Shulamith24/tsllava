@@ -90,6 +90,10 @@ def parse_args():
                         help="每个类别的支持样本数")
     parser.add_argument("--top_m", type=int, default=10,
                         help="每个类别检索的候选数量")
+    parser.add_argument("--max_episode_classes", type=int, default=None,
+                        help="每个episode最大类别数M (None表示使用全部类别)")
+    parser.add_argument("--min_episode_classes", type=int, default=2,
+                        help="每个episode最小类别数 (默认2)")
     
     # LoRA相关
     parser.add_argument("--no_lora", action="store_true", help="禁用LoRA")
@@ -263,7 +267,9 @@ def create_datasets(args, retriever, eos_token: str):
         top_m=args.top_m,
         eos_token=eos_token,
         split="train",
-        exclude_query=True
+        exclude_query=True,
+        max_episode_classes=args.max_episode_classes,
+        min_episode_classes=args.min_episode_classes
     )
     
     # 测试集也用训练集的索引进行检索
@@ -383,6 +389,8 @@ def main():
         print(f"数据集: {args.dataset}")
         print(f"K-shot: {args.k_shot}")
         print(f"Top-M: {args.top_m}")
+        if args.max_episode_classes:
+            print(f"Episode类别数: {args.min_episode_classes} ~ {args.max_episode_classes}")
         print("=" * 60)
     
     set_seed(args.seed + rank)

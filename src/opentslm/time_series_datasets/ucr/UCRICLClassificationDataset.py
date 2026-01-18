@@ -37,6 +37,7 @@ Class:
 Answer: A (或B, C, ...)
 """
 
+import random
 import torch
 from typing import List, Dict, Tuple, Optional, Literal, Any
 from torch.utils.data import Dataset
@@ -63,6 +64,8 @@ class UCRICLClassificationDataset(Dataset):
         eos_token: 结束token
         split: 数据划分 (train/test)
         exclude_query: 是否排除query自身 (训练时为True)
+        max_episode_classes: 每个episode最多采样的类别数 (None表示使用全部类别)
+        min_episode_classes: 每个episode最少采样的类别数 (默认2)
     """
     
     def __init__(
@@ -75,7 +78,9 @@ class UCRICLClassificationDataset(Dataset):
         top_m: int = 10,
         eos_token: str = "</s>",
         split: Literal["train", "test"] = "train",
-        exclude_query: bool = True
+        exclude_query: bool = True,
+        max_episode_classes: Optional[int] = None,
+        min_episode_classes: int = 2
     ):
         self.time_series = time_series
         self.labels = labels
@@ -87,11 +92,15 @@ class UCRICLClassificationDataset(Dataset):
         self.split = split
         self.exclude_query = exclude_query if split == "train" else False
         
+        # 动态类别采样参数
+        self.max_episode_classes = max_episode_classes
+        self.min_episode_classes = min_episode_classes
+        
         # 获取类别信息
         self.unique_labels = sorted(torch.unique(labels).tolist())
         self.num_classes = len(self.unique_labels)
         
-        # 创建标签到字母的映射
+        # 创建标签到字母的映射 (全局映射，用于测试集或不启用动态采样时)
         self.label_to_letter = {
             label: index_to_excel_label(i) 
             for i, label in enumerate(self.unique_labels)
@@ -100,9 +109,57 @@ class UCRICLClassificationDataset(Dataset):
         
         # 类别字母列表
         self.class_letters = [self.label_to_letter[l] for l in self.unique_labels]
+        
+        # 是否启用动态类别采样 (只在训练时启用)
+        self.enable_dynamic_sampling = (
+            split == "train" and 
+            max_episode_classes is not None and 
+            max_episode_classes < self.num_classes
+        )
     
     def __len__(self):
         return len(self.time_series)
+    
+    def _sample_episode_classes(self, query_label: int) -> Tuple[List[int], Dict[int, str]]:
+        """
+        为当前episode采样类别并创建局部标签映射
+        
+        Args:
+            query_label: 查询样本的标签（必须包含在采样类别中）
+        
+        Returns:
+            episode_labels: 本episode采样的类别列表（已排序）
+            episode_label_to_letter: 局部的标签到字母映射（从A开始）
+        """
+        # 确定采样的类别数量
+        min_classes = max(2, self.min_episode_classes)
+        max_classes = min(self.max_episode_classes, self.num_classes)
+        
+        if min_classes >= max_classes:
+            n_classes = max_classes
+        else:
+            n_classes = random.randint(min_classes, max_classes)
+        
+        # 必须包含query_label
+        other_labels = [l for l in self.unique_labels if l != query_label]
+        
+        # 从其他类别中随机采样
+        n_sample_others = n_classes - 1
+        if n_sample_others >= len(other_labels):
+            sampled_others = other_labels
+        else:
+            sampled_others = random.sample(other_labels, n_sample_others)
+        
+        # 合并并排序
+        episode_labels = sorted([query_label] + sampled_others)
+        
+        # 创建局部映射：从A开始重新编号
+        episode_label_to_letter = {
+            label: index_to_excel_label(i)
+            for i, label in enumerate(episode_labels)
+        }
+        
+        return episode_labels, episode_label_to_letter
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
@@ -121,25 +178,36 @@ class UCRICLClassificationDataset(Dataset):
         # 获取query
         query_ts = self.time_series[idx]
         query_label = int(self.labels[idx].item())
-        query_letter = self.label_to_letter[query_label]
         
-        # 检索支持样本
+        # 动态类别采样 (仅训练时)
+        if self.enable_dynamic_sampling:
+            episode_labels, episode_label_to_letter = self._sample_episode_classes(query_label)
+        else:
+            episode_labels = self.unique_labels
+            episode_label_to_letter = self.label_to_letter
+        
+        query_letter = episode_label_to_letter[query_label]
+        
+        # 检索支持样本 (只从episode包含的类别中检索)
         query_idx = idx if self.exclude_query else None
         support_indices, support_ts_list, support_labels = self.retriever.retrieve_for_query(
             query_ts,
             query_idx=query_idx,
             k_shot=self.k_shot,
             top_m=self.top_m,
-            exclude_query=self.exclude_query
+            exclude_query=self.exclude_query,
+            target_labels=episode_labels if self.enable_dynamic_sampling else None
         )
         
-        # 构建prompt
+        # 构建prompt (使用局部映射)
         sample = self._build_icl_prompt(
             query_ts=query_ts,
             query_label=query_label,
             query_letter=query_letter,
             support_ts_list=support_ts_list,
-            support_labels=support_labels
+            support_labels=support_labels,
+            episode_labels=episode_labels,
+            episode_label_to_letter=episode_label_to_letter
         )
         
         # 添加元信息
@@ -149,6 +217,8 @@ class UCRICLClassificationDataset(Dataset):
         sample["support_labels"] = support_labels
         sample["letter_label"] = query_letter
         sample["original_label"] = query_label
+        sample["episode_labels"] = episode_labels  # 本episode的类别
+        sample["episode_num_classes"] = len(episode_labels)  # 本episode的类别数
         
         return sample
     
@@ -158,7 +228,9 @@ class UCRICLClassificationDataset(Dataset):
         query_label: int,
         query_letter: str,
         support_ts_list: List[torch.Tensor],
-        support_labels: List[int]
+        support_labels: List[int],
+        episode_labels: Optional[List[int]] = None,
+        episode_label_to_letter: Optional[Dict[int, str]] = None
     ) -> Dict[str, Any]:
         """
         构建ICL prompt
@@ -169,10 +241,21 @@ class UCRICLClassificationDataset(Dataset):
             query_letter: 查询样本的字母标签
             support_ts_list: 支持样本的时间序列列表
             support_labels: 支持样本的标签列表
+            episode_labels: 本episode的类别列表 (动态采样时使用)
+            episode_label_to_letter: 本episode的标签映射 (动态采样时使用)
         
         Returns:
             PromptWithAnswer.to_dict()格式的字典
         """
+        # 使用传入的映射或默认全局映射
+        if episode_label_to_letter is None:
+            episode_label_to_letter = self.label_to_letter
+        if episode_labels is None:
+            episode_labels = self.unique_labels
+        
+        episode_num_classes = len(episode_labels)
+        episode_class_letters = [episode_label_to_letter[l] for l in episode_labels]
+        
         # 预处理函数
         def preprocess_ts(ts: torch.Tensor) -> torch.Tensor:
             """z-normalization"""
@@ -186,12 +269,12 @@ class UCRICLClassificationDataset(Dataset):
                 ts = ts - mean
             return ts
         
-        # 构建类别字符串
-        classes_str = ", ".join(self.class_letters)
+        # 构建类别字符串 (使用episode的局部类别)
+        classes_str = ", ".join(episode_class_letters)
         
         # ===== Pre-prompt =====
         pre_prompt = f"""You are a time series classifier for the {self.dataset_name} dataset.
-This task has {self.num_classes} possible classes: {classes_str}.
+This task has {episode_num_classes} possible classes: {classes_str}.
 
 Based on the following labeled examples, classify the final query time series.
 Only output the class label.
@@ -203,7 +286,8 @@ Only output the class label.
         
         # 添加支持样本 - 每个样本包含文本描述(含标签)和时间序列
         for i, (support_ts, support_label) in enumerate(zip(support_ts_list, support_labels)):
-            support_letter = self.label_to_letter[support_label]
+            # 使用局部映射获取字母标签
+            support_letter = episode_label_to_letter[support_label]
             support_ts_processed = preprocess_ts(support_ts)
             
             # 文本描述：包含示例编号和标签
