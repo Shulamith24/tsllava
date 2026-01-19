@@ -202,20 +202,39 @@ def add_class_tokens_to_model(model, num_classes: int, device: str, rank: int = 
     if rank == 0:
         print(f"   Vocabulary size: {old_vocab_size} -> {new_vocab_size}")
     
-    # 初始化新token的embedding（使用已有token的均值）
+    # 改进的初始化：每个类别token使用不同的初始化
+    # 从已有token中随机采样，并添加小的扰动
     with torch.no_grad():
         embedding = model.llm.get_input_embeddings()
+        lm_head = model.llm.lm_head
+        
         if num_added > 0:
-            old_mean = embedding.weight[:-num_added].mean(dim=0)
-            embedding.weight[-num_added:] = old_mean
+            # 获取已有embedding的统计信息
+            old_embeddings = embedding.weight[:-num_added]
+            emb_mean = old_embeddings.mean(dim=0)
+            emb_std = old_embeddings.std(dim=0)
+            
+            # 为每个类别token生成不同的初始化
+            for i in range(num_added):
+                # 方法：均值 + 随机扰动 (扰动幅度为标准差的10%)
+                noise = torch.randn_like(emb_mean) * emb_std * 0.1
+                embedding.weight[-num_added + i] = emb_mean + noise
             
             # 同样处理lm_head
-            lm_head = model.llm.lm_head
-            old_head_mean = lm_head.weight[:-num_added].mean(dim=0)
-            lm_head.weight[-num_added:] = old_head_mean
+            old_head = lm_head.weight[:-num_added]
+            head_mean = old_head.mean(dim=0)
+            head_std = old_head.std(dim=0)
+            
+            for i in range(num_added):
+                noise = torch.randn_like(head_mean) * head_std * 0.1
+                lm_head.weight[-num_added + i] = head_mean + noise
             
             if rank == 0:
-                print(f"   Initialized new token embeddings with mean of existing tokens")
+                print(f"   Initialized {num_added} class tokens with mean + random perturbation")
+    
+    # 确保新token的embedding可训练
+    embedding.weight.requires_grad = True
+    lm_head.weight.requires_grad = True
     
     # 获取token IDs
     class_token_ids = [model.tokenizer.convert_tokens_to_ids(t) for t in class_tokens]
@@ -633,6 +652,17 @@ def main():
         lora_params = underlying_model.get_lora_parameters()
         if lora_params:
             param_groups.append({"params": lora_params, "lr": args.lr_lora})
+    
+    # 添加新增的类别token的embedding和lm_head权重到优化器
+    # 这些权重需要更高的学习率来快速学习
+    embedding_weight = underlying_model.llm.get_input_embeddings().weight
+    lm_head_weight = underlying_model.llm.lm_head.weight
+    param_groups.append({
+        "params": [embedding_weight, lm_head_weight], 
+        "lr": args.lr_lora * 2  # 使用更高的学习率
+    })
+    if rank == 0:
+        print(f"   Added embedding and lm_head to optimizer (lr={args.lr_lora * 2:.2e})")
     
     optimizer = AdamW(param_groups, weight_decay=args.weight_decay)
     
