@@ -9,6 +9,7 @@ M2: UCR单数据集分类训练（基于Stage2预训练模型）
 
 加载curriculum learning的stage2预训练模型进行分类微调。
 编码器和投影层解冻，LLM使用LoRA训练。
+使用特殊类别token: <c0>, <c1>, ... <cK-1>
 
 使用方法：
     python scripts/train_ucr_classification_pretrained.py \
@@ -22,6 +23,8 @@ M2: UCR单数据集分类训练（基于Stage2预训练模型）
 - Encoder LR: 2e-4
 - Projector LR: 1e-4
 - LoRA LR: 1e-4
+- 使用特殊类别token (<c0>, <c1>, ...) 替代字母标签
+- 约束解码：只允许输出类别token + EOS
 """
 
 import os
@@ -40,7 +43,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup, LogitsProcessor, LogitsProcessorList
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -105,7 +108,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda", help="设备")
     parser.add_argument("--eval_every", type=int, default=5, help="每N轮评估一次")
     parser.add_argument("--early_stop", type=int, default=10, help="早停耐心值")
-    parser.add_argument("--max_new_tokens", type=int, default=10, help="生成最大token数")
+    parser.add_argument("--max_new_tokens", type=int, default=2, help="生成最大token数（类别token + EOS）")
     parser.add_argument("--eval_batch_size", type=int, default=8, help="评估批次大小")
     
     return parser.parse_args()
@@ -145,35 +148,97 @@ def set_seed(seed: int):
 
 def calculate_accuracy(predictions: List[str], labels: List[str]) -> float:
     """
-    计算分类准确率
+    计算分类准确率 - 适配特殊token格式 (<c0>, <c1>, ...)
     
-    对生成文本进行后处理，提取预测标签并与真实标签比较
+    直接比较生成的token与真实标签
     """
+    import re
     correct = 0
     for pred, label in zip(predictions, labels):
-        # 清理预测文本，提取最后一个字母
         pred_clean = pred.strip()
+        label_clean = label.strip()
         
-        # 尝试多种方式提取标签
-        pred_label = None
+        # 尝试从预测中提取 <cN> 格式的token
+        match = re.search(r'<c\d+>', pred_clean)
+        if match:
+            pred_token = match.group()
+        else:
+            # 如果没有找到，使用整个预测
+            pred_token = pred_clean
         
-        # 1. 如果预测就是单个字母
-        if len(pred_clean) == 1 and pred_clean.isalpha():
-            pred_label = pred_clean.upper()
-        # 2. 取最后一个单词的第一个字母
-        elif pred_clean:
-            words = pred_clean.split()
-            if words:
-                last_word = words[-1].strip(".,!?:;")
-                if last_word and last_word[0].isalpha():
-                    pred_label = last_word[0].upper()
-        
-        # 比较
-        label_clean = label.strip().upper()
-        if pred_label == label_clean:
+        # 直接比较
+        if pred_token == label_clean:
             correct += 1
     
     return correct / len(predictions) if predictions else 0.0
+
+
+def add_class_tokens_to_model(model, num_classes: int, device: str, rank: int = 0):
+    """
+    添加类别特殊token到tokenizer和embedding层
+    
+    Args:
+        model: OpenTSLMSP 模型
+        num_classes: 类别数量
+        device: 设备
+        rank: DDP rank
+    
+    Returns:
+        class_tokens: 类别token列表 ['<c0>', '<c1>', ...]
+        class_token_ids: 对应的token ID列表
+    """
+    class_tokens = [f"<c{i}>" for i in range(num_classes)]
+    
+    # 添加到tokenizer
+    num_added = model.tokenizer.add_tokens(class_tokens, special_tokens=True)
+    if rank == 0:
+        print(f"✅ Added {num_added} class tokens to tokenizer")
+    
+    # 调整embedding大小
+    old_vocab_size = model.llm.get_input_embeddings().weight.shape[0]
+    model.llm.resize_token_embeddings(len(model.tokenizer))
+    new_vocab_size = model.llm.get_input_embeddings().weight.shape[0]
+    
+    if rank == 0:
+        print(f"   Vocabulary size: {old_vocab_size} -> {new_vocab_size}")
+    
+    # 初始化新token的embedding（使用已有token的均值）
+    with torch.no_grad():
+        embedding = model.llm.get_input_embeddings()
+        if num_added > 0:
+            old_mean = embedding.weight[:-num_added].mean(dim=0)
+            embedding.weight[-num_added:] = old_mean
+            
+            # 同样处理lm_head
+            lm_head = model.llm.lm_head
+            old_head_mean = lm_head.weight[:-num_added].mean(dim=0)
+            lm_head.weight[-num_added:] = old_head_mean
+            
+            if rank == 0:
+                print(f"   Initialized new token embeddings with mean of existing tokens")
+    
+    # 获取token IDs
+    class_token_ids = [model.tokenizer.convert_tokens_to_ids(t) for t in class_tokens]
+    if rank == 0:
+        print(f"   Class token IDs: {class_token_ids[:5]}..." if len(class_token_ids) > 5 else f"   Class token IDs: {class_token_ids}")
+    
+    return class_tokens, class_token_ids
+
+
+class AllowedTokensLogitsProcessor(LogitsProcessor):
+    """
+    约束解码的Logits处理器：只允许特定token被生成
+    """
+    def __init__(self, allowed_token_ids: List[int]):
+        self.allowed_token_ids = set(allowed_token_ids)
+    
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        # 创建mask，只保留允许的token
+        mask = torch.full_like(scores, float('-inf'))
+        for token_id in self.allowed_token_ids:
+            if token_id < scores.shape[-1]:
+                mask[:, token_id] = 0
+        return scores + mask
 
 
 def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0):
@@ -299,10 +364,21 @@ def evaluate(
     model,
     data_loader: DataLoader,
     max_new_tokens: int,
+    class_token_ids: List[int] | None = None,
     desc: str = "Evaluating",
     rank: int = 0,
 ) -> Dict[str, Any]:
-    """评估模型"""
+    """
+    评估模型
+    
+    Args:
+        model: 模型
+        data_loader: 数据加载器
+        max_new_tokens: 最大生成token数
+        class_token_ids: 类别token的ID列表，用于约束解码
+        desc: 进度条描述
+        rank: DDP rank
+    """
     model.eval()
     underlying_model = get_model(model)
     
@@ -311,14 +387,42 @@ def evaluate(
     total_loss = 0.0
     num_batches = 0
     
+    # 设置约束解码处理器
+    logits_processor = None
+    if class_token_ids is not None:
+        eos_token_id = underlying_model.tokenizer.eos_token_id
+        allowed_ids = class_token_ids + [eos_token_id]
+        logits_processor = LogitsProcessorList([AllowedTokensLogitsProcessor(allowed_ids)])
+    
     for batch in tqdm(data_loader, desc=desc, disable=(rank != 0)):
         # 评估时不需要梯度同步，所以可以直接调用底层模型
         loss = underlying_model.compute_loss(batch)
         total_loss += loss.item()
         num_batches += 1
         
-        # 生成预测
-        predictions = underlying_model.generate(batch, max_new_tokens=max_new_tokens)
+        # 生成预测（使用约束解码）
+        if logits_processor is not None:
+            inputs_embeds, attention_mask = underlying_model.pad_and_apply_batch(batch)
+            gen_ids = underlying_model.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                logits_processor=logits_processor,
+                do_sample=False,
+            )
+            predictions = underlying_model.tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
+            # 清理多余的特殊token，保留<cN>格式
+            import re
+            cleaned_predictions = []
+            for p in predictions:
+                match = re.search(r'<c\d+>', p)
+                if match:
+                    cleaned_predictions.append(match.group())
+                else:
+                    cleaned_predictions.append(p.strip())
+            predictions = cleaned_predictions
+        else:
+            predictions = underlying_model.generate(batch, max_new_tokens=max_new_tokens)
         
         # 收集结果
         for sample, pred in zip(batch, predictions):
@@ -505,6 +609,15 @@ def main():
         print(f"   Val batches: {len(val_loader)}")
         print(f"   Test batches: {len(test_loader)}")
     
+    # 添加类别特殊token到模型
+    if rank == 0:
+        print("\n🎯 添加类别token...")
+    num_classes = UCRClassificationDataset.get_num_classes()
+    underlying_model_for_tokens = get_model(model)
+    class_tokens, class_token_ids = add_class_tokens_to_model(
+        underlying_model_for_tokens, num_classes, device, rank
+    )
+    
     # 创建优化器
     if rank == 0:
         print("\n⚙️ 创建优化器...")
@@ -566,7 +679,10 @@ def main():
                     print(f"\n📊 Epoch {epoch} 评估...")
                 
                 # 验证集评估
-                val_results = evaluate(model, val_loader, args.max_new_tokens, "Validating", rank)
+                val_results = evaluate(
+                    model, val_loader, args.max_new_tokens, 
+                    class_token_ids=class_token_ids, desc="Validating", rank=rank
+                )
                 val_loss = val_results["loss"]
                 val_acc = val_results["accuracy"]
                 
@@ -629,7 +745,10 @@ def main():
             underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
             underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
             
-            test_results = evaluate(model, test_loader, args.max_new_tokens, "Testing", rank)
+            test_results = evaluate(
+                model, test_loader, args.max_new_tokens,
+                class_token_ids=class_token_ids, desc="Testing", rank=rank
+            )
             
             print(f"\n✅ 测试结果:")
             print(f"   Test Loss: {test_results['loss']:.4f}")

@@ -8,7 +8,7 @@ UCR单数据集分类Dataset
 
 用于M1实验：验证时序-LLM通路的有监督分类能力。
 使用LLaVA范式（Soft Prompt）进行指令式分类。
-标签映射为A, B, C, ...格式。
+标签映射为特殊token格式: <c0>, <c1>, ...
 """
 
 import os
@@ -22,46 +22,33 @@ from opentslm.time_series_datasets.QADataset import QADataset
 from opentslm.time_series_datasets.ucr.ucr_loader import load_ucr_dataset, ensure_ucr_data
 
 
-def index_to_excel_label(index: int) -> str:
+def index_to_class_token(index: int) -> str:
     """
-    将整数索引转换为类似Excel列名的字母标签。
+    将整数索引转换为特殊类别token。
     
     映射规则：
-    0-25: A, B, ..., Z
-    26-51: AA, AB, ..., AZ
-    52-77: BA, BB, ..., BZ
+    0 -> <c0>
+    1 -> <c1>
     ...
+    K-1 -> <cK-1>
     
     Args:
         index: 非负整数索引 (从0开始)
     
     Returns:
-        对应的字母标签
+        对应的特殊类别token
     
     Examples:
-        >>> index_to_excel_label(0)
-        'A'
-        >>> index_to_excel_label(25)
-        'Z'
-        >>> index_to_excel_label(26)
-        'AA'
-        >>> index_to_excel_label(51)
-        'AZ'
-        >>> index_to_excel_label(52)
-        'BA'
+        >>> index_to_class_token(0)
+        '<c0>'
+        >>> index_to_class_token(5)
+        '<c5>'
+        >>> index_to_class_token(25)
+        '<c25>'
     """
     if index < 0:
         raise ValueError(f"Index must be non-negative, got {index}")
-    
-    if index < 26:
-        return chr(ord('A') + index)
-    else:
-        # 26-51 -> AA-AZ (prefix_idx=0, suffix_idx=0-25)
-        # 52-77 -> BA-BZ (prefix_idx=1, suffix_idx=0-25)
-        adjusted = index - 26
-        prefix_idx = adjusted // 26
-        suffix_idx = adjusted % 26
-        return chr(ord('A') + prefix_idx) + chr(ord('A') + suffix_idx)
+    return f"<c{index}>"
 
 
 class UCRClassificationDataset(QADataset):
@@ -70,17 +57,16 @@ class UCRClassificationDataset(QADataset):
     
     Prompt格式：
     ─────────────────────────────────────
-    You are a time series classifier for the {dataset_name} dataset.
-    This dataset contains {num_classes} classes: A, B, C, ...
-    Analyze the time series and output ONLY the single letter label.
+    Classify the time series into one of {num_classes} classes.
+    Output only the class token.
 
     Time series:
     <TS_TOKENS>
     
-    Label:
+    Class:
     ─────────────────────────────────────
     
-    Answer: A (或B, C, ...)
+    Answer: <c0> (或 <c1>, <c2>, ...)
     
     Args:
         dataset_name: UCR数据集名称 (e.g. "ECG5000")
@@ -92,10 +78,10 @@ class UCRClassificationDataset(QADataset):
     
     # 类变量存储数据集信息
     _dataset_name: str = None
-    _label_to_letter: dict = None
-    _letter_to_label: dict = None
+    _label_to_token: dict = None
+    _token_to_label: dict = None
     _num_classes: int = None
-    _class_letters: List[str] = None
+    _class_tokens: List[str] = None
     
     def __init__(
         self,
@@ -133,21 +119,21 @@ class UCRClassificationDataset(QADataset):
         all_labels = sorted(train_df["label"].unique().tolist())
         num_classes = len(all_labels)
         
-        # 创建标签到字母的映射 (0->A, 1->B, ... 26->AA, 27->AB, ...)
-        letters = [index_to_excel_label(i) for i in range(num_classes)]
-        label_to_letter = {label: letters[i] for i, label in enumerate(all_labels)}
-        letter_to_label = {v: k for k, v in label_to_letter.items()}
+        # 创建标签到特殊token的映射 (0-><c0>, 1-><c1>, ...)
+        tokens = [index_to_class_token(i) for i in range(num_classes)]
+        label_to_token = {label: tokens[i] for i, label in enumerate(all_labels)}
+        token_to_label = {v: k for k, v in label_to_token.items()}
         
         # 存储类变量
         UCRClassificationDataset._dataset_name = dataset_name
-        UCRClassificationDataset._label_to_letter = label_to_letter
-        UCRClassificationDataset._letter_to_label = letter_to_label
+        UCRClassificationDataset._label_to_token = label_to_token
+        UCRClassificationDataset._token_to_label = token_to_label
         UCRClassificationDataset._num_classes = num_classes
-        UCRClassificationDataset._class_letters = letters
+        UCRClassificationDataset._class_tokens = tokens
         
         print(f"📊 Dataset: {dataset_name}")
         print(f"   Classes: {num_classes}")
-        print(f"   Label mapping: {label_to_letter}")
+        print(f"   Label mapping: {label_to_token}")
         print(f"   Train samples: {len(train_df)}")
         print(f"   Test samples: {len(test_df)}")
         print(f"   (Validation = Test)")
@@ -162,28 +148,23 @@ class UCRClassificationDataset(QADataset):
     
     def _get_pre_prompt(self, row) -> str:
         """返回预提示文本"""
-        dataset_name = UCRClassificationDataset._dataset_name
         num_classes = UCRClassificationDataset._num_classes
-        class_letters = UCRClassificationDataset._class_letters
         
-        classes_str = ", ".join(class_letters)
-        
-        prompt = f"""You are a time series classifier for the {dataset_name} dataset.
-        This dataset contains {num_classes} classes: {classes_str}.
-        Analyze the time series pattern and output ONLY the single letter label.
+        prompt = f"""Classify the time series into one of {num_classes} classes.
+Output only the class token.
 
-        Time series data:"""
+Time series data:"""
         return prompt
     
     def _get_post_prompt(self, row) -> str:
         """返回后提示文本"""
-        return "Label:"
+        return "\nClass:"
     
     def _get_answer(self, row) -> str:
-        """返回答案（字母标签）"""
+        """返回答案（特殊类别token）"""
         original_label = row["label"]
-        letter_label = UCRClassificationDataset._label_to_letter[original_label]
-        return letter_label
+        class_token = UCRClassificationDataset._label_to_token[original_label]
+        return class_token
     
     def _get_text_time_series_prompt_list(self, row) -> List[TextTimeSeriesPrompt]:
         """将时间序列转换为TextTimeSeriesPrompt列表"""
@@ -216,23 +197,28 @@ class UCRClassificationDataset(QADataset):
         sample = super()._format_sample(row)
         # 保存原始标签用于评估
         sample["original_label"] = row["label"]
-        sample["letter_label"] = UCRClassificationDataset._label_to_letter[row["label"]]
+        sample["class_token"] = UCRClassificationDataset._label_to_token[row["label"]]
         return sample
     
     @staticmethod
-    def get_labels() -> List[str]:
-        """返回所有类别的字母标签"""
-        return UCRClassificationDataset._class_letters or []
+    def get_class_tokens() -> List[str]:
+        """返回所有类别的特殊token"""
+        return UCRClassificationDataset._class_tokens or []
+    
+    @staticmethod
+    def get_num_classes() -> int:
+        """返回类别数量"""
+        return UCRClassificationDataset._num_classes or 0
     
     @staticmethod
     def get_label_mapping() -> dict:
-        """返回原始标签到字母的映射"""
-        return UCRClassificationDataset._label_to_letter or {}
+        """返回原始标签到特殊token的映射"""
+        return UCRClassificationDataset._label_to_token or {}
     
     @staticmethod
-    def letter_to_original(letter: str) -> int:
-        """将字母标签转换回原始标签"""
-        return UCRClassificationDataset._letter_to_label.get(letter, -1)
+    def token_to_original(token: str) -> int:
+        """将特殊token转换回原始标签"""
+        return UCRClassificationDataset._token_to_label.get(token, -1)
 
 
 # 测试
@@ -247,7 +233,7 @@ if __name__ == "__main__":
     )
     
     print(f"\nDataset size: {len(dataset)}")
-    print(f"Labels: {UCRClassificationDataset.get_labels()}")
+    print(f"Class tokens: {UCRClassificationDataset.get_class_tokens()}")
     print(f"Label mapping: {UCRClassificationDataset.get_label_mapping()}")
     
     # 查看样本
@@ -258,6 +244,6 @@ if __name__ == "__main__":
         print("Pre-prompt:", sample["pre_prompt"])
         print("Post-prompt:", sample["post_prompt"])
         print("Answer:", sample["answer"])
-        print("Letter label:", sample.get("letter_label", "N/A"))
+        print("Class token:", sample.get("class_token", "N/A"))
         print("Original label:", sample.get("original_label", "N/A"))
         print("Time series text:", sample.get("time_series_text", ["N/A"])[0][:100] + "...")
