@@ -109,7 +109,7 @@ def parse_args():
     parser.add_argument("--eval_every", type=int, default=5, help="每N轮评估一次")
     parser.add_argument("--early_stop", type=int, default=10, help="早停耐心值")
     parser.add_argument("--max_new_tokens", type=int, default=2, help="生成最大token数（类别token + EOS）")
-    parser.add_argument("--eval_batch_size", type=int, default=8, help="评估批次大小")
+    parser.add_argument("--eval_batch_size", type=int, default=32, help="评估批次大小")
     
     return parser.parse_args()
 
@@ -306,12 +306,25 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
     )
     
     # 评估用DataLoader（支持批量评估）
+    # 注意：DDP 模式下评估也需要 DistributedSampler 以避免死锁
     eval_batch_size = getattr(args, 'eval_batch_size', 8)
+    
+    val_sampler = None
+    test_sampler = None
+    if world_size > 1:
+        # drop_last=True 确保所有 rank 处理相同数量的批次，避免 NCCL 死锁
+        val_sampler = DistributedSampler(
+            val_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=True
+        )
+        test_sampler = DistributedSampler(
+            test_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=True
+        )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=collate_fn,
     )
     
@@ -319,6 +332,7 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         test_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
+        sampler=test_sampler,
         collate_fn=collate_fn,
     )
     
