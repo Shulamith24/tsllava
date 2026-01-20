@@ -260,6 +260,23 @@ class AllowedTokensLogitsProcessor(LogitsProcessor):
         return scores + mask
 
 
+class IndexedDataset(torch.utils.data.Dataset):
+    """
+    为数据集包装一个索引，用于分布式评估时的去重
+    """
+    def __init__(self, dataset):
+        self.dataset = dataset
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        # 添加原始索引到样本中
+        sample["_sample_idx"] = idx
+        return sample
+
+
 def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0):
     """创建数据加载器"""
     # 创建数据集
@@ -284,17 +301,30 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         raw_data_path=args.data_path,
     )
     
+    # 用IndexedDataset包装评估数据集，为每个样本添加索引
+    indexed_val_dataset = IndexedDataset(val_dataset)
+    indexed_test_dataset = IndexedDataset(test_dataset)
+    
     # Collate函数
     def collate_fn(batch):
         return extend_time_series_to_match_patch_size_and_aggregate(
             batch, patch_size=PATCH_SIZE
         )
     
-    # 分布式采样器（仅训练集）
+    # 分布式采样器
     train_sampler = None
+    val_sampler = None
+    test_sampler = None
     if world_size > 1:
         train_sampler = DistributedSampler(
             train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+        )
+        # 评估集使用分布式采样器（shuffle=False保持顺序）
+        val_sampler = DistributedSampler(
+            indexed_val_dataset, num_replicas=world_size, rank=rank, shuffle=False
+        )
+        test_sampler = DistributedSampler(
+            indexed_test_dataset, num_replicas=world_size, rank=rank, shuffle=False
         )
     
     train_loader = DataLoader(
@@ -305,21 +335,22 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         collate_fn=collate_fn,
     )
     
-    # 评估用DataLoader（不使用分布式，仅由rank 0评估完整数据集）
-    # 这避免了DistributedSampler填充样本带来的准确率不一致问题
+    # 评估用DataLoader（使用分布式采样+索引跟踪）
     eval_batch_size = getattr(args, 'eval_batch_size', 8)
     
     val_loader = DataLoader(
-        val_dataset,
+        indexed_val_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=collate_fn,
     )
     
     test_loader = DataLoader(
-        test_dataset,
+        indexed_test_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
+        sampler=test_sampler,
         collate_fn=collate_fn,
     )
     
@@ -386,25 +417,32 @@ def evaluate(
     max_new_tokens: int,
     class_token_ids: List[int] | None = None,
     desc: str = "Evaluating",
+    rank: int = 0,
+    world_size: int = 1,
+    total_samples: int | None = None,
 ) -> Dict[str, Any]:
     """
-    评估模型（仅由rank 0执行，使用完整数据集）
+    分布式评估模型（使用样本索引正确去重）
     
     Args:
         model: 模型（DDP 包装或底层模型都可以）
-        data_loader: 数据加载器（完整数据集，非分布式）
+        data_loader: 数据加载器（使用IndexedDataset + DistributedSampler）
         max_new_tokens: 最大生成token数
         class_token_ids: 类别token的ID列表，用于约束解码
         desc: 进度条描述
+        rank: DDP rank
+        world_size: GPU 数量
+        total_samples: 真实样本数，用于验证去重结果
     """
     import re
+    import pickle
     
     # 始终使用底层模型评估
     underlying_model = get_model(model)
     underlying_model.eval()
     
-    all_predictions = []
-    all_labels = []
+    # 使用字典按索引存储结果（自动去重）
+    results_by_idx = {}
     total_loss = 0.0
     num_batches = 0
     
@@ -415,7 +453,7 @@ def evaluate(
         allowed_ids = class_token_ids + [eos_token_id]
         logits_processor = LogitsProcessorList([AllowedTokensLogitsProcessor(allowed_ids)])
     
-    for batch in tqdm(data_loader, desc=desc):
+    for batch in tqdm(data_loader, desc=desc, disable=(rank != 0)):
         # 使用底层模型
         loss = underlying_model.compute_loss(batch)
         total_loss += loss.item()
@@ -444,10 +482,57 @@ def evaluate(
         else:
             predictions = underlying_model.generate(batch, max_new_tokens=max_new_tokens)
         
-        # 收集结果
+        # 收集结果（使用样本索引作为key）
         for sample, pred in zip(batch, predictions):
-            all_predictions.append(pred)
-            all_labels.append(sample["answer"].replace(underlying_model.get_eos_token(), "").strip())
+            idx = sample.get("_sample_idx", -1)
+            label = sample["answer"].replace(underlying_model.get_eos_token(), "").strip()
+            results_by_idx[idx] = {"prediction": pred, "label": label}
+    
+    # 分布式聚合：收集所有 rank 的结果
+    if world_size > 1:
+        # 序列化本地结果
+        local_data = pickle.dumps({
+            "results_by_idx": results_by_idx,
+            "loss": total_loss,
+            "num_batches": num_batches,
+        })
+        local_size = torch.tensor([len(local_data)], device=underlying_model.device)
+        
+        # 收集所有 rank 的数据大小
+        all_sizes = [torch.zeros_like(local_size) for _ in range(world_size)]
+        dist.all_gather(all_sizes, local_size)
+        max_size = max(s.item() for s in all_sizes)
+        
+        # 填充到相同大小
+        local_tensor = torch.zeros(int(max_size), dtype=torch.uint8, device=underlying_model.device)
+        local_tensor[:len(local_data)] = torch.tensor(list(local_data), dtype=torch.uint8, device=underlying_model.device)
+        
+        # 收集所有数据
+        all_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+        dist.all_gather(all_tensors, local_tensor)
+        
+        # 反序列化并合并（字典自动去重：相同索引只保留一份）
+        merged_results = {}
+        total_loss = 0.0
+        num_batches = 0
+        
+        for tensor, size in zip(all_tensors, all_sizes):
+            data = pickle.loads(bytes(tensor[:size.item()].cpu().tolist()))
+            merged_results.update(data["results_by_idx"])  # 自动去重
+            total_loss += data["loss"]
+            num_batches += data["num_batches"]
+        
+        results_by_idx = merged_results
+    
+    # 按索引排序并提取结果
+    sorted_indices = sorted(results_by_idx.keys())
+    all_predictions = [results_by_idx[idx]["prediction"] for idx in sorted_indices]
+    all_labels = [results_by_idx[idx]["label"] for idx in sorted_indices]
+    
+    # 验证样本数量
+    if total_samples is not None and len(all_predictions) != total_samples:
+        if rank == 0:
+            print(f"⚠️ 警告: 期望 {total_samples} 个样本，实际 {len(all_predictions)} 个")
     
     # 计算指标
     avg_loss = total_loss / max(num_batches, 1)
@@ -711,19 +796,21 @@ def main():
             )
             
             # 定期评估
-            # 只有rank 0执行评估（使用完整数据集），避免分布式采样的填充问题
+            # 所有rank参与分布式评估，使用索引自动去重
             if epoch % args.eval_every == 0 or epoch == args.epochs:
                 if rank == 0:
                     print(f"\n📊 Epoch {epoch} 评估...")
-                    
-                    # rank 0 执行完整评估
-                    val_results = evaluate(
-                        model, val_loader, args.max_new_tokens, 
-                        class_token_ids=class_token_ids, desc="Validating"
-                    )
-                    val_loss = val_results["loss"]
-                    val_acc = val_results["accuracy"]
-                    
+                
+                # 分布式评估：所有rank参与，结果通过索引自动去重
+                val_results = evaluate(
+                    model, val_loader, args.max_new_tokens, 
+                    class_token_ids=class_token_ids, desc="Validating",
+                    rank=rank, world_size=world_size, total_samples=val_size
+                )
+                val_loss = val_results["loss"]
+                val_acc = val_results["accuracy"]
+                
+                if rank == 0:
                     print(f"   Train Loss: {train_loss:.4f}")
                     print(f"   Val Loss: {val_loss:.4f}")
                     print(f"   Val Accuracy: {val_acc:.4f}")
@@ -778,34 +865,41 @@ def main():
                     print(f"\n⏹️ 早停! 验证准确率 {args.early_stop} 轮未改进")
                 break
         
-        # 最终测试（只由rank 0执行）
+        # 最终测试（所有rank参与分布式测试）
         if rank == 0:
             print("\n" + "=" * 60)
             print("📋 最终测试评估...")
-            
-            # rank 0加载最佳模型并测试
-            best_ckpt = torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=False)
-            underlying_model.encoder.load_state_dict(best_ckpt["encoder_state"])
-            underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
-            underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
-            
-            # 恢复 class token 的 embedding 和 lm_head 权重
-            if "embedding_weight" in best_ckpt:
-                with torch.no_grad():
-                    underlying_model.llm.get_input_embeddings().weight.copy_(
-                        best_ckpt["embedding_weight"].to(device)
-                    )
-                    underlying_model.llm.lm_head.weight.copy_(
-                        best_ckpt["lm_head_weight"].to(device)
-                    )
+        
+        # 所有rank加载最佳模型
+        best_ckpt = torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=False)
+        underlying_model.encoder.load_state_dict(best_ckpt["encoder_state"])
+        underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
+        underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
+        
+        # 恢复 class token 的 embedding 和 lm_head 权重
+        if "embedding_weight" in best_ckpt:
+            with torch.no_grad():
+                underlying_model.llm.get_input_embeddings().weight.copy_(
+                    best_ckpt["embedding_weight"].to(device)
+                )
+                underlying_model.llm.lm_head.weight.copy_(
+                    best_ckpt["lm_head_weight"].to(device)
+                )
+            if rank == 0:
                 print("📥 Loaded embedding and lm_head weights")
-            
-            # 执行测试评估
-            test_results = evaluate(
-                model, test_loader, args.max_new_tokens,
-                class_token_ids=class_token_ids, desc="Testing"
-            )
-            
+        
+        # 同步所有rank，确保都加载完成权重后再开始测试
+        if world_size > 1:
+            dist.barrier()
+        
+        # 分布式测试评估
+        test_results = evaluate(
+            model, test_loader, args.max_new_tokens,
+            class_token_ids=class_token_ids, desc="Testing",
+            rank=rank, world_size=world_size, total_samples=test_size
+        )
+        
+        if rank == 0:
             print(f"\n✅ 测试结果:")
             print(f"   Test Loss: {test_results['loss']:.4f}")
             print(f"   Test Accuracy: {test_results['accuracy']:.4f}")
