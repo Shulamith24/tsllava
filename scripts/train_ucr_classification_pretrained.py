@@ -305,26 +305,14 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         collate_fn=collate_fn,
     )
     
-    # 评估用DataLoader（支持批量评估）
-    # 使用 DistributedSampler 进行分布式评估（自动填充样本使每个 rank 数量相同）
+    # 评估用DataLoader（不使用分布式，仅由rank 0评估完整数据集）
+    # 这避免了DistributedSampler填充样本带来的准确率不一致问题
     eval_batch_size = getattr(args, 'eval_batch_size', 8)
-    
-    val_sampler = None
-    test_sampler = None
-    if world_size > 1:
-        # 不使用 drop_last，DistributedSampler 会自动复制一些样本填充
-        val_sampler = DistributedSampler(
-            val_dataset, num_replicas=world_size, rank=rank, shuffle=False
-        )
-        test_sampler = DistributedSampler(
-            test_dataset, num_replicas=world_size, rank=rank, shuffle=False
-        )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
-        sampler=val_sampler,
         collate_fn=collate_fn,
     )
     
@@ -332,7 +320,6 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         test_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
-        sampler=test_sampler,
         collate_fn=collate_fn,
     )
     
@@ -399,24 +386,20 @@ def evaluate(
     max_new_tokens: int,
     class_token_ids: List[int] | None = None,
     desc: str = "Evaluating",
-    rank: int = 0,
-    world_size: int = 1,
-    total_samples: int | None = None,  # 真实样本数，用于去除填充
 ) -> Dict[str, Any]:
     """
-    分布式评估模型
+    评估模型（仅由rank 0执行，使用完整数据集）
     
     Args:
         model: 模型（DDP 包装或底层模型都可以）
-        data_loader: 数据加载器
+        data_loader: 数据加载器（完整数据集，非分布式）
         max_new_tokens: 最大生成token数
         class_token_ids: 类别token的ID列表，用于约束解码
         desc: 进度条描述
-        rank: DDP rank
-        world_size: GPU 数量
-        total_samples: 真实样本数，用于去除 DistributedSampler 填充的样本
     """
-    # 始终使用底层模型评估，避免 DDP 隐式同步
+    import re
+    
+    # 始终使用底层模型评估
     underlying_model = get_model(model)
     underlying_model.eval()
     
@@ -432,8 +415,8 @@ def evaluate(
         allowed_ids = class_token_ids + [eos_token_id]
         logits_processor = LogitsProcessorList([AllowedTokensLogitsProcessor(allowed_ids)])
     
-    for batch in tqdm(data_loader, desc=desc, disable=(rank != 0)):
-        # 使用底层模型，不触发 DDP 同步
+    for batch in tqdm(data_loader, desc=desc):
+        # 使用底层模型
         loss = underlying_model.compute_loss(batch)
         total_loss += loss.item()
         num_batches += 1
@@ -450,7 +433,6 @@ def evaluate(
             )
             predictions = underlying_model.tokenizer.batch_decode(gen_ids, skip_special_tokens=False)
             # 清理多余的特殊token，保留<cN>格式
-            import re
             cleaned_predictions = []
             for p in predictions:
                 match = re.search(r'<c\d+>', p)
@@ -466,50 +448,6 @@ def evaluate(
         for sample, pred in zip(batch, predictions):
             all_predictions.append(pred)
             all_labels.append(sample["answer"].replace(underlying_model.get_eos_token(), "").strip())
-    
-    # 分布式聚合：收集所有 rank 的结果
-    if world_size > 1:
-        import pickle
-        
-        # 序列化本地结果
-        local_data = pickle.dumps({
-            "predictions": all_predictions,
-            "labels": all_labels,
-            "loss": total_loss,
-            "num_batches": num_batches,
-        })
-        local_size = torch.tensor([len(local_data)], device=underlying_model.device)
-        
-        # 收集所有 rank 的数据大小
-        all_sizes = [torch.zeros_like(local_size) for _ in range(world_size)]
-        dist.all_gather(all_sizes, local_size)
-        max_size = max(s.item() for s in all_sizes)
-        
-        # 填充到相同大小
-        local_tensor = torch.zeros(int(max_size), dtype=torch.uint8, device=underlying_model.device)
-        local_tensor[:len(local_data)] = torch.tensor(list(local_data), dtype=torch.uint8, device=underlying_model.device)
-        
-        # 收集所有数据
-        all_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
-        dist.all_gather(all_tensors, local_tensor)
-        
-        # 反序列化并合并
-        all_predictions = []
-        all_labels = []
-        total_loss = 0.0
-        num_batches = 0
-        
-        for i, (tensor, size) in enumerate(zip(all_tensors, all_sizes)):
-            data = pickle.loads(bytes(tensor[:size.item()].cpu().tolist()))
-            all_predictions.extend(data["predictions"])
-            all_labels.extend(data["labels"])
-            total_loss += data["loss"]
-            num_batches += data["num_batches"]
-        
-        # 去除 DistributedSampler 填充的重复样本
-        if total_samples is not None and len(all_predictions) > total_samples:
-            all_predictions = all_predictions[:total_samples]
-            all_labels = all_labels[:total_samples]
     
     # 计算指标
     avg_loss = total_loss / max(num_batches, 1)
@@ -773,21 +711,19 @@ def main():
             )
             
             # 定期评估
-            # 所有 rank 都参与评估，结果在 evaluate 函数内聚合
+            # 只有rank 0执行评估（使用完整数据集），避免分布式采样的填充问题
             if epoch % args.eval_every == 0 or epoch == args.epochs:
                 if rank == 0:
                     print(f"\n📊 Epoch {epoch} 评估...")
-                
-                # 分布式评估：所有 rank 都参与，结果自动聚合
-                val_results = evaluate(
-                    model, val_loader, args.max_new_tokens, 
-                    class_token_ids=class_token_ids, desc="Validating", rank=rank,
-                    world_size=world_size, total_samples=val_size
-                )
-                val_loss = val_results["loss"]
-                val_acc = val_results["accuracy"]
-                
-                if rank == 0:
+                    
+                    # rank 0 执行完整评估
+                    val_results = evaluate(
+                        model, val_loader, args.max_new_tokens, 
+                        class_token_ids=class_token_ids, desc="Validating"
+                    )
+                    val_loss = val_results["loss"]
+                    val_acc = val_results["accuracy"]
+                    
                     print(f"   Train Loss: {train_loss:.4f}")
                     print(f"   Val Loss: {val_loss:.4f}")
                     print(f"   Val Accuracy: {val_acc:.4f}")
@@ -824,12 +760,14 @@ def main():
                     with open(os.path.join(save_dir, "loss_history.json"), "w") as f:
                         json.dump(loss_history, f, indent=2)
                 
-                # 评估完成后同步 patience_counter
+                # 同步 patience_counter 和 best_val_acc 给所有 rank
                 if world_size > 1:
-                    # 广播 patience_counter 以同步早停决策
                     patience_tensor = torch.tensor([patience_counter], device=device)
+                    best_val_acc_tensor = torch.tensor([best_val_acc], device=device)
                     dist.broadcast(patience_tensor, src=0)
+                    dist.broadcast(best_val_acc_tensor, src=0)
                     patience_counter = int(patience_tensor.item())
+                    best_val_acc = float(best_val_acc_tensor.item())
             else:
                 if rank == 0:
                     print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}")
@@ -840,41 +778,34 @@ def main():
                     print(f"\n⏹️ 早停! 验证准确率 {args.early_stop} 轮未改进")
                 break
         
-        # 最终测试（所有 rank 都参与）
+        # 最终测试（只由rank 0执行）
         if rank == 0:
             print("\n" + "=" * 60)
             print("📋 最终测试评估...")
-        
-        # 所有 rank 都加载最佳模型
-        best_ckpt = torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=False)
-        underlying_model.encoder.load_state_dict(best_ckpt["encoder_state"])
-        underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
-        underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
-        
-        # 恢复 class token 的 embedding 和 lm_head 权重
-        if "embedding_weight" in best_ckpt:
-            with torch.no_grad():
-                underlying_model.llm.get_input_embeddings().weight.copy_(
-                    best_ckpt["embedding_weight"].to(device)
-                )
-                underlying_model.llm.lm_head.weight.copy_(
-                    best_ckpt["lm_head_weight"].to(device)
-                )
-            if rank == 0:
+            
+            # rank 0加载最佳模型并测试
+            best_ckpt = torch.load(os.path.join(save_dir, "best_model.pt"), map_location=device, weights_only=False)
+            underlying_model.encoder.load_state_dict(best_ckpt["encoder_state"])
+            underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
+            underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
+            
+            # 恢复 class token 的 embedding 和 lm_head 权重
+            if "embedding_weight" in best_ckpt:
+                with torch.no_grad():
+                    underlying_model.llm.get_input_embeddings().weight.copy_(
+                        best_ckpt["embedding_weight"].to(device)
+                    )
+                    underlying_model.llm.lm_head.weight.copy_(
+                        best_ckpt["lm_head_weight"].to(device)
+                    )
                 print("📥 Loaded embedding and lm_head weights")
-        
-        # 同步所有rank，确保都加载完成权重后再开始测试
-        if world_size > 1:
-            dist.barrier()
-        
-        # 分布式测试评估
-        test_results = evaluate(
-            model, test_loader, args.max_new_tokens,
-            class_token_ids=class_token_ids, desc="Testing", rank=rank,
-            world_size=world_size, total_samples=test_size
-        )
-        
-        if rank == 0:
+            
+            # 执行测试评估
+            test_results = evaluate(
+                model, test_loader, args.max_new_tokens,
+                class_token_ids=class_token_ids, desc="Testing"
+            )
+            
             print(f"\n✅ 测试结果:")
             print(f"   Test Loss: {test_results['loss']:.4f}")
             print(f"   Test Accuracy: {test_results['accuracy']:.4f}")
