@@ -553,6 +553,12 @@ def save_checkpoint(
     # 保存LoRA权重
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
     
+    # 保存 class token 的 embedding 和 lm_head 权重
+    # 这些是训练时新添加的特殊 token，必须保存
+    checkpoint["embedding_weight"] = underlying_model.llm.get_input_embeddings().weight.detach().cpu()
+    checkpoint["lm_head_weight"] = underlying_model.llm.lm_head.weight.detach().cpu()
+    checkpoint["tokenizer_vocab_size"] = len(underlying_model.tokenizer)
+    
     torch.save(checkpoint, save_path)
     print(f"💾 Saved checkpoint to: {save_path}")
 
@@ -844,6 +850,18 @@ def main():
         underlying_model.encoder.load_state_dict(best_ckpt["encoder_state"])
         underlying_model.projector.load_state_dict(best_ckpt["projector_state"])
         underlying_model.load_lora_state_from_checkpoint(best_ckpt, allow_missing=True)
+        
+        # 恢复 class token 的 embedding 和 lm_head 权重
+        if "embedding_weight" in best_ckpt:
+            with torch.no_grad():
+                underlying_model.llm.get_input_embeddings().weight.copy_(
+                    best_ckpt["embedding_weight"].to(device)
+                )
+                underlying_model.llm.lm_head.weight.copy_(
+                    best_ckpt["lm_head_weight"].to(device)
+                )
+            if rank == 0:
+                print("📥 Loaded embedding and lm_head weights")
         
         # 分布式测试评估
         test_results = evaluate(
