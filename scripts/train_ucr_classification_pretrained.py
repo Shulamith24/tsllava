@@ -863,6 +863,10 @@ def main():
             if rank == 0:
                 print("📥 Loaded embedding and lm_head weights")
         
+        # 同步所有rank，确保都加载完成权重后再开始测试
+        if world_size > 1:
+            dist.barrier()
+        
         # 分布式测试评估
         test_results = evaluate(
             model, test_loader, args.max_new_tokens,
