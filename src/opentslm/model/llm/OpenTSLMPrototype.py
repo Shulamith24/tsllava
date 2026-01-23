@@ -33,16 +33,16 @@ class PrototypeClassificationHead(nn.Module):
     logits = cosine_similarity(z, prototypes) / temperature
     """
     
-    def __init__(self, hidden_size: int, num_classes: int, init_temperature: float = 1.0):
+    def __init__(self, hidden_size: int, num_classes: int, init_temperature: float = 1.0, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_classes = num_classes
         
         # Prototype矩阵: [num_classes, hidden_size]
-        self.prototypes = nn.Parameter(torch.randn(num_classes, hidden_size) * 0.02)
+        self.prototypes = nn.Parameter(torch.randn(num_classes, hidden_size, dtype=dtype) * 0.02)
         
-        # 可学习温度参数
-        self.log_temperature = nn.Parameter(torch.log(torch.tensor(init_temperature)))
+        # 可学习温度参数（使用float32以保持精度）
+        self.log_temperature = nn.Parameter(torch.log(torch.tensor(init_temperature, dtype=torch.float32)))
     
     @property
     def temperature(self) -> torch.Tensor:
@@ -110,26 +110,30 @@ class OpenTSLMPrototype(OpenTSLMSP):
             **kwargs
         )
         
-        # 获取LLM隐层维度
+        # 获取LLM隐层维度和dtype
         self.hidden_size = self.llm.config.hidden_size
         self.prompt_len = prompt_len
         self.num_classes = num_classes
         
+        # 使用与LLM相同的dtype（bfloat16）
+        llm_dtype = next(self.llm.parameters()).dtype
+        
         # 可学习的Prompt tokens
         self.prompt_embeds = nn.Parameter(
-            torch.randn(prompt_len, self.hidden_size, device=device) * 0.02
+            torch.randn(prompt_len, self.hidden_size, device=device, dtype=llm_dtype) * 0.02
         )
         
         # CLS token
         self.cls_embed = nn.Parameter(
-            torch.randn(self.hidden_size, device=device) * 0.02
+            torch.randn(self.hidden_size, device=device, dtype=llm_dtype) * 0.02
         )
         
         # Prototype分类头
         self.cls_head = PrototypeClassificationHead(
             self.hidden_size,
             num_classes,
-            init_temperature
+            init_temperature,
+            dtype=llm_dtype
         ).to(device)
     
     def freeze_backbone(self):
