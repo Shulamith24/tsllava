@@ -33,15 +33,30 @@ class PrototypeClassificationHead(nn.Module):
     logits = cosine_similarity(z, prototypes) / temperature
     """
     
-    def __init__(self, hidden_size: int, num_classes: int, init_temperature: float = 1.0, dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self, 
+        hidden_size: int, 
+        num_classes: int, 
+        init_temperature: float = 0.07,  # 使用较小的温度，类似CLIP
+        dtype: torch.dtype = torch.bfloat16,
+        init_mean: torch.Tensor = None,
+        init_std: torch.Tensor = None,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_classes = num_classes
         
         # Prototype矩阵: [num_classes, hidden_size]
-        self.prototypes = nn.Parameter(torch.randn(num_classes, hidden_size, dtype=dtype) * 0.02)
+        # 使用LLM embedding统计信息初始化（如果提供）
+        if init_mean is not None and init_std is not None:
+            proto_init = init_mean.unsqueeze(0).expand(num_classes, -1).clone()
+            proto_init = proto_init + torch.randn(num_classes, hidden_size, device=init_mean.device, dtype=dtype) * init_std * 0.1
+            self.prototypes = nn.Parameter(proto_init)
+        else:
+            self.prototypes = nn.Parameter(torch.randn(num_classes, hidden_size, dtype=dtype) * 0.02)
         
         # 可学习温度参数（使用float32以保持精度）
+        # 注意：使用log_temperature确保温度始终为正
         self.log_temperature = nn.Parameter(torch.log(torch.tensor(init_temperature, dtype=torch.float32)))
     
     @property
@@ -118,22 +133,29 @@ class OpenTSLMPrototype(OpenTSLMSP):
         # 使用与LLM相同的dtype（bfloat16）
         llm_dtype = next(self.llm.parameters()).dtype
         
-        # 可学习的Prompt tokens
-        self.prompt_embeds = nn.Parameter(
-            torch.randn(prompt_len, self.hidden_size, device=device, dtype=llm_dtype) * 0.02
-        )
+        # 获取LLM embedding的统计信息，用于初始化
+        with torch.no_grad():
+            llm_embeddings = self.llm.get_input_embeddings().weight
+            emb_mean = llm_embeddings.mean(dim=0)
+            emb_std = llm_embeddings.std(dim=0)
         
-        # CLS token
-        self.cls_embed = nn.Parameter(
-            torch.randn(self.hidden_size, device=device, dtype=llm_dtype) * 0.02
-        )
+        # 可学习的Prompt tokens - 使用LLM embedding统计信息初始化
+        prompt_init = emb_mean.unsqueeze(0).expand(prompt_len, -1).clone()
+        prompt_init = prompt_init + torch.randn(prompt_len, self.hidden_size, device=device, dtype=llm_dtype) * emb_std * 0.1
+        self.prompt_embeds = nn.Parameter(prompt_init)
         
-        # Prototype分类头
+        # CLS token - 使用均值+扰动
+        cls_init = emb_mean + torch.randn(self.hidden_size, device=device, dtype=llm_dtype) * emb_std * 0.1
+        self.cls_embed = nn.Parameter(cls_init)
+        
+        # Prototype分类头 - 使用LLM embedding统计信息初始化
         self.cls_head = PrototypeClassificationHead(
             self.hidden_size,
             num_classes,
             init_temperature,
-            dtype=llm_dtype
+            dtype=llm_dtype,
+            init_mean=emb_mean,
+            init_std=emb_std,
         ).to(device)
     
     def freeze_backbone(self):

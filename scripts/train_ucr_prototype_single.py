@@ -90,7 +90,9 @@ def parse_args():
     parser.add_argument("--stage", type=int, default=0, choices=[0, 1],
                         help="训练阶段: 0=只训练头部, 1=联合训练")
     parser.add_argument("--resume_from", type=str, default=None,
-                        help="从checkpoint恢复训练")
+                        help="从Stage0 checkpoint加载模型权重（不恢复训练状态，用于Stage1加载Stage0）")
+    parser.add_argument("--continue_training", type=str, default=None,
+                        help="从checkpoint完全恢复训练（包括epoch/optimizer/scheduler）")
     
     # 训练超参
     parser.add_argument("--epochs", type=int, default=30)
@@ -581,9 +583,36 @@ def main():
     best_val_acc = 0.0
     patience_counter = 0
     loss_history = []
+    start_epoch = 1  # 默认从1开始
+    
+    # 如果是完全恢复训练，加载训练状态
+    if args.continue_training:
+        ckpt = torch.load(args.continue_training, map_location=device, weights_only=False)
+        
+        # 恢复模型权重
+        underlying_model.prompt_embeds.data = ckpt["prompt_embeds"].to(device)
+        underlying_model.cls_embed.data = ckpt["cls_embed"].to(device)
+        underlying_model.cls_head.load_state_dict(ckpt["cls_head_state"])
+        underlying_model.encoder.load_state_dict(ckpt["encoder_state"])
+        underlying_model.projector.load_state_dict(ckpt["projector_state"])
+        underlying_model.load_lora_state_from_checkpoint(ckpt, allow_missing=True)
+        
+        # 恢复优化器和调度器状态
+        if "optimizer_state" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+        if "scheduler_state" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state"])
+        
+        # 恢夌epoch
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_val_acc = ckpt.get("val_acc", 0.0)
+        
+        if rank == 0:
+            print(f"✅ 从epoch {start_epoch} 恢复训练")
+            print(f"   上次best_val_acc: {best_val_acc:.4f}")
     
     try:
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
             
