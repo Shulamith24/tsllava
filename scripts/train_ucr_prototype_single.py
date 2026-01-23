@@ -370,6 +370,7 @@ def save_checkpoint(
         "projector_state": underlying_model.projector.state_dict(),
         "prompt_embeds": underlying_model.prompt_embeds.data,
         "cls_embed": underlying_model.cls_embed.data,
+        "cls_projector_state": underlying_model.cls_projector.state_dict(),
         "cls_head_state": underlying_model.cls_head.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(),
@@ -507,9 +508,11 @@ def main():
         ckpt = torch.load(args.resume_from, map_location=device, weights_only=False)
         model.prompt_embeds.data = ckpt["prompt_embeds"].to(device)
         model.cls_embed.data = ckpt["cls_embed"].to(device)
+        if "cls_projector_state" in ckpt:
+            model.cls_projector.load_state_dict(ckpt["cls_projector_state"])
         model.cls_head.load_state_dict(ckpt["cls_head_state"])
         if rank == 0:
-            print(f"✅ 恢复prompt/cls/cls_head")
+            print(f"✅ 恢复prompt/cls/projector/head")
     
     # 配置训练阶段
     if args.stage == 0:
@@ -546,14 +549,16 @@ def main():
     
     param_groups = []
     if args.stage == 0:
-        # Stage 0: 只训练prompt/cls/head
+        # Stage 0: 只训练prompt/cls/projector/head
         param_groups.append({"params": [underlying_model.prompt_embeds, underlying_model.cls_embed], "lr": args.lr_prompt})
+        param_groups.append({"params": list(underlying_model.cls_projector.parameters()), "lr": args.lr_head})
         param_groups.append({"params": list(underlying_model.cls_head.parameters()), "lr": args.lr_head})
     else:
         # Stage 1: 全部训练
         param_groups.append({"params": list(underlying_model.encoder.parameters()), "lr": args.lr_encoder})
         param_groups.append({"params": list(underlying_model.projector.parameters()), "lr": args.lr_projector})
         param_groups.append({"params": [underlying_model.prompt_embeds, underlying_model.cls_embed], "lr": args.lr_prompt})
+        param_groups.append({"params": list(underlying_model.cls_projector.parameters()), "lr": args.lr_head})
         param_groups.append({"params": list(underlying_model.cls_head.parameters()), "lr": args.lr_head})
         
         if use_lora:
@@ -592,6 +597,8 @@ def main():
         # 恢复模型权重
         underlying_model.prompt_embeds.data = ckpt["prompt_embeds"].to(device)
         underlying_model.cls_embed.data = ckpt["cls_embed"].to(device)
+        if "cls_projector_state" in ckpt:
+            underlying_model.cls_projector.load_state_dict(ckpt["cls_projector_state"])
         underlying_model.cls_head.load_state_dict(ckpt["cls_head_state"])
         underlying_model.encoder.load_state_dict(ckpt["encoder_state"])
         underlying_model.projector.load_state_dict(ckpt["projector_state"])
@@ -683,6 +690,8 @@ def main():
                 ckpt = torch.load(best_path, map_location=device, weights_only=False)
                 underlying_model.prompt_embeds.data = ckpt["prompt_embeds"].to(device)
                 underlying_model.cls_embed.data = ckpt["cls_embed"].to(device)
+                if "cls_projector_state" in ckpt:
+                    underlying_model.cls_projector.load_state_dict(ckpt["cls_projector_state"])
                 underlying_model.cls_head.load_state_dict(ckpt["cls_head_state"])
                 underlying_model.encoder.load_state_dict(ckpt["encoder_state"])
                 underlying_model.projector.load_state_dict(ckpt["projector_state"])

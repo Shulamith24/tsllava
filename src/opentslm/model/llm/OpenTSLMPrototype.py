@@ -157,11 +157,18 @@ class OpenTSLMPrototype(OpenTSLMSP):
             init_mean=emb_mean,
             init_std=emb_std,
         ).to(device)
+        
+        # CLS投影层 (MLP)
+        self.cls_projector = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size, dtype=llm_dtype),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, self.hidden_size, dtype=llm_dtype)
+        ).to(device)
     
     def freeze_backbone(self):
         """
         Stage 0: 冻结主干网络
-        只训练 prompt_embeds + cls_embed + cls_head (prototypes + temperature)
+        只训练 prompt_embeds + cls_embed + cls_projector + cls_head
         """
         # 冻结 encoder
         for param in self.encoder.parameters():
@@ -178,11 +185,13 @@ class OpenTSLMPrototype(OpenTSLMSP):
         # 确保可学习组件解冻
         self.prompt_embeds.requires_grad = True
         self.cls_embed.requires_grad = True
+        for param in self.cls_projector.parameters():
+            param.requires_grad = True
         for param in self.cls_head.parameters():
             param.requires_grad = True
         
         print("🧊 Stage 0: Backbone frozen (encoder + projector + LLM)")
-        print("   训练参数: prompt_embeds, cls_embed, cls_head (prototypes + temperature)")
+        print("   训练参数: prompt_embeds, cls_embed, cls_projector, cls_head")
     
     def unfreeze_for_stage1(self, unfreeze_encoder: bool = True):
         """
@@ -341,10 +350,13 @@ class OpenTSLMPrototype(OpenTSLMSP):
         for i in range(B):
             cls_hidden[i] = last_hidden[i, cls_positions[i], :]
         
-        # 4. Prototype分类
-        logits = self.cls_head(cls_hidden)  # [B, num_classes]
+        # 4. 投影CLS隐向量
+        cls_projected = self.cls_projector(cls_hidden)
         
-        # 5. 计算损失
+        # 5. Prototype分类
+        logits = self.cls_head(cls_projected)  # [B, num_classes]
+        
+        # 6. 计算损失
         labels = torch.tensor(
             [sample["label_index"] for sample in batch],
             device=self.device,
@@ -411,6 +423,7 @@ class OpenTSLMPrototype(OpenTSLMSP):
             "projector_state": self.projector.state_dict(),
             "prompt_embeds": self.prompt_embeds.data,
             "cls_embed": self.cls_embed.data,
+            "cls_projector_state": self.cls_projector.state_dict(),
             "cls_head_state": self.cls_head.state_dict(),
             "prompt_len": self.prompt_len,
             "num_classes": self.num_classes,
@@ -430,6 +443,8 @@ class OpenTSLMPrototype(OpenTSLMSP):
         self.projector.load_state_dict(ckpt["projector_state"])
         self.prompt_embeds.data = ckpt["prompt_embeds"].to(self.device)
         self.cls_embed.data = ckpt["cls_embed"].to(self.device)
+        if "cls_projector_state" in ckpt:
+            self.cls_projector.load_state_dict(ckpt["cls_projector_state"])
         self.cls_head.load_state_dict(ckpt["cls_head_state"])
         
         # LoRA状态
