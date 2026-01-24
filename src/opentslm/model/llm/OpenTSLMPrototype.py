@@ -158,12 +158,21 @@ class OpenTSLMPrototype(OpenTSLMSP):
             init_std=emb_std,
         ).to(device)
         
-        # CLS投影层 (MLP)
+        # CLS投影层 (MLP) - 使用近似恒等初始化
         self.cls_projector = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size, dtype=llm_dtype),
             nn.GELU(),
             nn.Linear(self.hidden_size, self.hidden_size, dtype=llm_dtype)
         ).to(device)
+        
+        # 初始化为近似恒等变换（残差风格）
+        with torch.no_grad():
+            # 第一层：近似恒等
+            nn.init.eye_(self.cls_projector[0].weight)
+            nn.init.zeros_(self.cls_projector[0].bias)
+            # 第二层：小权重，初始输出接近0（配合残差使用）
+            nn.init.zeros_(self.cls_projector[2].weight)
+            nn.init.zeros_(self.cls_projector[2].bias)
     
     def freeze_backbone(self):
         """
@@ -350,8 +359,8 @@ class OpenTSLMPrototype(OpenTSLMSP):
         for i in range(B):
             cls_hidden[i] = last_hidden[i, cls_positions[i], :]
         
-        # 4. 投影CLS隐向量
-        cls_projected = self.cls_projector(cls_hidden)
+        # 4. 投影CLS隐向量（残差连接）
+        cls_projected = cls_hidden + self.cls_projector(cls_hidden)
         
         # 5. Prototype分类
         logits = self.cls_head(cls_projected)  # [B, num_classes]
