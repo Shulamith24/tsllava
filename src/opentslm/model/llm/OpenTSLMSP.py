@@ -100,8 +100,9 @@ class OpenTSLMSP(TimeSeriesLLM):
         the backward pass instead of storing them.
         """
         if hasattr(self.llm, "gradient_checkpointing_enable"):
-            self.llm.gradient_checkpointing_enable()
-            print("✅ Gradient checkpointing enabled for LLM")
+            # use_reentrant=False is required for DDP with find_unused_parameters=True
+            self.llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            print("✅ Gradient checkpointing enabled for LLM (use_reentrant=False)")
         else:
             print("⚠️ LLM does not support gradient_checkpointing_enable()")
 

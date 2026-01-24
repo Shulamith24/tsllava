@@ -53,7 +53,8 @@ class PromptBank(nn.Module):
             # [num_datasets, prompt_len, hidden_size]
             prompt_init = init_mean.view(1, 1, -1).expand(num_datasets, prompt_len, -1).clone()
             noise = torch.randn(num_datasets, prompt_len, hidden_size, device=device, dtype=dtype)
-            prompt_init = prompt_init + noise * init_std.view(1, 1, -1) * 0.1
+            # 增大扰动系数: 0.1 -> 0.5
+            prompt_init = prompt_init + noise * init_std.view(1, 1, -1) * 0.5
             self.prompts = nn.Parameter(prompt_init)
         else:
             # 随机初始化
@@ -113,14 +114,26 @@ class PrototypeBankEntry(nn.Module):
         
         # Prototype矩阵
         if init_mean is not None and init_std is not None:
+            # 使用LLM embedding统计信息初始化
+            # [num_classes, hidden_size]
             proto_init = init_mean.unsqueeze(0).expand(num_classes, -1).clone()
             noise = torch.randn(num_classes, hidden_size, device=device, dtype=dtype)
-            proto_init = proto_init + noise * init_std * 0.1
+            
+            # 增大扰动系数: 0.1 -> 1.0，确保prototype之间有足够的区分度
+            # 对于多类别数据集，如果prototype太接近，会导致很难训练
+            proto_init = proto_init + noise * init_std * 1.0
             self.prototypes = nn.Parameter(proto_init)
         else:
-            self.prototypes = nn.Parameter(
-                torch.randn(num_classes, hidden_size, device=device, dtype=dtype) * 0.02
-            )
+            # 随机正交初始化 (如果类别数 <= hidden_size)
+            if num_classes <= hidden_size:
+                # 正交初始化能最大化初始区分度
+                weight = torch.empty(num_classes, hidden_size, device=device, dtype=dtype)
+                nn.init.orthogonal_(weight)
+                self.prototypes = nn.Parameter(weight * 0.1)  # 缩放以匹配通常的embedding范数
+            else:
+                self.prototypes = nn.Parameter(
+                    torch.randn(num_classes, hidden_size, device=device, dtype=dtype) * 0.02
+                )
         
         # 可学习温度（log空间确保为正）
         self.log_temperature = nn.Parameter(

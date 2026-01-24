@@ -97,6 +97,8 @@ def parse_args():
     
     # 训练超参
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--episodes_per_epoch", type=int, default=None,
+                        help="每个epoch的episode数量 (默认: 总样本数/batch_size)")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr_prompt_bank", type=float, default=1e-3, help="PromptBank学习率")
     parser.add_argument("--lr_prototype_bank", type=float, default=1e-3, help="PrototypeBank学习率")
@@ -426,15 +428,16 @@ def main():
         raise ValueError("必须指定 --pretrained_model 或 --local_checkpoint")
     
     # 从resume加载（如果有）
+    resume_checkpoint = None
     if args.resume_from:
         if rank == 0:
             print(f"📂 从{args.resume_from}恢复...")
-        ckpt = torch.load(args.resume_from, map_location=device, weights_only=False)
-        model.prompt_bank.load_state_dict(ckpt["prompt_bank_state"])
-        model.prototype_bank.load_state_dict(ckpt["prototype_bank_state"])
-        model.cls_embed.data = ckpt["cls_embed"].to(device)
-        if "cls_projector_state" in ckpt:
-            model.cls_projector.load_state_dict(ckpt["cls_projector_state"])
+        resume_checkpoint = torch.load(args.resume_from, map_location=device, weights_only=False)
+        model.prompt_bank.load_state_dict(resume_checkpoint["prompt_bank_state"])
+        model.prototype_bank.load_state_dict(resume_checkpoint["prototype_bank_state"])
+        model.cls_embed.data = resume_checkpoint["cls_embed"].to(device)
+        if "cls_projector_state" in resume_checkpoint:
+            model.cls_projector.load_state_dict(resume_checkpoint["cls_projector_state"])
         if rank == 0:
             print(f"✅ 恢复 PromptBank/PrototypeBank/cls")
     
@@ -466,6 +469,7 @@ def main():
         rank=rank,
         world_size=world_size,
         seed=args.seed,
+        num_episodes=args.episodes_per_epoch,
     )
     
     train_loader = DataLoader(
@@ -512,6 +516,17 @@ def main():
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
     )
+    
+    # 恢复优化器和调度器状态
+    if resume_checkpoint:
+        if "optimizer_state" in resume_checkpoint:
+            optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
+            if rank == 0:
+                print("✅ 恢复优化器状态")
+        if "scheduler_state" in resume_checkpoint:
+            scheduler.load_state_dict(resume_checkpoint["scheduler_state"])
+            if rank == 0:
+                print("✅ 恢复调度器状态")
     
     if rank == 0:
         print(f"   Total steps: {total_steps}")
