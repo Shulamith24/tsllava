@@ -450,9 +450,9 @@ def main():
     
     # DDP
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
         if rank == 0:
-            print(f"✅ DDP (world_size={world_size})")
+            print(f"✅ DDP (world_size={world_size}, find_unused_parameters=True)")
     
     # 创建数据集和DataLoader
     if rank == 0:
@@ -463,6 +463,9 @@ def main():
         train_dataset,
         batch_size=args.batch_size,
         alpha=args.alpha,
+        rank=rank,
+        world_size=world_size,
+        seed=args.seed,
     )
     
     train_loader = DataLoader(
@@ -523,6 +526,8 @@ def main():
     
     try:
         for epoch in range(1, args.epochs + 1):
+            sampler.set_epoch(epoch)
+            
             train_loss = train_one_epoch(
                 model, train_loader, optimizer, scheduler,
                 args.grad_clip, epoch, args.epochs,
