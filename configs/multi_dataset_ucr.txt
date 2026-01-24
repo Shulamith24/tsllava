@@ -1,0 +1,15 @@
+# Multi-Dataset UCR Configuration
+# 每行一个数据集名称，#开头为注释
+# 用于多数据集统一训练测试
+
+# 小规模数据集 (快速测试)
+ECG200
+Coffee
+GunPoint
+
+# 中等规模数据集
+ECG5000
+FordA
+
+# 多类别数据集  
+Phoneme
