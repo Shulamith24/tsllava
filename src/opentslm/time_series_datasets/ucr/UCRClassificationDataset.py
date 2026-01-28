@@ -80,6 +80,7 @@ class UCRClassificationDataset(QADataset):
     _dataset_name: str = None
     _label_to_token: dict = None
     _token_to_label: dict = None
+    _label_to_index: dict = None  # 原始标签到索引(0, 1, 2, ...)的映射
     _num_classes: int = None
     _class_tokens: List[str] = None
     
@@ -123,11 +124,14 @@ class UCRClassificationDataset(QADataset):
         tokens = [index_to_class_token(i) for i in range(num_classes)]
         label_to_token = {label: tokens[i] for i, label in enumerate(all_labels)}
         token_to_label = {v: k for k, v in label_to_token.items()}
+        # 创建标签到索引的映射（用于分类头）
+        label_to_index = {label: i for i, label in enumerate(all_labels)}
         
         # 存储类变量
         UCRClassificationDataset._dataset_name = dataset_name
         UCRClassificationDataset._label_to_token = label_to_token
         UCRClassificationDataset._token_to_label = token_to_label
+        UCRClassificationDataset._label_to_index = label_to_index
         UCRClassificationDataset._num_classes = num_classes
         UCRClassificationDataset._class_tokens = tokens
         
@@ -197,6 +201,7 @@ Time series data:"""
         sample = super()._format_sample(row)
         # 保存原始标签用于评估
         sample["original_label"] = row["label"]
+        sample["label_index"] = UCRClassificationDataset._label_to_index[row["label"]]
         sample["class_token"] = UCRClassificationDataset._label_to_token[row["label"]]
         return sample
     

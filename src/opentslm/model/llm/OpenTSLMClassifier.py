@@ -103,8 +103,8 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         hidden_size = self.llm.config.hidden_size
         self.ans_token = nn.Parameter(torch.randn(1, hidden_size) * 0.02)
         
-        # 5) Classification head
-        self.classification_head = nn.Linear(hidden_size, num_classes).to(device)
+        # 5) Classification head (match LLM dtype)
+        self.classification_head = nn.Linear(hidden_size, num_classes).to(device=device, dtype=torch.bfloat16)
         
         # LoRA-related attributes
         self.lora_enabled = False
@@ -128,12 +128,12 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         
         Args:
             batch: List of dictionaries containing the batch data.
-                   Each dict should have 'original_label' key with integer class label.
+                   Each dict should have 'label_index' key with integer class index (0 to K-1).
             
         Returns:
             Loss tensor (CrossEntropyLoss)
         """
-        labels = torch.tensor([item["original_label"] for item in batch], device=self.device, dtype=torch.long)
+        labels = torch.tensor([item["label_index"] for item in batch], device=self.device, dtype=torch.long)
         return self.compute_loss(batch, labels)
 
     def enable_lora(
@@ -319,8 +319,8 @@ class OpenTSLMClassifier(TimeSeriesLLM):
             seq_masks.append(sample_masks[-1, :length])
             
             # *** ADD [ANS] TOKEN HERE ***
-            # Expand ans_token to match dtype
-            ans_emb = self.ans_token.to(text_embeds.dtype)  # [1, H]
+            # Move ans_token to correct device and dtype
+            ans_emb = self.ans_token.to(device=device, dtype=text_embeds.dtype)  # [1, H]
             seq_embeds.append(ans_emb)
             seq_masks.append(torch.ones(1, device=device, dtype=torch.long))
 

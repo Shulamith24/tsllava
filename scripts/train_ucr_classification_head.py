@@ -304,8 +304,8 @@ def evaluate(
     num_batches = 0
     
     for batch in tqdm(data_loader, desc=desc, disable=(rank != 0)):
-        # 提取标签 (使用 original_label 键)
-        labels = torch.tensor([item["original_label"] for item in batch], device=underlying_model.device, dtype=torch.long)
+        # 提取标签索引 (0 到 K-1)
+        labels = torch.tensor([item["label_index"] for item in batch], device=underlying_model.device, dtype=torch.long)
         
         # 计算损失
         loss = underlying_model.compute_loss(batch, labels)
