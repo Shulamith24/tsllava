@@ -688,7 +688,27 @@ def main():
                 print(f"📎 重新配置LoRA: r={args.lora_r}, alpha={args.lora_alpha}")
     
     else:
-        raise ValueError("必须指定 --pretrained_model 或 --local_checkpoint 之一")
+        # 从零开始训练（无预训练权重）
+        if rank == 0:
+            print(f"🆕 从零开始训练（无预训练权重）")
+            print(f"   编码器类型: {args.encoder_type}")
+            print(f"   LLM: {args.llm_id}")
+        
+        # 创建模型
+        tslanet_config = {
+            "patch_size": args.tslanet_patch_size,
+            "output_dim": ENCODER_OUTPUT_DIM,
+        }
+        model = OpenTSLMSP(
+            llm_id=args.llm_id,
+            device=device,
+            encoder_type=args.encoder_type,
+            tslanet_config=tslanet_config if args.encoder_type == "tslanet" else None,
+        )
+        
+        # 启用LoRA
+        if use_lora:
+            model.enable_lora(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
     
     # 启用梯度检查点
     if args.gradient_checkpointing:
