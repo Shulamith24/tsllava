@@ -128,12 +128,12 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         
         Args:
             batch: List of dictionaries containing the batch data.
-                   Each dict should have 'label' key with integer class label.
+                   Each dict should have 'original_label' key with integer class label.
             
         Returns:
             Loss tensor (CrossEntropyLoss)
         """
-        labels = torch.tensor([item["label"] for item in batch], device=self.device, dtype=torch.long)
+        labels = torch.tensor([item["original_label"] for item in batch], device=self.device, dtype=torch.long)
         return self.compute_loss(batch, labels)
 
     def enable_lora(
