@@ -81,6 +81,8 @@ def parse_args():
                         help="LLM模型ID（使用local_checkpoint时需要）")
     parser.add_argument("--tslanet_patch_size", type=int, default=8,
                         help="TSLANet的patch_size（使用tslanet编码器时）")
+    parser.add_argument("--random_init_llm", action="store_true",
+                        help="随机初始化LLM权重（用于测试完全随机初始化的模型）")
     
     # LoRA相关 (默认启用)
     parser.add_argument("--no_lora", action="store_true", help="禁用LoRA（不推荐）")
@@ -709,6 +711,31 @@ def main():
         # 启用LoRA
         if use_lora:
             model.enable_lora(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
+    
+    # 随机初始化LLM权重（用于测试完全随机初始化的模型）
+    if args.random_init_llm:
+        if rank == 0:
+            print("🎲 随机初始化LLM权重...")
+        from transformers import AutoModelForCausalLM
+        # 获取原始LLM的配置
+        llm_config = model.llm.config
+        # 创建一个全新的随机初始化的LLM
+        random_llm = AutoModelForCausalLM.from_config(
+            llm_config,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="eager",
+        ).to(device)
+        # 替换模型中的LLM
+        model.llm = random_llm
+        # 重新冻结LLM参数
+        for p in model.llm.parameters():
+            p.requires_grad = False
+        # 如果启用了LoRA，需要重新应用
+        if use_lora:
+            model.lora_enabled = False  # 重置状态
+            model.enable_lora(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
+        if rank == 0:
+            print("✅ LLM已随机初始化")
     
     # 启用梯度检查点
     if args.gradient_checkpointing:
