@@ -198,6 +198,12 @@ Time series data:"""
         # 保存原始标签用于评估
         sample["original_label"] = row["label"]
         sample["class_token"] = UCRClassificationDataset._label_to_token[row["label"]]
+        
+        # 添加整数标签 (0 到 K-1)
+        # 从 label_to_token 映射中获取索引
+        all_labels = sorted(UCRClassificationDataset._label_to_token.keys())
+        sample["int_label"] = all_labels.index(row["label"])
+        
         return sample
     
     @staticmethod
