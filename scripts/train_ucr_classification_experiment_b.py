@@ -359,8 +359,8 @@ def main():
         print(f"梯度检查点: {args.gradient_checkpointing}")
         print("=" * 60)
     
-    # 设置随机种子
-    set_seed(args.seed + rank)
+    # 设置随机种子（所有 rank 使用相同种子确保参数初始化一致）
+    set_seed(args.seed)  # 修复：不再使用 args.seed + rank
     
     # 设置设备
     if world_size > 1:
@@ -432,9 +432,16 @@ def main():
     
     # DDP包装
     if world_size > 1:
+        # 广播所有参数从 rank 0，确保所有 GPU 参数一致
+        if rank == 0:
+            print("📡 广播参数到所有 ranks...")
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+        
         model = DDP(model, device_ids=[local_rank])
         if rank == 0:
             print(f"✅ 模型已用DDP包装 (world_size={world_size})")
+            print("✅ 所有参数已从 rank 0 广播，确保一致性")
     
     # 创建数据加载器
     if rank == 0:
