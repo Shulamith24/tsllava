@@ -169,7 +169,11 @@ class PatchTSTWithAggregator(nn.Module):
         
         # 1) PatchTST backbone 提取特征
         backbone_output = self.backbone(past_values=past_values)
-        patch_embeddings = backbone_output.last_hidden_state  # [B, num_patches, d_model]
+        # PatchTST 输出: [B, num_channels, num_patches, d_model]
+        # 对于单变量 (num_channels=1)，squeeze 掉 channel 维度
+        patch_embeddings = backbone_output.last_hidden_state  # [B, 1, num_patches, d_model]
+        if patch_embeddings.dim() == 4:
+            patch_embeddings = patch_embeddings.squeeze(1)  # [B, num_patches, d_model]
         
         # 2) 投影到聚合头维度（如果需要）
         if self.projector is not None:
