@@ -5,16 +5,29 @@
 # SPDX-License-Identifier: MIT
 
 """
-PatchTST 在 UCR 数据集上的分类
+PatchTST + Transformer 聚合头在 UCR 数据集上的分类
 
-使用 HuggingFace 的 PatchTSTForClassification 进行时间序列分类
+使用 PatchTST backbone 提取 patch 特征，然后通过 Transformer 聚合头进行分类
 
 使用方法：
-    python scripts/train_patchtst_ucr.py \
-        --dataset Adiac \
-        --epochs 50 \
-        --batch_size 32 \
-        --lr 1e-3
+    # 基本使用（1 层聚合头）
+    python scripts/train_patchtst_aggregator_ucr.py \\
+        --dataset Adiac \\
+        --epochs 50 \\
+        --batch_size 32
+
+    # 自定义聚合头配置
+    python scripts/train_patchtst_aggregator_ucr.py \\
+        --dataset Adiac \\
+        --aggregator_layers 2 \\
+        --aggregator_hidden_size 256 \\
+        --epochs 50
+
+    # 冻结 backbone
+    python scripts/train_patchtst_aggregator_ucr.py \\
+        --dataset Adiac \\
+        --freeze_backbone \\
+        --epochs 50
 """
 
 import os
@@ -30,18 +43,18 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import PatchTSTConfig, PatchTSTForClassification
 from transformers import get_cosine_schedule_with_warmup
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+from opentslm.model.llm.PatchTSTWithAggregator import PatchTSTWithAggregator
 from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="PatchTST UCR 分类")
+    parser = argparse.ArgumentParser(description="PatchTST + Aggregator UCR 分类")
 
     # 数据相关
     parser.add_argument("--dataset", type=str, default="Adiac", help="UCR数据集名称")
@@ -52,12 +65,22 @@ def parse_args():
                        help="上下文长度（None则自动设置为数据集最大长度）")
     parser.add_argument("--patch_length", type=int, default=16, help="Patch 长度")
     parser.add_argument("--stride", type=int, default=8, help="Patch 步长")
-    parser.add_argument("--d_model", type=int, default=128, help="模型维度")
-    parser.add_argument("--num_attention_heads", type=int, default=8, help="Attention heads")
-    parser.add_argument("--num_hidden_layers", type=int, default=3, help="Transformer 层数")
-    parser.add_argument("--ffn_dim", type=int, default=512, help="FFN 维度")
+    parser.add_argument("--d_model", type=int, default=128, help="PatchTST 模型维度")
+    parser.add_argument("--num_attention_heads", type=int, default=8, help="PatchTST Attention heads")
+    parser.add_argument("--num_hidden_layers", type=int, default=3, help="PatchTST Transformer 层数")
+    parser.add_argument("--ffn_dim", type=int, default=512, help="PatchTST FFN 维度")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout")
-    parser.add_argument("--use_cls_token", action="store_true", default=True, help="使用 CLS token")
+    
+    # 聚合头配置（核心参数）
+    parser.add_argument("--aggregator_layers", type=int, default=1, help="聚合头 Transformer 层数")
+    parser.add_argument("--aggregator_hidden_size", type=int, default=None, 
+                       help="聚合头 hidden size（None则与d_model相同）")
+    parser.add_argument("--aggregator_num_heads", type=int, default=8, help="聚合头 attention heads")
+    parser.add_argument("--aggregator_ffn_dim", type=int, default=None, 
+                       help="聚合头 FFN 维度（None则自动计算）")
+    
+    # 冻结选项
+    parser.add_argument("--freeze_backbone", action="store_true", help="冻结 PatchTST backbone")
     
     # 训练相关
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
@@ -68,7 +91,7 @@ def parse_args():
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪")
     
     # 保存相关
-    parser.add_argument("--save_dir", type=str, default="results/patchtst", help="结果保存目录")
+    parser.add_argument("--save_dir", type=str, default="results/patchtst_aggregator", help="结果保存目录")
     
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
@@ -111,13 +134,13 @@ def get_dataset_stats(dataset_name: str, data_path: str):
     return num_classes, max_length
 
 
-def prepare_batch_for_patchtst(
+def prepare_batch(
     batch: List[Dict],
     context_length: int,
     device: str,
 ):
     """
-    将 UCR 批次转换为 PatchTST 格式
+    将 UCR 批次转换为模型输入格式
     
     Args:
         batch: UCR 格式
@@ -227,16 +250,12 @@ def train_one_epoch(
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}")
     for batch in pbar:
-        # 转换为 PatchTST 格式
-        past_values, labels = prepare_batch_for_patchtst(batch, context_length, device)
+        # 转换批次格式
+        past_values, labels = prepare_batch(batch, context_length, device)
         
         # 前向传播
-        outputs = model(
-            past_values=past_values,
-            target_values=labels,  # PatchTST 接受 target_values 计算损失
-        )
-        
-        loss = outputs.loss
+        outputs = model(past_values=past_values, labels=labels)
+        loss = outputs["loss"]
         
         # 反向传播
         optimizer.zero_grad()
@@ -276,21 +295,17 @@ def evaluate(
     num_batches = 0
     
     for batch in tqdm(data_loader, desc=desc):
-        # 转换为 PatchTST 格式
-        past_values, labels = prepare_batch_for_patchtst(batch, context_length, device)
+        # 转换批次格式
+        past_values, labels = prepare_batch(batch, context_length, device)
         
         # 前向传播
-        outputs = model(
-            past_values=past_values,
-            target_values=labels,
-        )
+        outputs = model(past_values=past_values, labels=labels)
         
-        total_loss += outputs.loss.item()
+        total_loss += outputs["loss"].item()
         num_batches += 1
         
         # 预测
-        logits = outputs.prediction_logits  # [B, num_classes]
-        predictions = torch.argmax(logits, dim=-1)  # [B]
+        predictions = torch.argmax(outputs["logits"], dim=-1)  # [B]
         
         all_predictions.extend(predictions.cpu().tolist())
         all_labels.extend(labels.cpu().tolist())
@@ -311,10 +326,12 @@ def main():
     args = parse_args()
     
     print("=" * 60)
-    print("PatchTST UCR 分类")
+    print("PatchTST + Transformer 聚合头 UCR 分类")
     print("=" * 60)
     print(f"时间: {datetime.datetime.now()}")
     print(f"数据集: {args.dataset}")
+    print(f"聚合头层数: {args.aggregator_layers}")
+    print(f"冻结 backbone: {args.freeze_backbone}")
     print("=" * 60)
     
     # 设置随机种子
@@ -344,20 +361,25 @@ def main():
     print(f"   预期 patch 数: {num_patches}")
     
     # 创建保存目录
+    agg_str = f"L{args.aggregator_layers}"
+    if args.aggregator_hidden_size:
+        agg_str += f"_H{args.aggregator_hidden_size}"
+    if args.freeze_backbone:
+        agg_str += "_frozen"
+    
     save_dir = os.path.join(
         args.save_dir, 
         args.dataset, 
-        f"L{context_length}_P{args.patch_length}_S{args.stride}"
+        f"P{args.patch_length}_S{args.stride}_{agg_str}"
     )
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "config.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
     
     # 创建模型
-    print("\n🔧 创建 PatchTST 模型...")
-    config = PatchTSTConfig(
-        num_input_channels=1,  # UCR 单变量
-        num_targets=num_classes,
+    print("\n🔧 创建模型...")
+    model = PatchTSTWithAggregator(
+        num_classes=num_classes,
         context_length=context_length,
         patch_length=args.patch_length,
         stride=args.stride,
@@ -366,17 +388,20 @@ def main():
         num_hidden_layers=args.num_hidden_layers,
         ffn_dim=args.ffn_dim,
         dropout=args.dropout,
-        use_cls_token=args.use_cls_token,
-    )
+        aggregator_layers=args.aggregator_layers,
+        aggregator_hidden_size=args.aggregator_hidden_size,
+        aggregator_num_heads=args.aggregator_num_heads,
+        aggregator_ffn_dim=args.aggregator_ffn_dim,
+        device=device,
+    ).to(device)
     
-    model = PatchTSTForClassification(config=config).to(device)
+    # 冻结 backbone
+    if args.freeze_backbone:
+        model.freeze_backbone()
     
-    # 打印模型信息
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"   总参数量: {total_params:,}")
-    print(f"   d_model: {args.d_model}")
-    print(f"   num_layers: {args.num_hidden_layers}")
-    print(f"   use_cls_token: {args.use_cls_token}")
+    # 打印可训练参数
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"可训练参数: {trainable_params:,}")
     
     # 创建数据加载器
     print("\n📂 加载数据...")
@@ -391,7 +416,7 @@ def main():
     # 创建优化器
     print("\n⚙️  创建优化器...")
     optimizer = AdamW(
-        model.parameters(),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
@@ -455,7 +480,7 @@ def main():
                         "epoch": epoch,
                         "val_loss": val_loss,
                         "val_acc": val_acc,
-                        "config": config.to_dict(),
+                        "config": model.get_config(),
                         "args": vars(args),
                     }
                     torch.save(checkpoint, os.path.join(save_dir, "best_model.pt"))
@@ -506,7 +531,10 @@ def main():
             "dataset": args.dataset,
             "num_classes": num_classes,
             "context_length": context_length,
-            "total_params": total_params,
+            "aggregator_layers": args.aggregator_layers,
+            "aggregator_hidden_size": args.aggregator_hidden_size or args.d_model,
+            "freeze_backbone": args.freeze_backbone,
+            "total_params": model.count_parameters(),
             "best_val_acc": best_val_acc,
             "test_loss": test_results["loss"],
             "test_accuracy": test_results["accuracy"],
