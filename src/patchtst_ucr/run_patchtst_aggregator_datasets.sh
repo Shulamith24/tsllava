@@ -67,14 +67,21 @@ echo "Aggregator 层数: $AGGREGATOR_LAYERS"
 echo ""
 
 # 初始化结果文件
-echo "============================================================" > "$OUTPUT_FILE"
-echo "PatchTST + Aggregator UCR 分类结果汇总" >> "$OUTPUT_FILE"
-echo "时间: $(date)" >> "$OUTPUT_FILE"
-echo "Aggregator 层数: $AGGREGATOR_LAYERS" >> "$OUTPUT_FILE"
-echo "============================================================" >> "$OUTPUT_FILE"
-echo "" >> "$OUTPUT_FILE"
-printf "%-40s %s\n" "Dataset" "Test Accuracy" >> "$OUTPUT_FILE"
-echo "------------------------------------------------------------" >> "$OUTPUT_FILE"
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "创建新结果文件: $OUTPUT_FILE"
+    echo "============================================================" > "$OUTPUT_FILE"
+    echo "PatchTST + Aggregator UCR 分类结果汇总" >> "$OUTPUT_FILE"
+    echo "时间: $(date)" >> "$OUTPUT_FILE"
+    echo "Aggregator 层数: $AGGREGATOR_LAYERS" >> "$OUTPUT_FILE"
+    echo "============================================================" >> "$OUTPUT_FILE"
+    echo "" >> "$OUTPUT_FILE"
+    printf "%-40s %s\n" "Dataset" "Test Accuracy" >> "$OUTPUT_FILE"
+    echo "------------------------------------------------------------" >> "$OUTPUT_FILE"
+else
+    echo "发现已有结果文件，启用断点续训模式: $OUTPUT_FILE"
+    echo "------------------------------------------------------------" >> "$OUTPUT_FILE"
+    echo "断点续训开始时间: $(date)" >> "$OUTPUT_FILE"
+fi
 
 # 记录成功和失败的数据集
 SUCCESS_COUNT=0
@@ -91,6 +98,16 @@ for i in "${!DATASETS[@]}"; do
     echo "============================================================"
     echo "[$DATASET_NUM/$TOTAL_NUM] 训练数据集: $DATASET"
     echo "============================================================"
+    
+    #断点续训：检查是否已经完成
+    if grep -q "^$DATASET " "$OUTPUT_FILE" 2>/dev/null; then
+        echo "✓ $DATASET 已完成，跳过"
+        # 简单统计一下，虽然跳过了，但也算作成功的一部分（或者不算在本次运行统计里，看需求，这里简单处理不加success count防止重复计数困惑，或者可以直接count）
+        # 这里的实现：仅跳过执行，不增加SUCCESS_COUNT，或者我们可以读取已有的acc
+        PREV_ACC=$(grep "^$DATASET " "$OUTPUT_FILE" | awk '{print $NF}')
+        echo "  (历史记录 Accuracy: $PREV_ACC)"
+        continue
+    fi
     
     # 构建训练命令
     CMD="python ${SCRIPT_DIR}/train_aggregator.py \
