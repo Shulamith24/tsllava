@@ -11,8 +11,11 @@
 set -e  # 遇到错误立即退出
 
 # 获取脚本所在目录的绝对路径，从而推导项目根目录
+# 获取脚本所在目录的绝对路径
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# 推导项目根目录 (src/patchtst_ucr -> src -> root)
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # 切换到项目根目录
 cd "$PROJECT_ROOT"
@@ -21,6 +24,7 @@ echo "============================================================"
 echo "PatchTST UCR 批量训练"
 echo "============================================================"
 echo "项目根目录: $PROJECT_ROOT"
+echo "脚本目录: $SCRIPT_DIR"
 echo "开始时间: $(date)"
 echo "============================================================"
 
@@ -84,8 +88,8 @@ for i in "${!DATASETS[@]}"; do
     echo "[$DATASET_NUM/$TOTAL_NUM] 训练数据集: $DATASET"
     echo "============================================================"
     
-    # 运行训练脚本
-    if python "${PROJECT_ROOT}/scripts/train_patchtst_ucr.py" \
+    # 运行训练脚本 (直接引用同一目录下的 train.py)
+    if python "${SCRIPT_DIR}/train.py" \
         --dataset "$DATASET" \
         --data_path "$DATA_PATH" \
         --save_dir "$RESULTS_DIR" \

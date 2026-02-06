@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2025 Stanford University, ETH Zurich, and the project authors (see CONTRIBUTORS.md)
-# SPDX-FileCopyrightText: 2025 This source file is part of the OpenTSLM open-source project.
-#
+# SPDX-FileCopyrightText: 2025 Stanford University, ETH Zurich, and the project authors
 # SPDX-License-Identifier: MIT
 
 """
 PatchTST 在 UCR 数据集上的分类
 
 使用 HuggingFace 的 PatchTSTForClassification 进行时间序列分类
+独立模块，不依赖 opentslm 包
 
 使用方法：
-    python scripts/train_patchtst_ucr.py \
-        --dataset Adiac \
-        --epochs 50 \
-        --batch_size 32 \
-        --lr 1e-3
+    python -m patchtst_ucr.train --dataset Adiac --epochs 50
+
+    或者从项目根目录:
+    python src/patchtst_ucr/train.py --dataset Adiac --epochs 50
 """
 
 import os
@@ -33,11 +31,13 @@ from tqdm.auto import tqdm
 from transformers import PatchTSTConfig, PatchTSTForClassification
 from transformers import get_cosine_schedule_with_warmup
 
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "src"))
+# 添加 src 目录到路径（支持直接运行）
+script_dir = Path(__file__).parent
+src_dir = script_dir.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
+from patchtst_ucr.ucr_dataset import UCRDatasetForPatchTST, get_dataset_info
 
 
 def parse_args():
@@ -91,26 +91,6 @@ def set_seed(seed: int):
     np.random.seed(seed)
 
 
-def get_dataset_stats(dataset_name: str, data_path: str):
-    """获取数据集统计信息"""
-    temp_dataset = UCRClassificationDataset(
-        split="train",
-        EOS_TOKEN="<eos>",
-        dataset_name=dataset_name,
-        raw_data_path=data_path,
-    )
-    
-    num_classes = UCRClassificationDataset.get_num_classes()
-    
-    # 计算最大长度
-    max_length = 0
-    for sample in temp_dataset:
-        for ts in sample["time_series"]:
-            max_length = max(max_length, len(ts))
-    
-    return num_classes, max_length
-
-
 def prepare_batch_for_patchtst(
     batch: List[Dict],
     context_length: int,
@@ -160,24 +140,21 @@ def prepare_batch_for_patchtst(
 def create_data_loaders(args, num_classes: int, context_length: int):
     """创建数据加载器"""
     # 创建数据集
-    train_dataset = UCRClassificationDataset(
+    train_dataset = UCRDatasetForPatchTST(
+        dataset_name=args.dataset,
         split="train",
-        EOS_TOKEN="<eos>",
-        dataset_name=args.dataset,
         raw_data_path=args.data_path,
     )
     
-    val_dataset = UCRClassificationDataset(
+    val_dataset = UCRDatasetForPatchTST(
+        dataset_name=args.dataset,
         split="validation",
-        EOS_TOKEN="<eos>",
-        dataset_name=args.dataset,
         raw_data_path=args.data_path,
     )
     
-    test_dataset = UCRClassificationDataset(
-        split="test",
-        EOS_TOKEN="<eos>",
+    test_dataset = UCRDatasetForPatchTST(
         dataset_name=args.dataset,
+        split="test",
         raw_data_path=args.data_path,
     )
     
@@ -326,7 +303,7 @@ def main():
     
     # 获取数据集统计信息
     print("\n📂 分析数据集...")
-    num_classes, max_length = get_dataset_stats(args.dataset, args.data_path)
+    num_classes, max_length = get_dataset_info(args.dataset, args.data_path)
     
     # 确定 context_length
     if args.context_length is None:
