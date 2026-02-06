@@ -33,6 +33,9 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -126,6 +129,12 @@ def parse_args():
     # 保存相关
     parser.add_argument("--save_dir", type=str, default="results/patchtst_dual_branch", help="结果保存目录")
     
+    # 分布式训练
+    parser.add_argument("--local_rank", type=int, default=-1,
+                       help="分布式训练的本地进程排名（由torchrun自动设置）")
+    parser.add_argument("--use_ddp", action="store_true",
+                       help="使用分布式数据并行(DDP)多 GPU训练")
+    
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--device", type=str, default="cuda", help="设备")
@@ -195,8 +204,8 @@ def prepare_batch(
     return past_values, labels, attention_mask
 
 
-def create_data_loaders(args, num_classes: int, context_length: int):
-    """创建数据加载器"""
+def create_data_loaders(args, num_classes: int, context_length: int, use_ddp: bool = False, rank: int = 0):
+    """创建数据加载器（支持分布式训练）"""
     train_dataset = UCRDatasetForPatchTST(
         dataset_name=args.dataset,
         split="train",
@@ -218,10 +227,18 @@ def create_data_loaders(args, num_classes: int, context_length: int):
     def collate_fn(batch):
         return batch
     
+    # 分布式训练时使用DistributedSampler
+    train_sampler = None
+    shuffle = True
+    if use_ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        shuffle = False  # sampler已处理shuffle
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=train_sampler,
         collate_fn=collate_fn,
     )
     
@@ -239,7 +256,7 @@ def create_data_loaders(args, num_classes: int, context_length: int):
         collate_fn=collate_fn,
     )
     
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, train_sampler
 
 
 def train_one_epoch(
@@ -348,22 +365,51 @@ def evaluate(
 def main():
     args = parse_args()
     
-    print("=" * 70)
-    print("PatchTST + VLM双分支融合 UCR分类")
-    print("=" * 70)
-    print(f"时间: {datetime.datetime.now()}")
-    print(f"数据集: {args.dataset}")
-    print(f"图像编码器: {args.image_encoder_type}")
-    print(f"融合方式: {args.fusion_type}")
-    print(f"可学习图像转换: {not args.no_learnable_image}")
-    print("=" * 70)
+    # ============ 分布式训练初始化 ============
+    use_ddp = args.use_ddp and torch.cuda.is_available()
+    local_rank = args.local_rank
+    rank = 0
+    world_size = 1
     
-    set_seed(args.seed)
+    if use_ddp:
+        # 从环境变量获取分布式信息（torchrun会自动设置）
+        if local_rank == -1:
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        
+        # 初始化进程组
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+        
+        if rank == 0:
+            print(f"🌐 分布式训练: {world_size} 个 GPU")
+    else:
+        device = args.device if torch.cuda.is_available() else "cpu"
     
-    device = args.device if torch.cuda.is_available() else "cpu"
-    print(f"\n使用设备: {device}")
+    # 只在主进程打印信息
+    is_main_process = (rank == 0)
     
-    print("\n📂 分析数据集...")
+    if is_main_process:
+        print("=" * 70)
+        print("PatchTST + VLM双分支融合 UCR分类")
+        print("=" * 70)
+        print(f"时间: {datetime.datetime.now()}")
+        print(f"数据集: {args.dataset}")
+        print(f"图像编码器: {args.image_encoder_type}")
+        print(f"融合方式: {args.fusion_type}")
+        print(f"可学习图像转换: {not args.no_learnable_image}")
+        if use_ddp:
+            print(f"分布式训练: {world_size} GPUs")
+        print("=" * 70)
+    
+    set_seed(args.seed + rank)  # 不同进程使用不同种子
+    
+    if is_main_process:
+        print(f"\n使用设备: {device}")
+        print("\n📂 分析数据集...")
+    
     num_classes, max_length = get_dataset_info(args.dataset, args.data_path)
     
     if args.context_length is None:
@@ -371,9 +417,10 @@ def main():
     else:
         context_length = args.context_length
     
-    print(f"   类别数: {num_classes}")
-    print(f"   最大长度: {max_length}")
-    print(f"   Context length: {context_length}")
+    if is_main_process:
+        print(f"   类别数: {num_classes}")
+        print(f"   最大长度: {max_length}")
+        print(f"   Context length: {context_length}")
     
     # 创建保存目录
     config_str = f"{args.image_encoder_type}_{args.fusion_type}"
@@ -387,11 +434,14 @@ def main():
         args.dataset, 
         config_str
     )
-    os.makedirs(save_dir, exist_ok=True)
-    with open(os.path.join(save_dir, "config.json"), "w") as f:
-        json.dump(vars(args), f, indent=2)
+    if is_main_process:
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, "config.json"), "w") as f:
+            json.dump(vars(args), f, indent=2)
     
-    print("\n🔧 创建模型...")
+    if is_main_process:
+        print("\n🔧 创建模型...")
+    
     model = PatchTSTWithVisionBranch(
         num_classes=num_classes,
         context_length=context_length,
@@ -425,24 +475,40 @@ def main():
         device=device,
     ).to(device)
     
+    # DDP包装模型
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    
     if args.freeze_patchtst:
-        model.freeze_patchtst()
+        if use_ddp:
+            model.module.freeze_patchtst()
+        else:
+            model.freeze_patchtst()
     if args.freeze_vision:
-        model.freeze_vision()
+        if use_ddp:
+            model.module.freeze_vision()
+        else:
+            model.freeze_vision()
     
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"可训练参数: {trainable_params:,}")
+    if is_main_process:
+        print(f"可训练参数: {trainable_params:,}")
     
-    print("\n📂 加载数据...")
-    train_loader, val_loader, test_loader = create_data_loaders(
-        args, num_classes, context_length
+    if is_main_process:
+        print("\n📂 加载数据...")
+    
+    train_loader, val_loader, test_loader, train_sampler = create_data_loaders(
+        args, num_classes, context_length, use_ddp=use_ddp, rank=rank
     )
     
-    print(f"   Train batches: {len(train_loader)}")
-    print(f"   Val batches: {len(val_loader)}")
-    print(f"   Test batches: {len(test_loader)}")
+    if is_main_process:
+        print(f"   Train batches: {len(train_loader)}")
+        print(f"   Val batches: {len(val_loader)}")
+        print(f"   Test batches: {len(test_loader)}")
     
-    print("\n⚙️  创建优化器...")
+    if is_main_process:
+        print("\n⚙️  创建优化器...")
+    
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
@@ -458,28 +524,38 @@ def main():
         num_training_steps=total_steps,
     )
     
-    print(f"   Total steps: {total_steps}")
-    print(f"   Warmup steps: {warmup_steps}")
+    if is_main_process:
+        print(f"   Total steps: {total_steps}")
+        print(f"   Warmup steps: {warmup_steps}")
     
     # 显存优化设置
     use_amp = args.fp16 or args.bf16
     amp_dtype = torch.bfloat16 if args.bf16 else torch.float16
     scaler = torch.cuda.amp.GradScaler() if args.fp16 else None  # BF16不需要scaler
     
-    if use_amp:
-        print(f"   ⚡ 混合精度: {'BF16' if args.bf16 else 'FP16'}")
-    if args.grad_accum_steps > 1:
-        print(f"   📊 梯度累积: {args.grad_accum_steps} 步")
-        effective_batch_size = args.batch_size * args.grad_accum_steps
-        print(f"   有效批次大小: {effective_batch_size}")
+    if is_main_process:
+        if use_amp:
+            print(f"   ⚡ 混合精度: {'BF16' if args.bf16 else 'FP16'}")
+        if args.grad_accum_steps > 1:
+            print(f"   📊 梯度累积: {args.grad_accum_steps} 步")
+            effective_batch_size = args.batch_size * args.grad_accum_steps
+            if use_ddp:
+                effective_batch_size *= world_size
+            print(f"   有效批次大小: {effective_batch_size}")
     
-    print("\n🚀 开始训练...")
+    if is_main_process:
+        print("\n🚀 开始训练...")
+    
     best_val_acc = 0.0
     patience_counter = 0
     loss_history = []
     
     try:
         for epoch in range(1, args.epochs + 1):
+            # DDP: 设置sampler的epoch以确保不同epoch的shuffle不同
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            
             train_loss = train_one_epoch(
                 model, train_loader, optimizer, scheduler,
                 context_length, args.grad_clip, device,
@@ -490,11 +566,15 @@ def main():
                 amp_dtype=amp_dtype,
             )
             
-            if epoch % args.eval_every == 0 or epoch == args.epochs:
+            # 只在主进程上进行评估和保存
+            if is_main_process and (epoch % args.eval_every == 0 or epoch == args.epochs):
                 print(f"\n📊 Epoch {epoch} 评估...")
                 
+                # 获取原始模型用于评估
+                eval_model = model.module if use_ddp else model
+                
                 val_results = evaluate(
-                    model, val_loader, context_length, device, "Validating"
+                    eval_model, val_loader, context_length, device, "Validating"
                 )
                 val_loss = val_results["loss"]
                 val_acc = val_results["accuracy"]
@@ -514,13 +594,13 @@ def main():
                     patience_counter = 0
                     
                     checkpoint = {
-                        "model_state": model.state_dict(),
+                        "model_state": eval_model.state_dict(),
                         "optimizer_state": optimizer.state_dict(),
                         "scheduler_state": scheduler.state_dict(),
                         "epoch": epoch,
                         "val_loss": val_loss,
                         "val_acc": val_acc,
-                        "config": model.get_config(),
+                        "config": eval_model.get_config(),
                         "args": vars(args),
                     }
                     torch.save(checkpoint, os.path.join(save_dir, "best_model.pt"))
@@ -537,65 +617,76 @@ def main():
                 })
                 with open(os.path.join(save_dir, "loss_history.json"), "w") as f:
                     json.dump(loss_history, f, indent=2)
-            else:
+            elif is_main_process:
                 print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}")
             
             if patience_counter >= args.early_stop:
-                print(f"\n⏹️  早停! 验证准确率 {args.early_stop} 轮未改进")
+                if is_main_process:
+                    print(f"\n⏹️  早停! 验证准确率 {args.early_stop} 轮未改进")
                 break
         
-        print("\n" + "=" * 70)
-        print("📋 最终测试评估...")
-        
-        best_ckpt = torch.load(
-            os.path.join(save_dir, "best_model.pt"),
-            map_location=device,
-            weights_only=False
-        )
-        model.load_state_dict(best_ckpt["model_state"])
-        
-        test_results = evaluate(
-            model, test_loader, context_length, device, "Testing"
-        )
-        
-        print(f"\n✅ 测试结果:")
-        print(f"   Test Loss: {test_results['loss']:.4f}")
-        print(f"   Test Accuracy: {test_results['accuracy']:.4f}")
-        
-        final_results = {
-            "dataset": args.dataset,
-            "num_classes": num_classes,
-            "context_length": context_length,
-            "image_encoder_type": args.image_encoder_type,
-            "fusion_type": args.fusion_type,
-            "learnable_image": not args.no_learnable_image,
-            "total_params": model.count_parameters(),
-            "best_val_acc": best_val_acc,
-            "test_loss": test_results["loss"],
-            "test_accuracy": test_results["accuracy"],
-            "epochs_trained": epoch,
-        }
-        
-        with open(os.path.join(save_dir, "final_results.json"), "w") as f:
-            json.dump(final_results, f, indent=2)
-        
-        with open(os.path.join(save_dir, "test_predictions.json"), "w") as f:
-            json.dump({
-                "predictions": test_results["predictions"],
-                "labels": test_results["labels"],
-            }, f, indent=2)
-        
-        print("=" * 70)
-        print(f"结果保存到: {save_dir}")
-        print("=" * 70)
+        # 最终测试评估（只在主进程进行）
+        if is_main_process:
+            print("\n" + "=" * 70)
+            print("📋 最终测试评估...")
+            
+            eval_model = model.module if use_ddp else model
+            
+            best_ckpt = torch.load(
+                os.path.join(save_dir, "best_model.pt"),
+                map_location=device,
+                weights_only=False
+            )
+            eval_model.load_state_dict(best_ckpt["model_state"])
+            
+            test_results = evaluate(
+                eval_model, test_loader, context_length, device, "Testing"
+            )
+            
+            print(f"\n✅ 测试结果:")
+            print(f"   Test Loss: {test_results['loss']:.4f}")
+            print(f"   Test Accuracy: {test_results['accuracy']:.4f}")
+            
+            final_results = {
+                "dataset": args.dataset,
+                "num_classes": num_classes,
+                "context_length": context_length,
+                "image_encoder_type": args.image_encoder_type,
+                "fusion_type": args.fusion_type,
+                "learnable_image": not args.no_learnable_image,
+                "total_params": eval_model.count_parameters(),
+                "best_val_acc": best_val_acc,
+                "test_loss": test_results["loss"],
+                "test_accuracy": test_results["accuracy"],
+                "epochs_trained": epoch,
+            }
+            
+            with open(os.path.join(save_dir, "final_results.json"), "w") as f:
+                json.dump(final_results, f, indent=2)
+            
+            with open(os.path.join(save_dir, "test_predictions.json"), "w") as f:
+                json.dump({
+                    "predictions": test_results["predictions"],
+                    "labels": test_results["labels"],
+                }, f, indent=2)
+            
+            print("=" * 70)
+            print(f"结果保存到: {save_dir}")
+            print("=" * 70)
     
     except KeyboardInterrupt:
-        print("\n⚠️  训练被中断")
+        if is_main_process:
+            print("\n⚠️  训练被中断")
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
-        import traceback
-        traceback.print_exc()
+        if is_main_process:
+            print(f"\n❌ 错误: {e}")
+            import traceback
+            traceback.print_exc()
         return 1
+    finally:
+        # 清理DDP进程组
+        if use_ddp:
+            dist.destroy_process_group()
     
     return 0
 

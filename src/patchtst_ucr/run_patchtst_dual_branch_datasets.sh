@@ -3,11 +3,17 @@
 # PatchTST + VLM双分支融合 UCR全数据集批量训练脚本
 # 
 # 用法：
-#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh [image_encoder] [fusion_type] [gpu_id]
+#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh [image_encoder] [fusion_type] [num_gpus]
 # 
 # 示例：
-#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh vit concat 0
-#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh resnet cross_attention 1
+#   # 单GPU (默认)
+#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh vit concat 1
+#   
+#   # 2张GPU DDP并行
+#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh vit concat 2
+#   
+#   # 4张GPU DDP并行
+#   bash src/patchtst_ucr/run_patchtst_dual_branch_datasets.sh resnet cross_attention 4
 # ==============================================================================
 
 set -e
@@ -24,10 +30,7 @@ cd "$PROJECT_ROOT"
 # 默认参数
 IMAGE_ENCODER=${1:-"vit"}
 FUSION_TYPE=${2:-"concat"}
-GPU_ID=${3:-"0"}
-
-# 设置CUDA设备
-export CUDA_VISIBLE_DEVICES=$GPU_ID
+NUM_GPUS=${3:-"1"}
 
 echo "============================================================"
 echo "PatchTST + VLM双分支 UCR批量训练"
@@ -35,7 +38,7 @@ echo "============================================================"
 echo "项目根目录: $PROJECT_ROOT"
 echo "图像编码器: $IMAGE_ENCODER"
 echo "融合方式: $FUSION_TYPE"
-echo "GPU ID: $GPU_ID"
+echo "GPU数量: $NUM_GPUS"
 echo "开始时间: $(date)"
 echo "============================================================"
 
@@ -47,13 +50,22 @@ OUTPUT_FILE="${RESULTS_DIR}/all_datasets_accuracy.txt"
 
 # 训练超参数 (针对24GB显存优化)
 EPOCHS=50
-BATCH_SIZE=4             # 减小batch size
-GRAD_ACCUM_STEPS=4       # 梯度累积4步 = 有效batch_size 16
+BATCH_SIZE=4             # 每GPU batch size
+GRAD_ACCUM_STEPS=4       # 梯度累积4步
 LR=1e-3
 EVAL_BATCH_SIZE=16
 EVAL_EVERY=5
 EARLY_STOP=15
-USE_FP16="--fp16"        # 启用FP16混合精度
+USE_AMP="--bf16"         # 启用BF16混合精度 (4090/3090支持)
+
+# DDP相关参数
+if [ "$NUM_GPUS" -gt 1 ]; then
+    USE_DDP="--use_ddp"
+    LAUNCHER="torchrun --nproc_per_node=$NUM_GPUS"
+else
+    USE_DDP=""
+    LAUNCHER="python"
+fi
 
 # 创建结果目录
 mkdir -p "$RESULTS_DIR"
@@ -78,6 +90,7 @@ echo ""
 # 初始化结果文件
 echo "============================================================" > "$OUTPUT_FILE"
 echo "PatchTST + VLM双分支 (${IMAGE_ENCODER} + ${FUSION_TYPE}) 结果汇总" >> "$OUTPUT_FILE"
+echo "GPU数量: $NUM_GPUS" >> "$OUTPUT_FILE"
 echo "时间: $(date)" >> "$OUTPUT_FILE"
 echo "============================================================" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
@@ -116,21 +129,20 @@ for i in "${!DATASETS[@]}"; do
         EXTRA_ARGS="$EXTRA_ARGS --fusion_type concat"
     fi
     
-    # 运行训练脚本
-    # 注意：使用 python -m patchtst_ucr.train_dual_branch 方式运行
-    if python -m patchtst_ucr.train_dual_branch \
+    # 运行训练脚本 (支持单GPU和多GPU DDP)
+    if $LAUNCHER -m patchtst_ucr.train_dual_branch \
         --dataset "$DATASET" \
         --data_path "$DATA_PATH" \
         --save_dir "$RESULTS_DIR" \
         --epochs $EPOCHS \
         --batch_size $BATCH_SIZE \
         --grad_accum_steps $GRAD_ACCUM_STEPS \
-        $USE_FP16 \
+        $USE_AMP \
+        $USE_DDP \
         --lr $LR \
         --eval_batch_size $EVAL_BATCH_SIZE \
         --eval_every $EVAL_EVERY \
         --early_stop $EARLY_STOP \
-        --device "cuda" \
         $EXTRA_ARGS; then
         
         # 提取测试准确率
