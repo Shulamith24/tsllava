@@ -13,10 +13,11 @@ PatchTSTWithAggregator: PatchTST Backbone + Transformer 聚合头
 
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from transformers import PatchTSTConfig, PatchTSTModel
 
 from .aggregator import SmallTransformerAggregator
+from .projector import MLPProjector, LinearProjector
 
 
 class PatchTSTWithAggregator(nn.Module):
@@ -55,6 +56,9 @@ class PatchTSTWithAggregator(nn.Module):
         aggregator_hidden_size: Optional[int] = None,
         aggregator_num_heads: int = 8,
         aggregator_ffn_dim: Optional[int] = None,
+        # 投影层参数
+        projector_type: Literal["mlp", "linear", "none"] = "mlp",
+        projector_dropout: float = 0.1,
         device: str = "cuda",
     ):
         super().__init__()
@@ -63,6 +67,7 @@ class PatchTSTWithAggregator(nn.Module):
         self.context_length = context_length
         self.d_model = d_model
         self.device = device
+        self.projector_type = projector_type
         
         # 1) PatchTST Backbone (use_cls_token=False)
         patchtst_config = PatchTSTConfig(
@@ -87,13 +92,26 @@ class PatchTSTWithAggregator(nn.Module):
         self.aggregator_hidden_size = aggregator_hidden_size or d_model
         self.aggregator_ffn_dim = aggregator_ffn_dim or (self.aggregator_hidden_size * 4)
         
-        # 如果聚合头维度与 backbone 不同，需要投影层
-        if self.aggregator_hidden_size != d_model:
-            self.projector = nn.Linear(d_model, self.aggregator_hidden_size)
+        # 3) 投影层（根据类型选择）
+        if projector_type == "none":
+            # 无投影层，强制aggregator维度与d_model相同
+            if aggregator_hidden_size is not None and aggregator_hidden_size != d_model:
+                print(f"⚠️  projector_type='none' 时，aggregator_hidden_size被强制设为{d_model}")
+            self.aggregator_hidden_size = d_model
+            self.projector = None
+        elif self.aggregator_hidden_size != d_model:
+            # 需要投影层
+            if projector_type == "mlp":
+                self.projector = MLPProjector(d_model, self.aggregator_hidden_size, dropout=projector_dropout)
+            elif projector_type == "linear":
+                self.projector = LinearProjector(d_model, self.aggregator_hidden_size)
+            else:
+                raise ValueError(f"Unknown projector_type: {projector_type}")
         else:
+            # 维度相同，不需要投影
             self.projector = None
         
-        # 3) 聚合头
+        # 4) 聚合头
         self.aggregator = SmallTransformerAggregator(
             num_layers=aggregator_layers,
             hidden_size=self.aggregator_hidden_size,

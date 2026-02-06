@@ -29,7 +29,7 @@ echo "============================================================"
 DATA_PATH="${PROJECT_ROOT}/data"
 UCR_DIR="${DATA_PATH}/UCRArchive_2018"
 RESULTS_DIR="${PROJECT_ROOT}/results/patchtst_aggregator"
-OUTPUT_FILE="${RESULTS_DIR}/all_datasets_accuracy.txt"
+OUTPUT_FILE="${RESULTS_DIR}/all_datasets_accuracy_NewAggregator.txt"
 
 # 训练超参数（可根据需要修改）
 EPOCHS=100

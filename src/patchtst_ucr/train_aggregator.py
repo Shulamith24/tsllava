@@ -68,6 +68,13 @@ def parse_args():
     parser.add_argument("--aggregator_ffn_dim", type=int, default=None, 
                        help="聚合头 FFN 维度（None则自动计算）")
     
+    # 投影层配置
+    parser.add_argument("--projector_type", type=str, default="mlp", 
+                       choices=["mlp", "linear", "none"],
+                       help="投影层类型: mlp(LayerNorm+Linear+GELU), linear(仅Linear), none(无投影)")
+    parser.add_argument("--projector_dropout", type=float, default=0.1, 
+                       help="MLP投影层的Dropout概率")
+    
     # 冻结选项
     parser.add_argument("--freeze_backbone", action="store_true", help="冻结 PatchTST backbone")
     
@@ -332,6 +339,8 @@ def main():
         aggregator_hidden_size=args.aggregator_hidden_size,
         aggregator_num_heads=args.aggregator_num_heads,
         aggregator_ffn_dim=args.aggregator_ffn_dim,
+        projector_type=args.projector_type,
+        projector_dropout=args.projector_dropout,
         device=device,
     ).to(device)
     

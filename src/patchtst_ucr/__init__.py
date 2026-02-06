@@ -6,6 +6,7 @@
 from .ucr_loader import ensure_ucr_data, load_ucr_dataset, get_all_ucr_datasets
 from .ucr_dataset import UCRDatasetForPatchTST, get_dataset_info
 from .aggregator import SmallTransformerAggregator
+from .projector import MLPProjector, LinearProjector
 from .model import PatchTSTWithAggregator
 
 __all__ = [
@@ -15,5 +16,7 @@ __all__ = [
     "UCRDatasetForPatchTST",
     "get_dataset_info",
     "SmallTransformerAggregator",
+    "MLPProjector",
+    "LinearProjector",
     "PatchTSTWithAggregator",
 ]
