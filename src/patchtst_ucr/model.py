@@ -168,6 +168,7 @@ class PatchTSTWithAggregator(nn.Module):
         self,
         past_values: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """
         前向传播
@@ -175,6 +176,7 @@ class PatchTSTWithAggregator(nn.Module):
         Args:
             past_values: [B, context_length, 1] 输入时间序列
             labels: [B] 可选的分类标签
+            attention_mask: [B, context_length] 可选的注意力掩码，1表示有效，0表示padding
             
         Returns:
             包含 loss (如果提供 labels) 和 logits 的字典
@@ -190,6 +192,8 @@ class PatchTSTWithAggregator(nn.Module):
         if patch_embeddings.dim() == 4:
             patch_embeddings = patch_embeddings.squeeze(1)  # [B, num_patches, d_model]
         
+        num_patches = patch_embeddings.size(1)
+        
         # 2) 投影到聚合头维度（如果需要）
         if self.projector is not None:
             patch_embeddings = self.projector(patch_embeddings)  # [B, num_patches, aggregator_hidden_size]
@@ -198,16 +202,40 @@ class PatchTSTWithAggregator(nn.Module):
         ans_tokens = self.ans_token.expand(B, -1, -1).to(device)  # [B, 1, aggregator_hidden_size]
         sequence = torch.cat([patch_embeddings, ans_tokens], dim=1)  # [B, num_patches+1, H]
         
-        # 4) 聚合头处理
-        hidden_states = self.aggregator(sequence)  # [B, num_patches+1, H]
+        # 4) 构建 aggregator 的 attention mask
+        if attention_mask is not None:
+            # 将时间序列级别的mask转换为patch级别的mask
+            # 策略：如果一个patch内有任何有效点，则该patch有效
+            patch_length = self.backbone.config.patch_length
+            stride = self.backbone.config.stride
+            
+            # 计算每个patch的有效性
+            patch_mask = []
+            for i in range(num_patches):
+                start_idx = i * stride
+                end_idx = min(start_idx + patch_length, attention_mask.size(1))
+                # 如果patch范围内有任何有效点，则该patch有效
+                patch_valid = attention_mask[:, start_idx:end_idx].sum(dim=1) > 0  # [B]
+                patch_mask.append(patch_valid)
+            
+            patch_mask = torch.stack(patch_mask, dim=1).long()  # [B, num_patches]
+            
+            # 为 [ANS] token 添加 mask（始终有效）
+            ans_mask = torch.ones(B, 1, device=device, dtype=torch.long)
+            aggregator_mask = torch.cat([patch_mask, ans_mask], dim=1)  # [B, num_patches+1]
+        else:
+            aggregator_mask = None
         
-        # 5) 提取 [ANS] 位置的 hidden state（最后一个位置）
+        # 5) 聚合头处理
+        hidden_states = self.aggregator(sequence, attention_mask=aggregator_mask)  # [B, num_patches+1, H]
+        
+        # 6) 提取 [ANS] 位置的 hidden state（最后一个位置）
         ans_hidden = hidden_states[:, -1, :]  # [B, H]
         
-        # 6) 分类
+        # 7) 分类
         logits = self.classifier_head(ans_hidden)  # [B, num_classes]
         
-        # 7) 计算损失（如果提供标签）
+        # 8) 计算损失（如果提供标签）
         loss = None
         if labels is not None:
             loss = nn.functional.cross_entropy(logits, labels)

@@ -3,19 +3,25 @@
 # SPDX-License-Identifier: MIT
 
 """
-PatchTST + Transformer 聚合头在 UCR 数据集上的分类
+PatchTST + VLM图像分支双分支融合模型在UCR数据集上的分类
 
-使用 PatchTST backbone 提取 patch 特征，然后通过 Transformer 聚合头进行分类
-独立模块，不依赖 opentslm 包
+使用PatchTST分支和VLM图像分支同时处理时序数据，融合后通过聚合头进行分类。
 
 使用方法：
-    python -m patchtst_ucr.train_aggregator --dataset Adiac --epochs 50
+    # 基础用法（ViT编码器 + concat融合）
+    python -m patchtst_ucr.train_dual_branch --dataset Adiac --epochs 50
 
-    # 自定义聚合头配置
-    python -m patchtst_ucr.train_aggregator --dataset Adiac --aggregator_layers 2
+    # 使用交叉注意力融合
+    python -m patchtst_ucr.train_dual_branch --dataset Adiac --fusion_type cross_attention
 
-    # 冻结 backbone
-    python -m patchtst_ucr.train_aggregator --dataset Adiac --freeze_backbone
+    # 使用ResNet编码器
+    python -m patchtst_ucr.train_dual_branch --dataset Adiac --image_encoder_type resnet
+
+    # 使用轻量级CNN编码器
+    python -m patchtst_ucr.train_dual_branch --dataset Adiac --image_encoder_type cnn
+
+    # 使用简单图像转换（非可学习）
+    python -m patchtst_ucr.train_dual_branch --dataset Adiac --no_learnable_image
 """
 
 import os
@@ -38,12 +44,12 @@ src_dir = script_dir.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from patchtst_ucr.model import PatchTSTWithAggregator
+from patchtst_ucr.dual_branch_model import PatchTSTWithVisionBranch
 from patchtst_ucr.ucr_dataset import UCRDatasetForPatchTST, get_dataset_info
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="PatchTST + Aggregator UCR 分类")
+    parser = argparse.ArgumentParser(description="PatchTST + VLM双分支融合 UCR分类")
 
     # 数据相关
     parser.add_argument("--dataset", type=str, default="Adiac", help="UCR数据集名称")
@@ -52,49 +58,72 @@ def parse_args():
     # PatchTST 模型配置
     parser.add_argument("--context_length", type=int, default=None, 
                        help="上下文长度（None则自动设置为数据集最大长度）")
-    parser.add_argument("--patch_length", type=int, default=16, help="Patch 长度")
-    parser.add_argument("--stride", type=int, default=8, help="Patch 步长")
-    parser.add_argument("--d_model", type=int, default=128, help="PatchTST 模型维度")
+    parser.add_argument("--patch_length", type=int, default=16, help="Patch长度")
+    parser.add_argument("--stride", type=int, default=8, help="Patch步长")
+    parser.add_argument("--d_model", type=int, default=128, help="PatchTST模型维度")
     parser.add_argument("--num_attention_heads", type=int, default=8, help="PatchTST Attention heads")
-    parser.add_argument("--num_hidden_layers", type=int, default=3, help="PatchTST Transformer 层数")
-    parser.add_argument("--ffn_dim", type=int, default=512, help="PatchTST FFN 维度")
+    parser.add_argument("--num_hidden_layers", type=int, default=3, help="PatchTST Transformer层数")
+    parser.add_argument("--ffn_dim", type=int, default=512, help="PatchTST FFN维度")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout")
     
-    # 聚合头配置（核心参数）
-    parser.add_argument("--aggregator_layers", type=int, default=1, help="聚合头 Transformer 层数")
-    parser.add_argument("--aggregator_hidden_size", type=int, default=None, 
-                       help="聚合头 hidden size（None则与d_model相同）")
-    parser.add_argument("--aggregator_num_heads", type=int, default=8, help="聚合头 attention heads")
-    parser.add_argument("--aggregator_ffn_dim", type=int, default=None, 
-                       help="聚合头 FFN 维度（None则自动计算）")
+    # 图像分支配置
+    parser.add_argument("--image_encoder_type", type=str, default="vit",
+                       choices=["vit", "resnet", "cnn"],
+                       help="图像编码器类型: vit(ViT-base), resnet(ResNet18), cnn(轻量级CNN)")
+    parser.add_argument("--image_size", type=int, default=224, help="生成图像尺寸")
+    parser.add_argument("--no_learnable_image", action="store_true", 
+                       help="使用简单图像转换（非可学习）")
+    parser.add_argument("--finetune_vision", action="store_true", 
+                       help="微调图像编码器")
+    parser.add_argument("--resnet_variant", type=str, default="resnet18",
+                       choices=["resnet18", "resnet50"],
+                       help="ResNet变体（仅对resnet类型有效）")
+    parser.add_argument("--cnn_hidden_size", type=int, default=256,
+                       help="CNN隐藏层大小（仅对cnn类型有效）")
+    parser.add_argument("--periodicity", type=int, default=24,
+                       help="时序周期性（用于时序转图像）")
+    
+    # 融合配置
+    parser.add_argument("--fusion_type", type=str, default="concat",
+                       choices=["concat", "cross_attention"],
+                       help="融合方式: concat(前后拼接), cross_attention(交叉注意力)")
+    parser.add_argument("--fusion_hidden_size", type=int, default=None,
+                       help="融合后的隐藏层大小（None则自动设置）")
     
     # 投影层配置
     parser.add_argument("--projector_type", type=str, default="mlp", 
                        choices=["mlp", "linear", "none"],
-                       help="投影层类型: mlp(LayerNorm+Linear+GELU), linear(仅Linear), none(无投影)")
+                       help="投影层类型")
     parser.add_argument("--projector_dropout", type=float, default=0.1, 
                        help="MLP投影层的Dropout概率")
     
+    # 聚合头配置
+    parser.add_argument("--aggregator_layers", type=int, default=1, help="聚合头Transformer层数")
+    parser.add_argument("--aggregator_num_heads", type=int, default=8, help="聚合头attention heads")
+    parser.add_argument("--aggregator_ffn_dim", type=int, default=None, 
+                       help="聚合头FFN维度（None则自动计算）")
+    
     # 冻结选项
-    parser.add_argument("--freeze_backbone", action="store_true", help="冻结 PatchTST backbone")
+    parser.add_argument("--freeze_patchtst", action="store_true", help="冻结PatchTST backbone")
+    parser.add_argument("--freeze_vision", action="store_true", help="冻结图像编码器")
     
     # 训练相关
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=32, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="权重衰减")
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="预热比例")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪")
     
     # 保存相关
-    parser.add_argument("--save_dir", type=str, default="results/patchtst_aggregator", help="结果保存目录")
+    parser.add_argument("--save_dir", type=str, default="results/patchtst_dual_branch", help="结果保存目录")
     
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--device", type=str, default="cuda", help="设备")
     parser.add_argument("--eval_every", type=int, default=5, help="每N轮评估一次")
     parser.add_argument("--early_stop", type=int, default=15, help="早停耐心值")
-    parser.add_argument("--eval_batch_size", type=int, default=64, help="评估批次大小")
+    parser.add_argument("--eval_batch_size", type=int, default=32, help="评估批次大小")
     
     return parser.parse_args()
 
@@ -116,7 +145,7 @@ def prepare_batch(
     device: str,
 ):
     """
-    将 UCR 批次转换为模型输入格式
+    将UCR批次转换为模型输入格式
     
     Returns:
         past_values: [B, context_length, 1]
@@ -291,14 +320,15 @@ def evaluate(
 def main():
     args = parse_args()
     
-    print("=" * 60)
-    print("PatchTST + Transformer 聚合头 UCR 分类")
-    print("=" * 60)
+    print("=" * 70)
+    print("PatchTST + VLM双分支融合 UCR分类")
+    print("=" * 70)
     print(f"时间: {datetime.datetime.now()}")
     print(f"数据集: {args.dataset}")
-    print(f"聚合头层数: {args.aggregator_layers}")
-    print(f"冻结 backbone: {args.freeze_backbone}")
-    print("=" * 60)
+    print(f"图像编码器: {args.image_encoder_type}")
+    print(f"融合方式: {args.fusion_type}")
+    print(f"可学习图像转换: {not args.no_learnable_image}")
+    print("=" * 70)
     
     set_seed(args.seed)
     
@@ -317,29 +347,27 @@ def main():
     print(f"   最大长度: {max_length}")
     print(f"   Context length: {context_length}")
     
-    num_patches = (context_length - args.patch_length) // args.stride + 1
-    print(f"   预期 patch 数: {num_patches}")
-    
     # 创建保存目录
-    agg_str = f"L{args.aggregator_layers}"
-    if args.aggregator_hidden_size:
-        agg_str += f"_H{args.aggregator_hidden_size}"
-    if args.freeze_backbone:
-        agg_str += "_frozen"
+    config_str = f"{args.image_encoder_type}_{args.fusion_type}"
+    if args.no_learnable_image:
+        config_str += "_simple"
+    if args.finetune_vision:
+        config_str += "_ft"
     
     save_dir = os.path.join(
         args.save_dir, 
         args.dataset, 
-        f"P{args.patch_length}_S{args.stride}_{agg_str}"
+        config_str
     )
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "config.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
     
     print("\n🔧 创建模型...")
-    model = PatchTSTWithAggregator(
+    model = PatchTSTWithVisionBranch(
         num_classes=num_classes,
         context_length=context_length,
+        # PatchTST分支参数
         patch_length=args.patch_length,
         stride=args.stride,
         d_model=args.d_model,
@@ -347,17 +375,32 @@ def main():
         num_hidden_layers=args.num_hidden_layers,
         ffn_dim=args.ffn_dim,
         dropout=args.dropout,
-        aggregator_layers=args.aggregator_layers,
-        aggregator_hidden_size=args.aggregator_hidden_size,
-        aggregator_num_heads=args.aggregator_num_heads,
-        aggregator_ffn_dim=args.aggregator_ffn_dim,
+        # 图像分支参数
+        image_encoder_type=args.image_encoder_type,
+        image_size=args.image_size,
+        learnable_image=not args.no_learnable_image,
+        finetune_vision=args.finetune_vision,
+        resnet_variant=args.resnet_variant,
+        cnn_hidden_size=args.cnn_hidden_size,
+        periodicity=args.periodicity,
+        # 融合参数
+        fusion_type=args.fusion_type,
+        fusion_hidden_size=args.fusion_hidden_size,
+        # 投影层参数
         projector_type=args.projector_type,
         projector_dropout=args.projector_dropout,
+        # 聚合头参数
+        aggregator_layers=args.aggregator_layers,
+        aggregator_num_heads=args.aggregator_num_heads,
+        aggregator_ffn_dim=args.aggregator_ffn_dim,
+        # 设备
         device=device,
     ).to(device)
     
-    if args.freeze_backbone:
-        model.freeze_backbone()
+    if args.freeze_patchtst:
+        model.freeze_patchtst()
+    if args.freeze_vision:
+        model.freeze_vision()
     
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"可训练参数: {trainable_params:,}")
@@ -457,7 +500,7 @@ def main():
                 print(f"\n⏹️  早停! 验证准确率 {args.early_stop} 轮未改进")
                 break
         
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("📋 最终测试评估...")
         
         best_ckpt = torch.load(
@@ -479,9 +522,9 @@ def main():
             "dataset": args.dataset,
             "num_classes": num_classes,
             "context_length": context_length,
-            "aggregator_layers": args.aggregator_layers,
-            "aggregator_hidden_size": args.aggregator_hidden_size or args.d_model,
-            "freeze_backbone": args.freeze_backbone,
+            "image_encoder_type": args.image_encoder_type,
+            "fusion_type": args.fusion_type,
+            "learnable_image": not args.no_learnable_image,
             "total_params": model.count_parameters(),
             "best_val_acc": best_val_acc,
             "test_loss": test_results["loss"],
@@ -498,9 +541,9 @@ def main():
                 "labels": test_results["labels"],
             }, f, indent=2)
         
-        print("=" * 60)
+        print("=" * 70)
         print(f"结果保存到: {save_dir}")
-        print("=" * 60)
+        print("=" * 70)
     
     except KeyboardInterrupt:
         print("\n⚠️  训练被中断")
