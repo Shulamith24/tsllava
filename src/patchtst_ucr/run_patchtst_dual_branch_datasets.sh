@@ -45,13 +45,15 @@ UCR_DIR="${DATA_PATH}/UCRArchive_2018"
 RESULTS_DIR="${PROJECT_ROOT}/results/patchtst_dual_branch_${IMAGE_ENCODER}_${FUSION_TYPE}"
 OUTPUT_FILE="${RESULTS_DIR}/all_datasets_accuracy.txt"
 
-# 训练超参数
+# 训练超参数 (针对24GB显存优化)
 EPOCHS=50
-BATCH_SIZE=16
+BATCH_SIZE=4             # 减小batch size
+GRAD_ACCUM_STEPS=4       # 梯度累积4步 = 有效batch_size 16
 LR=1e-3
-EVAL_BATCH_SIZE=32
+EVAL_BATCH_SIZE=16
 EVAL_EVERY=5
 EARLY_STOP=15
+USE_FP16="--fp16"        # 启用FP16混合精度
 
 # 创建结果目录
 mkdir -p "$RESULTS_DIR"
@@ -122,6 +124,8 @@ for i in "${!DATASETS[@]}"; do
         --save_dir "$RESULTS_DIR" \
         --epochs $EPOCHS \
         --batch_size $BATCH_SIZE \
+        --grad_accum_steps $GRAD_ACCUM_STEPS \
+        $USE_FP16 \
         --lr $LR \
         --eval_batch_size $EVAL_BATCH_SIZE \
         --eval_every $EVAL_EVERY \

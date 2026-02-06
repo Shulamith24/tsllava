@@ -115,6 +115,14 @@ def parse_args():
     parser.add_argument("--warmup_ratio", type=float, default=0.1, help="预热比例")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪")
     
+    # 显存优化
+    parser.add_argument("--grad_accum_steps", type=int, default=1,
+                       help="梯度累积步数（用小batch模拟大batch，减少显存占用）")
+    parser.add_argument("--fp16", action="store_true",
+                       help="使用FP16混合精度训练（减少约一半显存）")
+    parser.add_argument("--bf16", action="store_true",
+                       help="使用BF16混合精度训练（需要Ampere及以上GPU）")
+    
     # 保存相关
     parser.add_argument("--save_dir", type=str, default="results/patchtst_dual_branch", help="结果保存目录")
     
@@ -244,32 +252,52 @@ def train_one_epoch(
     device: str,
     epoch: int,
     num_epochs: int,
+    grad_accum_steps: int = 1,
+    scaler: torch.cuda.amp.GradScaler = None,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
-    """训练一个epoch"""
+    """训练一个epoch（支持梯度累积和混合精度）"""
     model.train()
     total_loss = 0.0
     num_batches = 0
     
+    optimizer.zero_grad()
+    
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs}")
-    for batch in pbar:
+    for batch_idx, batch in enumerate(pbar):
         past_values, labels, attention_mask = prepare_batch(batch, context_length, device)
         
-        outputs = model(past_values=past_values, labels=labels, attention_mask=attention_mask)
-        loss = outputs["loss"]
+        # 混合精度前向传播
+        with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
+            outputs = model(past_values=past_values, labels=labels, attention_mask=attention_mask)
+            loss = outputs["loss"] / grad_accum_steps  # 梯度累积需要平均loss
         
-        optimizer.zero_grad()
-        loss.backward()
+        # 反向传播
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        # 梯度累积：每grad_accum_steps步更新一次
+        if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
+            
+            scheduler.step()
+            optimizer.zero_grad()
         
-        optimizer.step()
-        scheduler.step()
-        
-        total_loss += loss.item()
+        total_loss += loss.item() * grad_accum_steps  # 恢复原始loss
         num_batches += 1
         
         pbar.set_postfix({
-            "loss": f"{loss.item():.4f}",
+            "loss": f"{loss.item() * grad_accum_steps:.4f}",
             "lr": f"{scheduler.get_last_lr()[0]:.2e}"
         })
     
@@ -433,6 +461,18 @@ def main():
     print(f"   Total steps: {total_steps}")
     print(f"   Warmup steps: {warmup_steps}")
     
+    # 显存优化设置
+    use_amp = args.fp16 or args.bf16
+    amp_dtype = torch.bfloat16 if args.bf16 else torch.float16
+    scaler = torch.cuda.amp.GradScaler() if args.fp16 else None  # BF16不需要scaler
+    
+    if use_amp:
+        print(f"   ⚡ 混合精度: {'BF16' if args.bf16 else 'FP16'}")
+    if args.grad_accum_steps > 1:
+        print(f"   📊 梯度累积: {args.grad_accum_steps} 步")
+        effective_batch_size = args.batch_size * args.grad_accum_steps
+        print(f"   有效批次大小: {effective_batch_size}")
+    
     print("\n🚀 开始训练...")
     best_val_acc = 0.0
     patience_counter = 0
@@ -443,7 +483,11 @@ def main():
             train_loss = train_one_epoch(
                 model, train_loader, optimizer, scheduler,
                 context_length, args.grad_clip, device,
-                epoch, args.epochs
+                epoch, args.epochs,
+                grad_accum_steps=args.grad_accum_steps,
+                scaler=scaler,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
             )
             
             if epoch % args.eval_every == 0 or epoch == args.epochs:
