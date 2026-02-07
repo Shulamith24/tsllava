@@ -71,8 +71,8 @@ def parse_args():
     
     # 图像分支配置
     parser.add_argument("--image_encoder_type", type=str, default="vit",
-                       choices=["vit", "resnet", "cnn"],
-                       help="图像编码器类型: vit(ViT-base), resnet(ResNet18), cnn(轻量级CNN)")
+                       choices=["vit", "resnet", "cnn", "specvisnet"],
+                       help="图像编码器类型: vit(ViT-base), resnet(ResNet18), cnn(轻量级CNN), specvisnet(SpecVisNet)")
     parser.add_argument("--image_size", type=int, default=224, help="生成图像尺寸")
     parser.add_argument("--no_learnable_image", action="store_true", 
                        help="使用简单图像转换（非可学习）")
@@ -85,6 +85,23 @@ def parse_args():
                        help="CNN隐藏层大小（仅对cnn类型有效）")
     parser.add_argument("--periodicity", type=int, default=24,
                        help="时序周期性（用于时序转图像）")
+    
+    # SpecVisNet 专属参数
+    parser.add_argument("--specvisnet_backbone", type=str, default="swin_tiny",
+                       choices=["swin_tiny", "swin_small", "convnext_tiny"],
+                       help="SpecVisNet 骨干网络")
+    parser.add_argument("--learnable_wavelet", action="store_true", default=True,
+                       help="是否使用可学习小波变换")
+    parser.add_argument("--no_learnable_wavelet", dest="learnable_wavelet", action="store_false",
+                       help="禁用可学习小波变换")
+    parser.add_argument("--use_fam", action="store_true", default=True,
+                       help="是否使用频率注意力模块(FAM)")
+    parser.add_argument("--no_fam", dest="use_fam", action="store_false",
+                       help="禁用频率注意力模块")
+    parser.add_argument("--use_asb", action="store_true", default=True,
+                       help="是否使用自适应频谱块(ASB)")
+    parser.add_argument("--no_asb", dest="use_asb", action="store_false",
+                       help="禁用自适应频谱块")
     
     # 融合配置
     parser.add_argument("--fusion_type", type=str, default="concat",
@@ -467,6 +484,11 @@ def main():
         resnet_variant=args.resnet_variant,
         cnn_hidden_size=args.cnn_hidden_size,
         periodicity=args.periodicity,
+        # SpecVisNet 参数
+        specvisnet_backbone=args.specvisnet_backbone,
+        learnable_wavelet=args.learnable_wavelet,
+        use_fam=args.use_fam,
+        use_asb=args.use_asb,
         # 融合参数
         fusion_type=args.fusion_type,
         fusion_hidden_size=args.fusion_hidden_size,
@@ -485,7 +507,14 @@ def main():
     
     # DDP包装模型
     if use_ddp:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        # find_unused_parameters=True 是必须的，因为在单分支模式下，
+        # 另一个分支的参数虽然加载了但没有参与前向传播和反向传播
+        model = DDP(
+            model, 
+            device_ids=[local_rank], 
+            output_device=local_rank,
+            find_unused_parameters=True
+        )
     
     if args.freeze_patchtst:
         if use_ddp:

@@ -119,6 +119,11 @@ for i in "${!DATASETS[@]}"; do
         EXTRA_ARGS="$EXTRA_ARGS --image_encoder_type resnet"
     elif [ "$IMAGE_ENCODER" == "cnn" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --image_encoder_type cnn"
+    elif [ "$IMAGE_ENCODER" == "specvisnet" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --image_encoder_type specvisnet"
+        EXTRA_ARGS="$EXTRA_ARGS --specvisnet_backbone swin_tiny"
+        EXTRA_ARGS="$EXTRA_ARGS --learnable_wavelet"
+        EXTRA_ARGS="$EXTRA_ARGS --use_fam --use_asb"
     else
         EXTRA_ARGS="$EXTRA_ARGS --image_encoder_type vit"
     fi

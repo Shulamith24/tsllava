@@ -177,24 +177,34 @@ class VisionEncoder(nn.Module):
     """
     统一的图像编码器接口
     
-    支持三种图像编码器类型：
+    支持四种图像编码器类型：
     - vit: 预训练ViT-base-patch16
     - resnet: 预训练ResNet18/50
     - cnn: 轻量级CNN
+    - specvisnet: SpecVisNet（可学习小波 + Swin Transformer + 频谱增强）
     
     Args:
         encoder_type: 编码器类型
-        finetune: 是否微调预训练模型（仅对vit/resnet有效）
+        finetune: 是否微调预训练模型（仅对vit/resnet/specvisnet有效）
         resnet_variant: ResNet变体（仅对resnet有效）
         cnn_hidden_size: CNN隐藏层大小（仅对cnn有效）
+        specvisnet_backbone: SpecVisNet骨干类型（仅对specvisnet有效）
+        learnable_wavelet: 是否使用可学习小波（仅对specvisnet有效）
+        use_fam: 是否使用频率注意力模块（仅对specvisnet有效）
+        use_asb: 是否使用自适应频谱块（仅对specvisnet有效）
     """
     
     def __init__(
         self,
-        encoder_type: Literal["vit", "resnet", "cnn"] = "vit",
+        encoder_type: Literal["vit", "resnet", "cnn", "specvisnet"] = "vit",
         finetune: bool = False,
         resnet_variant: Literal["resnet18", "resnet50"] = "resnet18",
         cnn_hidden_size: int = 256,
+        # SpecVisNet 特有参数
+        specvisnet_backbone: Literal["swin_tiny", "swin_small", "convnext_tiny"] = "swin_tiny",
+        learnable_wavelet: bool = True,
+        use_fam: bool = True,
+        use_asb: bool = True,
     ):
         super().__init__()
         
@@ -206,6 +216,15 @@ class VisionEncoder(nn.Module):
             self.encoder = ResNetEncoder(model_name=resnet_variant, finetune=finetune)
         elif encoder_type == "cnn":
             self.encoder = LightweightCNNEncoder(hidden_size=cnn_hidden_size)
+        elif encoder_type == "specvisnet":
+            from .specvisnet import SpecVisNetEncoder
+            self.encoder = SpecVisNetEncoder(
+                backbone=specvisnet_backbone,
+                learnable_wavelet=learnable_wavelet,
+                use_fam=use_fam,
+                use_asb=use_asb,
+                finetune=finetune,
+            )
         else:
             raise ValueError(f"Unknown encoder_type: {encoder_type}")
         

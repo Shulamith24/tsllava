@@ -137,13 +137,18 @@ class PatchTSTWithVisionBranch(nn.Module):
         ffn_dim: int = 512,
         dropout: float = 0.1,
         # 图像分支参数
-        image_encoder_type: Literal["vit", "resnet", "cnn"] = "vit",
+        image_encoder_type: Literal["vit", "resnet", "cnn", "specvisnet"] = "vit",
         image_size: int = 224,
         learnable_image: bool = True,
         finetune_vision: bool = False,
         resnet_variant: Literal["resnet18", "resnet50"] = "resnet18",
         cnn_hidden_size: int = 256,
         periodicity: int = 24,
+        # SpecVisNet 参数
+        specvisnet_backbone: Literal["swin_tiny", "swin_small", "convnext_tiny"] = "swin_tiny",
+        learnable_wavelet: bool = True,
+        use_fam: bool = True,
+        use_asb: bool = True,
         # 融合参数
         fusion_type: Literal["concat", "cross_attention"] = "concat",
         fusion_hidden_size: Optional[int] = None,
@@ -188,13 +193,19 @@ class PatchTSTWithVisionBranch(nn.Module):
         self.num_ts_patches = (context_length - patch_length) // stride + 1
         
         # ========== 2. 图像分支 ==========
-        # 2.1 时序转图像
-        self.ts_to_image = TimeSeriesToImage(
-            mode="learnable" if learnable_image else "simple",
-            image_size=image_size,
-            periodicity=periodicity,
-            output_channels=3,
-        )
+        # SpecVisNet 内置小波变换，不需要 ts_to_image
+        self.use_specvisnet = (image_encoder_type == "specvisnet")
+        
+        # 2.1 时序转图像 (SpecVisNet 模式下不使用)
+        if not self.use_specvisnet:
+            self.ts_to_image = TimeSeriesToImage(
+                mode="learnable" if learnable_image else "simple",
+                image_size=image_size,
+                periodicity=periodicity,
+                output_channels=3,
+            )
+        else:
+            self.ts_to_image = None
         
         # 2.2 图像编码器
         self.vision_encoder = VisionEncoder(
@@ -202,6 +213,11 @@ class PatchTSTWithVisionBranch(nn.Module):
             finetune=finetune_vision,
             resnet_variant=resnet_variant,
             cnn_hidden_size=cnn_hidden_size,
+            # SpecVisNet 参数
+            specvisnet_backbone=specvisnet_backbone,
+            learnable_wavelet=learnable_wavelet,
+            use_fam=use_fam,
+            use_asb=use_asb,
         )
         self.num_vision_patches, self.vision_hidden_size = self.vision_encoder.get_output_info()
         
@@ -369,14 +385,19 @@ class PatchTSTWithVisionBranch(nn.Module):
         
         # ========== 2. 图像分支 (vision_only 或 dual 模式) ==========
         if self.branch_mode in ["vision_only", "dual"]:
-            # 2.1 时序转图像
-            images = self.ts_to_image(past_values)  # [B, C, H, W]
-            
-            # 2.2 归一化图像到[0, 1]
-            images = normalize_images(images)
-            
-            # 2.3 图像编码
-            vision_embeddings = self.vision_encoder(images)  # [B, num_vision_patches, vision_hidden_size]
+            if self.use_specvisnet:
+                # SpecVisNet 直接处理原始时序数据（内置小波变换）
+                vision_embeddings = self.vision_encoder(past_values)  # [B, num_vision_patches, vision_hidden_size]
+            else:
+                # 传统流程：时序转图像 -> 图像编码
+                # 2.1 时序转图像
+                images = self.ts_to_image(past_values)  # [B, C, H, W]
+                
+                # 2.2 归一化图像到[0, 1]
+                images = normalize_images(images)
+                
+                # 2.3 图像编码
+                vision_embeddings = self.vision_encoder(images)  # [B, num_vision_patches, vision_hidden_size]
             
             # 2.4 投影到融合维度
             if self.vision_projector is not None:
