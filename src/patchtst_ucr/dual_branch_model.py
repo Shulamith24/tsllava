@@ -297,7 +297,7 @@ class PatchTSTWithVisionBranch(nn.Module):
         """打印模型信息"""
         patchtst_params = sum(p.numel() for p in self.patchtst_backbone.parameters())
         vision_params = sum(p.numel() for p in self.vision_encoder.parameters())
-        ts_to_image_params = sum(p.numel() for p in self.ts_to_image.parameters())
+        ts_to_image_params = sum(p.numel() for p in self.ts_to_image.parameters()) if self.ts_to_image is not None else 0
         aggregator_params = self.aggregator.count_parameters()
         total_params = sum(p.numel() for p in self.parameters())
         

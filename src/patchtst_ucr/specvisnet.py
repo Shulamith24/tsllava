@@ -215,8 +215,20 @@ class SwinBackbone(nn.Module):
         Returns:
             [B, num_patches, hidden_size] patch 特征
         """
-        # Swin 输出 [B, H*W, C] 格式
-        features = self.model(images)  # [B, 49, 768] for tiny
+        # timm Swin 输出格式: [B, H, W, C] (注意不是 [B, C, H, W])
+        features = self.model(images)
+        
+        # 处理不同的输出格式
+        if features.dim() == 4:
+            # [B, H, W, C] 格式 -> [B, H*W, C]
+            B, H, W, C = features.shape
+            features = features.view(B, H * W, C)  # [B, H*W, C]
+            self.num_patches = H * W
+        elif features.dim() == 3:
+            # [B, N, C] 格式，直接使用
+            self.num_patches = features.shape[1]
+        else:
+            raise ValueError(f"Unexpected Swin output shape: {features.shape}")
         
         return features
 
@@ -310,30 +322,28 @@ class FrequencyAttentionModule(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [B, N, C] patch 特征 (N = num_scales * num_time)
+            x: [B, N, C] patch 特征 (N = num_scales * num_time, e.g., 7*7=49)
             
         Returns:
             [B, N, C] 加权后的特征
         """
         B, N, C = x.shape
         
-        # 假设 patch 排列为 [scale_0_time_0, scale_0_time_1, ..., scale_S_time_T]
-        # 重塑为 [B, S, T, C]
+        # 尝试将 N 分解为 num_scales * num_time
+        # 对于 Swin 7x7 输出，N=49, num_scales=7, num_time=7
         num_time = N // self.num_scales
         if N != self.num_scales * num_time:
             # 如果不能整除，跳过 FAM
             return x
         
+        # 重塑为 [B, S, T, C] (S=频率轴, T=时间轴)
         x_reshaped = x.view(B, self.num_scales, num_time, C)
         
-        # 沿时间维度平均池化 [B, S, C]
-        freq_features = x_reshaped.mean(dim=2)
-        
-        # 全局特征 [B, C]
-        global_feat = freq_features.mean(dim=1)
+        # 全局特征：先沿时间和频率维度池化 [B, C]
+        global_feat = x_reshaped.mean(dim=(1, 2))  # [B, C]
         
         # 生成频率权重 [B, S]
-        freq_weights = self.fc(global_feat)  # [B, S]
+        freq_weights = self.fc(global_feat)  # [B, num_scales]
         
         # 应用权重 [B, S, 1, 1]
         freq_weights = freq_weights.view(B, self.num_scales, 1, 1)
