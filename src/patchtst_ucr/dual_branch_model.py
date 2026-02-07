@@ -154,6 +154,8 @@ class PatchTSTWithVisionBranch(nn.Module):
         aggregator_layers: int = 1,
         aggregator_num_heads: int = 8,
         aggregator_ffn_dim: Optional[int] = None,
+        # 分支模式
+        branch_mode: Literal["dual", "ts_only", "vision_only"] = "dual",
         # 设备
         device: str = "cuda",
     ):
@@ -166,6 +168,7 @@ class PatchTSTWithVisionBranch(nn.Module):
         self.fusion_type = fusion_type
         self.projector_type = projector_type
         self.image_encoder_type = image_encoder_type
+        self.branch_mode = branch_mode  # dual, ts_only, vision_only
         
         # ========== 1. PatchTST分支 ==========
         patchtst_config = PatchTSTConfig(
@@ -233,7 +236,7 @@ class PatchTSTWithVisionBranch(nn.Module):
             self.vision_projector = None
         
         # 3.3 融合模块
-        if fusion_type == "cross_attention":
+        if fusion_type == "cross_attention" and branch_mode == "dual":
             self.fusion_module = CrossAttentionFusion(
                 hidden_size=self.fusion_hidden_size,
                 num_heads=aggregator_num_heads,
@@ -242,9 +245,15 @@ class PatchTSTWithVisionBranch(nn.Module):
             # 交叉注意力后序列长度为时序分支长度
             self.total_patches = self.num_ts_patches
         else:
-            # concat模式
+            # concat模式 或 单分支模式
             self.fusion_module = None
-            self.total_patches = self.num_ts_patches + self.num_vision_patches
+            if branch_mode == "ts_only":
+                self.total_patches = self.num_ts_patches
+            elif branch_mode == "vision_only":
+                self.total_patches = self.num_vision_patches
+            else:
+                # dual + concat
+                self.total_patches = self.num_ts_patches + self.num_vision_patches
         
         # ========== 4. 聚合头 ==========
         self.aggregator_ffn_dim = aggregator_ffn_dim or (self.fusion_hidden_size * 4)
@@ -277,7 +286,7 @@ class PatchTSTWithVisionBranch(nn.Module):
         total_params = sum(p.numel() for p in self.parameters())
         
         print(f"\n{'='*70}")
-        print(f"PatchTSTWithVisionBranch 模型信息")
+        print(f"PatchTSTWithVisionBranch 模型信息 (mode: {self.branch_mode})")
         print(f"{'='*70}")
         print(f"PatchTST分支:")
         print(f"  - context_length: {self.context_length}")
@@ -344,39 +353,48 @@ class PatchTSTWithVisionBranch(nn.Module):
         B = past_values.size(0)
         device = past_values.device
         
-        # ========== 1. PatchTST分支 ==========
-        patchtst_output = self.patchtst_backbone(past_values=past_values)
-        ts_embeddings = patchtst_output.last_hidden_state  # [B, 1, num_patches, d_model]
-        if ts_embeddings.dim() == 4:
-            ts_embeddings = ts_embeddings.squeeze(1)  # [B, num_patches, d_model]
+        ts_embeddings = None
+        vision_embeddings = None
         
-        # 投影到融合维度
-        if self.ts_projector is not None:
-            ts_embeddings = self.ts_projector(ts_embeddings)  # [B, num_patches, fusion_hidden_size]
+        # ========== 1. PatchTST分支 (ts_only 或 dual 模式) ==========
+        if self.branch_mode in ["ts_only", "dual"]:
+            patchtst_output = self.patchtst_backbone(past_values=past_values)
+            ts_embeddings = patchtst_output.last_hidden_state  # [B, 1, num_patches, d_model]
+            if ts_embeddings.dim() == 4:
+                ts_embeddings = ts_embeddings.squeeze(1)  # [B, num_patches, d_model]
+            
+            # 投影到融合维度
+            if self.ts_projector is not None:
+                ts_embeddings = self.ts_projector(ts_embeddings)  # [B, num_patches, fusion_hidden_size]
         
-        # ========== 2. 图像分支 ==========
-        # 2.1 时序转图像
-        images = self.ts_to_image(past_values)  # [B, C, H, W]
+        # ========== 2. 图像分支 (vision_only 或 dual 模式) ==========
+        if self.branch_mode in ["vision_only", "dual"]:
+            # 2.1 时序转图像
+            images = self.ts_to_image(past_values)  # [B, C, H, W]
+            
+            # 2.2 归一化图像到[0, 1]
+            images = normalize_images(images)
+            
+            # 2.3 图像编码
+            vision_embeddings = self.vision_encoder(images)  # [B, num_vision_patches, vision_hidden_size]
+            
+            # 2.4 投影到融合维度
+            if self.vision_projector is not None:
+                vision_embeddings = self.vision_projector(vision_embeddings)  # [B, num_vision_patches, fusion_hidden_size]
         
-        # 2.2 归一化图像到[0, 1]
-        images = normalize_images(images)
-        
-        # 2.3 图像编码
-        vision_embeddings = self.vision_encoder(images)  # [B, num_vision_patches, vision_hidden_size]
-        
-        # 2.4 投影到融合维度
-        if self.vision_projector is not None:
-            vision_embeddings = self.vision_projector(vision_embeddings)  # [B, num_vision_patches, fusion_hidden_size]
-        
-        # ========== 3. 融合 ==========
-        if self.fusion_type == "cross_attention":
-            # 交叉注意力融合：ts作为query，vision作为key/value
+        # ========== 3. 融合/选择特征 ==========
+        if self.branch_mode == "ts_only":
+            # 仅时序分支
+            fused_embeddings = ts_embeddings
+        elif self.branch_mode == "vision_only":
+            # 仅视觉分支
+            fused_embeddings = vision_embeddings
+        elif self.fusion_type == "cross_attention" and self.fusion_module is not None:
+            # 双分支 + 交叉注意力融合
             fused_embeddings = self.fusion_module(ts_embeddings, vision_embeddings)
-            # 输出: [B, num_ts_patches, fusion_hidden_size]
         else:
-            # concat融合：沿序列维度拼接
+            # 双分支 + concat融合
             fused_embeddings = torch.cat([ts_embeddings, vision_embeddings], dim=1)
-            # 输出: [B, num_ts_patches + num_vision_patches, fusion_hidden_size]
         
         # ========== 4. 添加[ANS] token ==========
         ans_tokens = self.ans_token.expand(B, -1, -1).to(device)
@@ -428,6 +446,7 @@ class PatchTSTWithVisionBranch(nn.Module):
             "fusion_hidden_size": self.fusion_hidden_size,
             "total_patches": self.total_patches,
             "image_encoder_type": self.image_encoder_type,
+            "branch_mode": self.branch_mode,
             "aggregator_layers": self.aggregator.num_layers,
             "total_params": self.count_parameters(),
         }

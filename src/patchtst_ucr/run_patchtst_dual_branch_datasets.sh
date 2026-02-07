@@ -30,7 +30,7 @@ cd "$PROJECT_ROOT"
 # 默认参数
 IMAGE_ENCODER=${1:-"vit"}
 FUSION_TYPE=${2:-"concat"}
-NUM_GPUS=${3:-"1"}
+NUM_GPUS=${3:-"2"}
 
 echo "============================================================"
 echo "PatchTST + VLM双分支 UCR批量训练"

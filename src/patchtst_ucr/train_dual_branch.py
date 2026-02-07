@@ -110,6 +110,11 @@ def parse_args():
     parser.add_argument("--freeze_patchtst", action="store_true", help="冻结PatchTST backbone")
     parser.add_argument("--freeze_vision", action="store_true", help="冻结图像编码器")
     
+    # 分支模式（用于消融实验）
+    parser.add_argument("--branch_mode", type=str, default="dual",
+                       choices=["dual", "ts_only", "vision_only"],
+                       help="分支模式: dual(双分支融合), ts_only(仅时序分支), vision_only(仅视觉分支)")
+    
     # 训练相关
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
@@ -397,6 +402,7 @@ def main():
         print("=" * 70)
         print(f"时间: {datetime.datetime.now()}")
         print(f"数据集: {args.dataset}")
+        print(f"分支模式: {args.branch_mode}")
         print(f"图像编码器: {args.image_encoder_type}")
         print(f"融合方式: {args.fusion_type}")
         print(f"可学习图像转换: {not args.no_learnable_image}")
@@ -471,6 +477,8 @@ def main():
         aggregator_layers=args.aggregator_layers,
         aggregator_num_heads=args.aggregator_num_heads,
         aggregator_ffn_dim=args.aggregator_ffn_dim,
+        # 分支模式
+        branch_mode=args.branch_mode,
         # 设备
         device=device,
     ).to(device)
@@ -620,10 +628,22 @@ def main():
             elif is_main_process:
                 print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}")
             
-            if patience_counter >= args.early_stop:
+            # DDP同步早停状态
+            stop_training = torch.tensor(0, device=device)
+            if is_main_process and patience_counter >= args.early_stop:
+                stop_training = torch.tensor(1, device=device)
+            
+            if use_ddp:
+                dist.broadcast(stop_training, src=0)
+            
+            if stop_training.item() == 1:
                 if is_main_process:
                     print(f"\n⏹️  早停! 验证准确率 {args.early_stop} 轮未改进")
                 break
+        
+        # DDP同步：确保所有进程都完成训练循环
+        if use_ddp:
+            dist.barrier()
         
         # 最终测试评估（只在主进程进行）
         if is_main_process:
@@ -651,6 +671,7 @@ def main():
                 "dataset": args.dataset,
                 "num_classes": num_classes,
                 "context_length": context_length,
+                "branch_mode": args.branch_mode,
                 "image_encoder_type": args.image_encoder_type,
                 "fusion_type": args.fusion_type,
                 "learnable_image": not args.no_learnable_image,
@@ -673,6 +694,10 @@ def main():
             print("=" * 70)
             print(f"结果保存到: {save_dir}")
             print("=" * 70)
+        
+        # DDP同步：主进程完成测试后，所有进程同步
+        if use_ddp:
+            dist.barrier()
     
     except KeyboardInterrupt:
         if is_main_process:
@@ -684,9 +709,16 @@ def main():
             traceback.print_exc()
         return 1
     finally:
-        # 清理DDP进程组
+        # DDP: 同步所有进程后再清理进程组
         if use_ddp:
-            dist.destroy_process_group()
+            try:
+                # 等待所有进程到达此点
+                dist.barrier()
+            except Exception:
+                pass  # 忽略已经关闭的进程组
+            finally:
+                if dist.is_initialized():
+                    dist.destroy_process_group()
     
     return 0
 
