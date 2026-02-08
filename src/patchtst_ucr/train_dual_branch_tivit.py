@@ -214,19 +214,19 @@ def prepare_batch(
 
 
 def create_data_loaders(args, num_classes: int, context_length: int):
-    """创建数据加载器"""
+    """
+    创建数据加载器
+    
+    注意：UCR 数据集没有官方验证集，validation 和 test 使用同一份数据。
+    在早停和最终测试时使用的是相同的数据（这是 UCR benchmark 的标准做法）。
+    """
     train_dataset = UCRDatasetForPatchTST(
         dataset_name=args.dataset,
         split="train",
         raw_data_path=args.data_path,
     )
     
-    val_dataset = UCRDatasetForPatchTST(
-        dataset_name=args.dataset,
-        split="validation",
-        raw_data_path=args.data_path,
-    )
-    
+    # UCR 没有官方验证集，test 同时作为 validation 和 test
     test_dataset = UCRDatasetForPatchTST(
         dataset_name=args.dataset,
         split="test",
@@ -248,21 +248,16 @@ def create_data_loaders(args, num_classes: int, context_length: int):
         num_workers=0,  # 避免多进程问题
     )
     
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.eval_batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-    )
-    
-    test_loader = DataLoader(
+    # val_loader 和 test_loader 使用同一个数据集（UCR 标准做法）
+    eval_loader = DataLoader(
         test_dataset,
         batch_size=args.eval_batch_size,
         shuffle=False,
         collate_fn=collate_fn,
     )
     
-    return train_loader, val_loader, test_loader, train_sampler
+    # 返回 eval_loader 作为 val 和 test（它们是同一个）
+    return train_loader, eval_loader, eval_loader, train_sampler
 
 
 def train_one_epoch(
@@ -308,7 +303,7 @@ def train_one_epoch(
             loss = loss / args.gradient_accumulation_steps
             loss.backward()
         
-        # 梯度累积
+        # 梯度累积：达到累积步数时更新
         if (step + 1) % args.gradient_accumulation_steps == 0:
             if args.fp16:
                 scaler.unscale_(optimizer)
@@ -330,6 +325,22 @@ def train_one_epoch(
                 "loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}"
             })
+    
+    # ⚠️ 重要：处理 epoch 结束时剩余的累积梯度
+    # 当 batch 数量不是 gradient_accumulation_steps 的倍数时，需要执行最后一次更新
+    remaining_steps = num_batches % args.gradient_accumulation_steps
+    if remaining_steps > 0:
+        if args.fp16:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            optimizer.step()
+        
+        scheduler.step()
+        optimizer.zero_grad()
     
     return total_loss / max(num_batches, 1)
 
@@ -501,10 +512,15 @@ def main():
         weight_decay=args.weight_decay,
     )
     
-    # 计算总步数（考虑梯度累积）
-    steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
+    # 计算总步数（考虑梯度累积，使用向上取整确保小数据集也能正常工作）
+    # 每个 epoch 至少有 1 个优化步骤（即使 batch 数量 < gradient_accumulation_steps）
+    import math
+    steps_per_epoch = max(1, math.ceil(len(train_loader) / args.gradient_accumulation_steps))
     total_steps = args.epochs * steps_per_epoch
     warmup_steps = int(args.warmup_ratio * total_steps)
+    
+    # 确保 total_steps 至少为 1
+    total_steps = max(total_steps, 1)
     
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -513,8 +529,9 @@ def main():
     )
     
     if is_main_process(args):
+        print(f"   Train batches per epoch: {len(train_loader)}")
+        print(f"   Steps per epoch: {steps_per_epoch}")
         print(f"   Total steps: {total_steps}")
-        print(f"   Warmup steps: {warmup_steps}")
     
     # FP16 混合精度
     scaler = GradScaler() if args.fp16 else None
