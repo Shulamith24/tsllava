@@ -171,7 +171,7 @@ for i in "${!DATASETS[@]}"; do
     fi
     
     # 构建基础训练命令
-    BASE_CMD="python -m src.train_dual_branch_tivit \
+    BASE_CMD="uv run -m src.train_dual_branch_tivit \
         --dataset $DATASET \
         --data_path $DATA_PATH \
         --save_dir $RESULTS_DIR \
