@@ -202,9 +202,14 @@ class DualBranchLLMModel(nn.Module):
         if hasattr(self.llm, "gradient_checkpointing_enable"):
             self.llm.gradient_checkpointing_enable()
             print("✅ LLM 梯度检查点已启用")
+        
         if self.ts_backbone and hasattr(self.ts_backbone, "gradient_checkpointing_enable"):
-            self.ts_backbone.gradient_checkpointing_enable()
-            print("✅ PatchTST 梯度检查点已启用")
+            try:
+                self.ts_backbone.gradient_checkpointing_enable()
+                print("✅ PatchTST 梯度检查点已启用")
+            except ValueError:
+                # PatchTSTModel 不支持梯度检查点，忽略此错误
+                print("⚠️ PatchTST 不支持梯度检查点，跳过")
     
     def enable_lora(
         self,

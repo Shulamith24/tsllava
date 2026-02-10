@@ -114,6 +114,9 @@ class VisionEncoder(nn.Module):
             model_name, device
         )
         
+        # 将 ViT 模型移动到指定设备
+        self.vit = self.vit.to(device)
+        
         # 用于将 tensor 转为 PIL 图像（某些 processor 需要）
         self.to_pil = T.ToPILImage()
         
