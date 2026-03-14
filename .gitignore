@@ -21,3 +21,4 @@ dist/
 
 *.license
 results/
+temp/
