@@ -3,12 +3,14 @@
 #
 # SPDX-License-Identifier: MIT
 import torch
-from typing import Optional, Union
+from typing import Optional, TYPE_CHECKING, Union
 from enum import Enum
 from huggingface_hub import hf_hub_download
 
 from .OpenTSLMSP import OpenTSLMSP
-from .OpenTSLMFlamingo import OpenTSLMFlamingo
+
+if TYPE_CHECKING:
+    from .OpenTSLMFlamingo import OpenTSLMFlamingo
 
 
 class ModelType(Enum):
@@ -50,7 +52,7 @@ class OpenTSLM:
         device: Optional[str] = None,
         cache_dir: Optional[str] = None,
         enable_lora: Optional[bool] = False,
-    ) -> Union[OpenTSLMSP, OpenTSLMFlamingo]:
+    ) -> Union[OpenTSLMSP, "OpenTSLMFlamingo"]:
         """
         Load a pretrained model from Hugging Face Hub.
 
@@ -85,6 +87,8 @@ class OpenTSLM:
             if enable_lora:
                 model.enable_lora()
         elif model_type == ModelType.FLAMINGO:
+            from .OpenTSLMFlamingo import OpenTSLMFlamingo
+
             # OpenTSLMFlamingo with fixed parameters from curriculum learning
             model = OpenTSLMFlamingo(
                 device=device,
