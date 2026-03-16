@@ -2,3 +2,13 @@
 # SPDX-FileCopyrightText: 2025 This source file is part of the OpenTSLM open-source project.
 #
 # SPDX-License-Identifier: MIT
+
+from .PatchTSTClassifier import (
+    PatchTSTClassifierAdapter,
+    prepare_patchtst_classification_batch,
+)
+
+__all__ = [
+    "PatchTSTClassifierAdapter",
+    "prepare_patchtst_classification_batch",
+]
