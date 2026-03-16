@@ -104,6 +104,9 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         self.projector = MLPProjector(
             ENCODER_OUTPUT_DIM, self.llm.config.hidden_size, device=device
         ).to(device)
+        self.projector_out_norm = nn.LayerNorm(
+            self.llm.config.hidden_size, device=device, dtype=torch.bfloat16
+        )
 
         # 4) [ANS] token: 可学习的查询向量
         # 形状: [1, 1, hidden_size]
@@ -114,6 +117,9 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         # 5) 分类头
         self.classifier_head = nn.Linear(
             self.llm.config.hidden_size, num_classes, device=device, dtype=torch.bfloat16
+        )
+        self.ans_norm = nn.LayerNorm(
+            self.llm.config.hidden_size, device=device, dtype=torch.bfloat16
         )
 
         # LoRA 相关
@@ -196,6 +202,18 @@ class OpenTSLMClassifier(TimeSeriesLLM):
                 lora_params.append(param)
         return lora_params
 
+    def set_lora_trainable(self, trainable: bool) -> int:
+        """设置 LoRA 参数是否参与训练，返回被设置的参数数量。"""
+        if not self.lora_enabled:
+            return 0
+
+        num_params = 0
+        for name, param in self.llm.named_parameters():
+            if "lora" in name.lower():
+                param.requires_grad = trainable
+                num_params += 1
+        return num_params
+
     def disable_lora(self):
         """禁用 LoRA"""
         if not self.lora_enabled:
@@ -273,6 +291,7 @@ class OpenTSLMClassifier(TimeSeriesLLM):
 
             ts_enc = self.encoder(ts_padded.squeeze(-1))
             ts_proj = self.projector(ts_enc).to(text_embeds.dtype)
+            ts_proj = self.projector_out_norm(ts_proj)
         else:
             ts_proj = torch.empty(0, 0, H, device=device, dtype=text_embeds.dtype)
 
@@ -380,6 +399,7 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         ans_hidden = last_hidden_states[torch.arange(B, device=self.device), ans_positions, :]  # [B, H]
 
         # 分类头
+        ans_hidden = self.ans_norm(ans_hidden)
         logits = self.classifier_head(ans_hidden)  # [B, num_classes]
 
         # 计算交叉熵损失
@@ -415,6 +435,7 @@ class OpenTSLMClassifier(TimeSeriesLLM):
         ans_hidden = last_hidden_states[torch.arange(B, device=self.device), ans_positions, :]
 
         # 分类头
+        ans_hidden = self.ans_norm(ans_hidden)
         logits = self.classifier_head(ans_hidden)
 
         # 预测
