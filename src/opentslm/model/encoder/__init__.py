@@ -6,11 +6,13 @@
 from .TransformerCNNEncoder import TransformerCNNEncoder
 from .TSLANetEncoder import TSLANetEncoder
 from .NewTSDualBranchEncoder import NewTSDualBranchEncoder
+from .NewTSPMAAggregator import NewTSPMAAggregator
 from .NewTSVisionEncoder import NewTSVisionEncoder
 from .TimeSeriesEncoderBase import TimeSeriesEncoderBase
 
 __all__ = [
     "NewTSDualBranchEncoder",
+    "NewTSPMAAggregator",
     "NewTSVisionEncoder",
     "TransformerCNNEncoder",
     "TSLANetEncoder",

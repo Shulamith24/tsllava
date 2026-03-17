@@ -12,6 +12,7 @@ import sys
 import pytest
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -60,6 +61,26 @@ class DummyTokenizer:
 
     def __len__(self):
         return 32
+
+    def __call__(
+        self,
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        add_special_tokens=True,
+    ):
+        del return_tensors, padding, truncation, add_special_tokens
+        if isinstance(texts, str):
+            texts = [texts]
+
+        encoded = []
+        for idx, _ in enumerate(texts):
+            encoded.append(torch.tensor([idx + 2], dtype=torch.long))
+
+        input_ids = pad_sequence(encoded, batch_first=True, padding_value=0)
+        attention_mask = (input_ids != 0).long()
+        return SimpleNamespace(input_ids=input_ids, attention_mask=attention_mask)
 
 
 class DummyLLM(nn.Module):
@@ -137,6 +158,71 @@ def test_newts_dual_branch_encoder_output_shapes_and_freeze_behavior(monkeypatch
     assert all(not param.requires_grad for param in both_encoder.vision_encoder.vit.parameters())
 
 
+def test_newts_dual_branch_encoder_with_pma_returns_slot_tokens(monkeypatch):
+    install_dummy_vision_loader(monkeypatch)
+    x = torch.randn(2, 12)
+
+    both_encoder = NewTSDualBranchEncoder(
+        output_dim=8,
+        context_length=12,
+        patch_length=4,
+        stride=4,
+        d_model=8,
+        branch_mode="both",
+        use_pma=True,
+        aggregator_num_queries=3,
+        device="cpu",
+    )
+    ts_only_encoder = NewTSDualBranchEncoder(
+        output_dim=8,
+        context_length=12,
+        patch_length=4,
+        stride=4,
+        d_model=8,
+        branch_mode="ts_only",
+        use_pma=True,
+        aggregator_num_queries=3,
+        device="cpu",
+    )
+    vision_only_encoder = NewTSDualBranchEncoder(
+        output_dim=8,
+        context_length=12,
+        patch_length=4,
+        stride=4,
+        d_model=8,
+        branch_mode="vision_only",
+        use_pma=True,
+        aggregator_num_queries=3,
+        device="cpu",
+    )
+
+    assert both_encoder(x).shape == (2, 3, 8)
+    assert ts_only_encoder(x).shape == (2, 3, 8)
+    assert vision_only_encoder(x).shape == (2, 3, 8)
+
+
+def test_newts_dual_branch_encoder_with_pma_projects_back_to_output_dim(monkeypatch):
+    install_dummy_vision_loader(monkeypatch)
+    encoder = NewTSDualBranchEncoder(
+        output_dim=8,
+        context_length=12,
+        patch_length=4,
+        stride=4,
+        d_model=8,
+        branch_mode="both",
+        use_pma=True,
+        aggregator_hidden_size=16,
+        aggregator_num_heads=4,
+        aggregator_ffn_dim=32,
+        aggregator_num_queries=2,
+        device="cpu",
+    )
+
+    outputs = encoder(torch.randn(2, 12))
+
+    assert outputs.shape == (2, 2, 8)
+
+
 def test_newts_vision_encoder_truncates_to_default_layer_4(monkeypatch):
     load_calls = install_dummy_vision_loader(monkeypatch)
 
@@ -188,6 +274,16 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(monkeypatch, tmp_path):
             "ffn_dim": 16,
             "dropout": 0.0,
             "vit_layer_idx": 4,
+            "use_pma": True,
+            "aggregator_layers": 2,
+            "aggregator_hidden_size": 8,
+            "aggregator_num_heads": 2,
+            "aggregator_ffn_dim": 16,
+            "aggregator_num_queries": 3,
+            "aggregator_query_mode": "shared",
+            "aggregator_fusion_mode": "gated_sum",
+            "aggregator_gate_type": "dynamic",
+            "aggregator_fuse_layers": 1,
         },
     )
 
@@ -198,6 +294,8 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(monkeypatch, tmp_path):
     assert checkpoint["model_config"]["llm_id"] == "dummy-llm"
     assert checkpoint["model_config"]["encoder_type"] == "newts_dual_branch"
     assert checkpoint["model_config"]["encoder_config"]["vit_num_hidden_layers"] == 4
+    assert checkpoint["model_config"]["encoder_config"]["use_pma"] is True
+    assert checkpoint["model_config"]["encoder_config"]["aggregator_num_queries"] == 3
 
     args = script_module.parse_args(["--local_checkpoint", str(checkpoint_path)])
     args.use_lora = False
@@ -207,6 +305,8 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(monkeypatch, tmp_path):
     assert args.encoder_type == "newts_dual_branch"
     assert args.llm_id == "dummy-llm"
     assert init_kwargs["newts_dual_branch_config"]["vit_num_hidden_layers"] == 4
+    assert args.use_pma is True
+    assert init_kwargs["newts_dual_branch_config"]["aggregator_num_queries"] == 3
 
 
 def test_train_ucr_newts_defaults_and_validation():
@@ -218,6 +318,7 @@ def test_train_ucr_newts_defaults_and_validation():
     assert args.vit_feature_mode == "single"
     assert args.vit_layer_idx == 4
     assert args.vit_truncate_to_feature_layer is True
+    assert args.use_pma is False
     assert script_module.infer_context_length_from_dataset(
         [{"time_series": [torch.arange(9)]}],
         patch_length=4,
@@ -233,3 +334,106 @@ def test_train_ucr_newts_defaults_and_validation():
     )
     with pytest.raises(ValueError, match="--pretrained_model is not supported"):
         script_module.validate_args(invalid_args)
+
+
+def test_train_ucr_newts_pma_config_and_validation():
+    script_module = load_train_ucr_script_module()
+
+    args = script_module.parse_args(
+        [
+            "--encoder_type",
+            "newts_dual_branch",
+            "--use_pma",
+            "--aggregator_hidden_size",
+            "16",
+            "--aggregator_num_heads",
+            "4",
+            "--aggregator_ffn_dim",
+            "32",
+            "--aggregator_num_queries",
+            "3",
+            "--aggregator_query_mode",
+            "separate",
+            "--aggregator_fusion_mode",
+            "concat_linear",
+            "--aggregator_gate_type",
+            "slot",
+            "--aggregator_fuse_layers",
+            "2",
+        ]
+    )
+    args.context_length = 12
+    script_module.validate_args(args)
+    config = script_module.build_newts_dual_branch_config(args)
+
+    assert config["use_pma"] is True
+    assert config["aggregator_hidden_size"] == 16
+    assert config["aggregator_num_heads"] == 4
+    assert config["aggregator_ffn_dim"] == 32
+    assert config["aggregator_num_queries"] == 3
+    assert config["aggregator_query_mode"] == "separate"
+    assert config["aggregator_fusion_mode"] == "concat_linear"
+    assert config["aggregator_gate_type"] == "slot"
+    assert config["aggregator_fuse_layers"] == 2
+
+    invalid_args = script_module.parse_args(
+        [
+            "--encoder_type",
+            "newts_dual_branch",
+            "--use_pma",
+            "--aggregator_hidden_size",
+            "10",
+            "--aggregator_num_heads",
+            "4",
+        ]
+    )
+    with pytest.raises(ValueError, match="must evenly divide"):
+        script_module.validate_args(invalid_args)
+
+
+def test_opentslmsp_pad_and_apply_batch_with_pma_tokens(monkeypatch):
+    install_dummy_vision_loader(monkeypatch)
+    install_dummy_llm(monkeypatch)
+
+    model = OpenTSLMSP(
+        llm_id="dummy-llm",
+        device="cpu",
+        encoder_type="newts_dual_branch",
+        newts_dual_branch_config={
+            "context_length": 12,
+            "patch_length": 4,
+            "stride": 4,
+            "d_model": 8,
+            "num_attention_heads": 2,
+            "num_hidden_layers": 1,
+            "ffn_dim": 16,
+            "dropout": 0.0,
+            "vit_layer_idx": 4,
+            "use_pma": True,
+            "aggregator_hidden_size": 8,
+            "aggregator_num_heads": 2,
+            "aggregator_ffn_dim": 16,
+            "aggregator_num_queries": 2,
+        },
+    )
+
+    batch = [
+        {
+            "pre_prompt": "Classify",
+            "time_series_text": ["Signal"],
+            "time_series": [torch.randn(10)],
+            "post_prompt": "Answer",
+        },
+        {
+            "pre_prompt": "Classify",
+            "time_series_text": ["Signal"],
+            "time_series": [torch.randn(12)],
+            "post_prompt": "Answer",
+        },
+    ]
+
+    inputs_embeds, attention_mask = model.pad_and_apply_batch(batch)
+
+    assert inputs_embeds.shape == (2, 5, model.llm.config.hidden_size)
+    assert attention_mask.shape == (2, 5)
+    assert torch.all(attention_mask == 1)

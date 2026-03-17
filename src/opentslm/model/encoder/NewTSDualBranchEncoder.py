@@ -10,6 +10,7 @@ import torch.nn as nn
 from transformers import PatchTSTConfig, PatchTSTModel
 
 from opentslm.model_config import ENCODER_OUTPUT_DIM
+from opentslm.model.encoder.NewTSPMAAggregator import NewTSPMAAggregator
 from opentslm.model.encoder.NewTSVisionEncoder import NewTSVisionEncoder
 from opentslm.model.encoder.TimeSeriesEncoderBase import TimeSeriesEncoderBase
 
@@ -22,8 +23,9 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         ``[B, L]`` raw univariate time series.
 
     Output:
-        ``[B, N_tokens, ENCODER_OUTPUT_DIM]`` patch/token embeddings, where the
-        token dimension is the concatenation of the active branch outputs.
+        ``[B, N_tokens, ENCODER_OUTPUT_DIM]`` patch/token embeddings. Without
+        PMA, tokens are the concatenation of the active branch outputs; with
+        PMA, tokens are the learned slot states.
     """
 
     def __init__(
@@ -48,6 +50,16 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         vit_num_hidden_layers: Optional[int] = None,
         projector_type: str = "mlp",
         projector_dropout: float = 0.1,
+        use_pma: bool = False,
+        aggregator_layers: int = 2,
+        aggregator_hidden_size: Optional[int] = None,
+        aggregator_num_heads: int = 8,
+        aggregator_ffn_dim: Optional[int] = None,
+        aggregator_num_queries: int = 4,
+        aggregator_query_mode: str = "shared",
+        aggregator_fusion_mode: str = "gated_sum",
+        aggregator_gate_type: str = "dynamic",
+        aggregator_fuse_layers: int = 1,
         freeze_ts_backbone: bool = False,
         freeze_vision_backbone: bool = True,
         device: str = "cuda",
@@ -64,6 +76,14 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             raise ValueError(f"Unsupported branch_mode: {branch_mode}")
         if projector_type not in {"mlp", "linear"}:
             raise ValueError(f"Unsupported projector_type: {projector_type}")
+        if aggregator_layers <= 0:
+            raise ValueError("aggregator_layers must be positive")
+        if aggregator_num_heads <= 0:
+            raise ValueError("aggregator_num_heads must be positive")
+        if aggregator_num_queries <= 0:
+            raise ValueError("aggregator_num_queries must be positive")
+        if aggregator_fuse_layers < 0:
+            raise ValueError("aggregator_fuse_layers must be non-negative")
 
         self.output_dim = output_dim
         self.context_length = int(context_length)
@@ -73,9 +93,33 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         self.branch_mode = branch_mode
         self.projector_type = projector_type
         self.projector_dropout = float(projector_dropout)
+        self.use_pma = bool(use_pma)
+        self.aggregator_layers = int(aggregator_layers)
+        self.aggregator_hidden_size = (
+            int(aggregator_hidden_size) if aggregator_hidden_size is not None else self.output_dim
+        )
+        self.aggregator_num_heads = int(aggregator_num_heads)
+        self.aggregator_ffn_dim = (
+            int(aggregator_ffn_dim)
+            if aggregator_ffn_dim is not None
+            else self.aggregator_hidden_size * 4
+        )
+        self.aggregator_num_queries = int(aggregator_num_queries)
+        self.aggregator_query_mode = aggregator_query_mode
+        self.aggregator_fusion_mode = aggregator_fusion_mode
+        self.aggregator_gate_type = aggregator_gate_type
+        self.aggregator_fuse_layers = int(aggregator_fuse_layers)
         self.freeze_ts_backbone_default = bool(freeze_ts_backbone)
         self.freeze_vision_backbone_default = bool(freeze_vision_backbone)
         self.device = device
+        self.token_output_dim = self.aggregator_hidden_size if self.use_pma else self.output_dim
+
+        if self.aggregator_hidden_size <= 0:
+            raise ValueError("aggregator_hidden_size must be positive")
+        if self.aggregator_ffn_dim <= 0:
+            raise ValueError("aggregator_ffn_dim must be positive")
+        if self.use_pma and self.aggregator_hidden_size % self.aggregator_num_heads != 0:
+            raise ValueError("aggregator_hidden_size must be divisible by aggregator_num_heads")
 
         if branch_mode in {"both", "ts_only"}:
             patchtst_config = PatchTSTConfig(
@@ -92,7 +136,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             )
             self.ts_backbone = PatchTSTModel(config=patchtst_config)
             self.ts_num_patches = max(0, (self.context_length - self.patch_length) // self.stride + 1)
-            self.ts_projector = self._build_projector(self.d_model, self.output_dim)
+            self.ts_projector = self._build_projector(self.d_model, self.token_output_dim)
         else:
             self.ts_backbone = None
             self.ts_num_patches = 0
@@ -112,12 +156,33 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             )
             self.vision_hidden_dim = self.vision_encoder.get_output_dim()
             self.vision_num_patches = self.vision_encoder.get_num_patches()
-            self.vision_projector = self._build_projector(self.vision_hidden_dim, self.output_dim)
+            self.vision_projector = self._build_projector(self.vision_hidden_dim, self.token_output_dim)
         else:
             self.vision_encoder = None
             self.vision_hidden_dim = 0
             self.vision_num_patches = 0
             self.vision_projector = None
+
+        if self.use_pma:
+            self.aggregator = NewTSPMAAggregator(
+                num_layers=self.aggregator_layers,
+                hidden_size=self.aggregator_hidden_size,
+                num_heads=self.aggregator_num_heads,
+                ffn_dim=self.aggregator_ffn_dim,
+                num_queries=self.aggregator_num_queries,
+                query_mode=self.aggregator_query_mode,
+                fusion_mode=self.aggregator_fusion_mode,
+                gate_type=self.aggregator_gate_type,
+                fuse_layers=self.aggregator_fuse_layers,
+                dropout=dropout,
+            )
+            self.post_aggregator_projector = self._build_projector(
+                self.aggregator_hidden_size,
+                self.output_dim,
+            )
+        else:
+            self.aggregator = None
+            self.post_aggregator_projector = None
 
         if freeze_ts_backbone and self.ts_backbone is not None:
             self.freeze_ts_backbone()
@@ -183,7 +248,8 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             raise ValueError(f"Expected 2D input [B, L], got shape {tuple(x.shape)}")
 
         past_values = self._prepare_past_values(x)
-        embeddings = []
+        ts_embeddings = None
+        vision_embeddings = None
 
         if self.ts_backbone is not None:
             ts_output = self.ts_backbone(past_values=past_values)
@@ -191,18 +257,26 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             if ts_embeddings.dim() == 4:
                 ts_embeddings = ts_embeddings.squeeze(1)
             ts_embeddings = self.ts_projector(ts_embeddings)
-            embeddings.append(ts_embeddings)
 
         if self.vision_encoder is not None:
             vision_embeddings = self.vision_encoder(past_values)
             vision_embeddings = self.vision_projector(vision_embeddings)
-            embeddings.append(vision_embeddings)
 
-        if not embeddings:
+        if ts_embeddings is None and vision_embeddings is None:
             raise RuntimeError("No active branch is available in NewTSDualBranchEncoder")
-        if len(embeddings) == 1:
-            return embeddings[0]
-        return torch.cat(embeddings, dim=1)
+
+        if self.use_pma:
+            agg_outputs = self.aggregator(
+                ts_tokens=ts_embeddings,
+                vision_tokens=vision_embeddings,
+            )
+            return self.post_aggregator_projector(agg_outputs["slot_states"])
+
+        if ts_embeddings is None:
+            return vision_embeddings
+        if vision_embeddings is None:
+            return ts_embeddings
+        return torch.cat([ts_embeddings, vision_embeddings], dim=1)
 
     def get_config(self) -> Dict[str, Any]:
         config = {
@@ -214,6 +288,16 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             "branch_mode": self.branch_mode,
             "projector_type": self.projector_type,
             "projector_dropout": self.projector_dropout,
+            "use_pma": self.use_pma,
+            "aggregator_layers": self.aggregator_layers,
+            "aggregator_hidden_size": self.aggregator_hidden_size,
+            "aggregator_num_heads": self.aggregator_num_heads,
+            "aggregator_ffn_dim": self.aggregator_ffn_dim,
+            "aggregator_num_queries": self.aggregator_num_queries,
+            "aggregator_query_mode": self.aggregator_query_mode,
+            "aggregator_fusion_mode": self.aggregator_fusion_mode,
+            "aggregator_gate_type": self.aggregator_gate_type,
+            "aggregator_fuse_layers": self.aggregator_fuse_layers,
             "freeze_ts_backbone": self.freeze_ts_backbone_default,
             "freeze_vision_backbone": self.freeze_vision_backbone_default,
         }

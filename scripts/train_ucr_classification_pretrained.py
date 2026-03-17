@@ -93,7 +93,7 @@ def parse_args(argv=None):
         choices=["last", "train_loss"],
         help="Kept for compatibility; final checkpoint is always Phase2 last.",
     )
-    parser.add_argument("--fewshot_batch_mode", type=str, default="full", choices=["full", "manual"])
+    parser.add_argument("--fewshot_batch_mode", type=str, default="manual", choices=["full", "manual"])
 
     # Phase setup
     parser.add_argument("--epochs", type=int, default=30)
@@ -123,7 +123,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--encoder_type",
         type=str,
-        default="transformer_cnn",
+        default="newts_dual_branch",
         choices=["transformer_cnn", "tslanet", "newts_dual_branch"],
         help="Encoder type (required when using local checkpoints or training from scratch)",
     )
@@ -156,19 +156,9 @@ def parse_args(argv=None):
     parser.add_argument("--ffn_dim", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--vit_model_name", type=str, default="facebook/dinov2-base")
-    parser.add_argument(
-        "--vit_feature_mode",
-        type=str,
-        default="single",
-        choices=["last", "single", "scalar_mix"],
-    )
+    parser.add_argument("--vit_feature_mode", type=str, default="single", choices=["last", "single", "scalar_mix"],)
     parser.add_argument("--vit_layer_idx", type=int, default=4)
-    parser.add_argument(
-        "--vit_mix_layers",
-        type=str,
-        default=None,
-        help="Comma-separated 1-based layer indices used when vit_feature_mode=scalar_mix",
-    )
+    parser.add_argument("--vit_mix_layers", type=str, default=None, help="Comma-separated 1-based layer indices used when vit_feature_mode=scalar_mix",)
     parser.add_argument("--vit_patch_size", type=int, default=16)
     parser.add_argument("--vit_stride", type=float, default=0.5)
     parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
@@ -186,6 +176,16 @@ def parse_args(argv=None):
     )
     parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "linear"]) #分支内投影
     parser.add_argument("--projector_dropout", type=float, default=0.1) #分支内投影的dropout
+    parser.add_argument("--use_pma", action="store_true", help="Enable PMA slot aggregation for newts_dual_branch")
+    parser.add_argument("--aggregator_layers", type=int, default=2)
+    parser.add_argument("--aggregator_hidden_size", type=int, default=None)
+    parser.add_argument("--aggregator_num_heads", type=int, default=8)
+    parser.add_argument("--aggregator_ffn_dim", type=int, default=None)
+    parser.add_argument("--aggregator_num_queries", type=int, default=2)
+    parser.add_argument("--aggregator_query_mode", type=str, default="separate", choices=["shared", "separate"],)
+    parser.add_argument("--aggregator_fusion_mode", type=str, default="concat_linear", choices=["gated_sum", "concat_linear"],)
+    parser.add_argument("--aggregator_gate_type", type=str, default="dynamic", choices=["scalar", "slot", "dynamic"],)
+    parser.add_argument("--aggregator_fuse_layers", type=int, default=1)
     parser.add_argument("--freeze_ts_backbone", action="store_true")
     parser.add_argument("--freeze_vision_backbone",dest="freeze_vision_backbone",action="store_true",help="Freeze the vision backbone parameters",)
     parser.add_argument(
@@ -205,9 +205,9 @@ def parse_args(argv=None):
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
 
     # Optimization
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--eval_batch_size", type=int, default=32)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--lr_encoder", type=float, default=2e-4)
     parser.add_argument("--lr_projector", type=float, default=1e-4)
     parser.add_argument("--lr_lora", type=float, default=1e-4)
@@ -293,6 +293,16 @@ def hydrate_args_from_local_checkpoint_metadata(args):
             "vit_num_hidden_layers",
             "projector_type",
             "projector_dropout",
+            "use_pma",
+            "aggregator_layers",
+            "aggregator_hidden_size",
+            "aggregator_num_heads",
+            "aggregator_ffn_dim",
+            "aggregator_num_queries",
+            "aggregator_query_mode",
+            "aggregator_fusion_mode",
+            "aggregator_gate_type",
+            "aggregator_fuse_layers",
         ]
         for key in structural_keys:
             if key in encoder_config:
@@ -540,6 +550,26 @@ def validate_args(args):
                 "--vit_num_hidden_layers must be >= the requested target feature layer depth"
             )
 
+    if not args.use_pma:
+        return
+
+    if args.aggregator_layers <= 0:
+        raise ValueError("--aggregator_layers must be positive")
+    if args.aggregator_num_heads <= 0:
+        raise ValueError("--aggregator_num_heads must be positive")
+    if args.aggregator_num_queries <= 0:
+        raise ValueError("--aggregator_num_queries must be positive")
+    if args.aggregator_fuse_layers < 0:
+        raise ValueError("--aggregator_fuse_layers must be >= 0")
+    if args.aggregator_hidden_size is not None and args.aggregator_hidden_size <= 0:
+        raise ValueError("--aggregator_hidden_size must be positive when provided")
+    if args.aggregator_ffn_dim is not None and args.aggregator_ffn_dim <= 0:
+        raise ValueError("--aggregator_ffn_dim must be positive when provided")
+
+    resolved_aggregator_hidden_size = args.aggregator_hidden_size or ENCODER_OUTPUT_DIM
+    if resolved_aggregator_hidden_size % args.aggregator_num_heads != 0:
+        raise ValueError("--aggregator_num_heads must evenly divide the PMA hidden size")
+
 
 def infer_context_length_from_dataset(dataset: Dataset, patch_length: int) -> int:
     if len(dataset) == 0:
@@ -582,6 +612,16 @@ def build_newts_dual_branch_config(args) -> Dict[str, Any]:
         "vit_num_hidden_layers": args.vit_num_hidden_layers,
         "projector_type": args.projector_type,
         "projector_dropout": args.projector_dropout,
+        "use_pma": args.use_pma,
+        "aggregator_layers": args.aggregator_layers,
+        "aggregator_hidden_size": args.aggregator_hidden_size,
+        "aggregator_num_heads": args.aggregator_num_heads,
+        "aggregator_ffn_dim": args.aggregator_ffn_dim,
+        "aggregator_num_queries": args.aggregator_num_queries,
+        "aggregator_query_mode": args.aggregator_query_mode,
+        "aggregator_fusion_mode": args.aggregator_fusion_mode,
+        "aggregator_gate_type": args.aggregator_gate_type,
+        "aggregator_fuse_layers": args.aggregator_fuse_layers,
         "freeze_ts_backbone": args.freeze_ts_backbone,
         "freeze_vision_backbone": args.freeze_vision_backbone,
     }
