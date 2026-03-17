@@ -5,7 +5,7 @@
 
 import torch
 import torch.nn as nn
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.nn.utils.rnn import pad_sequence
 
@@ -19,6 +19,7 @@ except ImportError:
 
 from opentslm.model_config import ENCODER_OUTPUT_DIM
 from .TimeSeriesLLM import TimeSeriesLLM
+from ..encoder.NewTSDualBranchEncoder import NewTSDualBranchEncoder
 from ..encoder.TransformerCNNEncoder import TransformerCNNEncoder
 from ..projector.MLPProjector import MLPProjector
 from opentslm.prompt.full_prompt import FullPrompt
@@ -32,11 +33,13 @@ class OpenTSLMSP(TimeSeriesLLM):
         self,
         llm_id: str = "meta-llama/Llama-3.2-1B",
         device: str = "cuda",
-        encoder_type: str = "transformer_cnn",  # "transformer_cnn" or "tslanet"
-        encoder_pretrained_path: Optional[str] = None,  # 预训练权重路径
-        tslanet_config: Optional[Dict] = None,  # TSLANet配置
+        encoder_type: str = "transformer_cnn",
+        encoder_pretrained_path: Optional[str] = None,
+        tslanet_config: Optional[Dict[str, Any]] = None,
+        newts_dual_branch_config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(device)
+        self.llm_id = llm_id
 
         # 1) tokenizer (ensure pad_token exists)
         self.tokenizer = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
@@ -54,30 +57,18 @@ class OpenTSLMSP(TimeSeriesLLM):
 
         # 3) encoder + projector
         self.encoder_type = encoder_type
-        if encoder_type == "tslanet":
-            from ..encoder.TSLANetEncoder import TSLANetEncoder
-            config = tslanet_config or {}
-            # 默认TSLANet配置
-            default_config = {
-                "output_dim": ENCODER_OUTPUT_DIM,
-                "patch_size": 8,
-                "emb_dim": 128,
-                "depth": 2,
-                "dropout": 0.15,
-            }
-            default_config.update(config)
-            self.encoder = TSLANetEncoder(**default_config).to(device)
-            self.patch_size = default_config.get("patch_size", 8)
-            
-            # 加载预训练权重
-            if encoder_pretrained_path:
-                self.encoder.load_pretrained(encoder_pretrained_path)
-                print(f"✅ Loaded TSLANet pretrained weights from: {encoder_pretrained_path}")
-        else:
-            # 默认使用原有编码器
-            self.encoder = TransformerCNNEncoder().to(device)
-            self.patch_size = 4
-        
+        (
+            self.encoder,
+            self.patch_size,
+            self.encoder_config,
+        ) = self._build_encoder(
+            encoder_type=encoder_type,
+            device=device,
+            encoder_pretrained_path=encoder_pretrained_path,
+            tslanet_config=tslanet_config,
+            newts_dual_branch_config=newts_dual_branch_config,
+        )
+
         self.projector = MLPProjector(
             ENCODER_OUTPUT_DIM, self.llm.config.hidden_size, device=device
         ).to(device)
@@ -104,6 +95,8 @@ class OpenTSLMSP(TimeSeriesLLM):
             print("✅ Gradient checkpointing enabled for LLM")
         else:
             print("⚠️ LLM does not support gradient_checkpointing_enable()")
+        if hasattr(self.encoder, "enable_gradient_checkpointing"):
+            self.encoder.enable_gradient_checkpointing()
 
     def forward(self, batch: List[Dict[str, any]]) -> torch.Tensor:
         """
@@ -421,8 +414,16 @@ class OpenTSLMSP(TimeSeriesLLM):
     def get_eos_token(self) -> str:
         return self.tokenizer.eos_token
 
+    def get_checkpoint_metadata(self) -> Dict[str, Any]:
+        return {
+            "llm_id": self.llm_id,
+            "encoder_type": self.encoder_type,
+            "encoder_config": self.encoder_config,
+        }
+
     def store_to_file(self, path: str):
         checkpoint = {
+            "model_config": self.get_checkpoint_metadata(),
             "encoder_state": self.encoder.state_dict(),
             "projector_state": self.projector.state_dict(),
         }
@@ -556,7 +557,82 @@ class OpenTSLMSP(TimeSeriesLLM):
         batch = [prompt.to_dict()]
         self.eval()
         batch = extend_time_series_to_match_patch_size_and_aggregate(
-            batch, normalize=normalize
+            batch,
+            patch_size=self.patch_size,
+            normalize=normalize,
         )
         output = self.generate(batch, max_new_tokens=max_new_tokens)
         return output[0]
+
+    @staticmethod
+    def _build_default_tslanet_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        default_config = {
+            "output_dim": ENCODER_OUTPUT_DIM,
+            "patch_size": 8,
+            "emb_dim": 128,
+            "depth": 2,
+            "dropout": 0.15,
+        }
+        if config:
+            default_config.update(config)
+        return default_config
+
+    @staticmethod
+    def _build_default_newts_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        default_config = {
+            "output_dim": ENCODER_OUTPUT_DIM,
+            "context_length": 512,
+            "patch_length": 16,
+            "stride": 8,
+            "d_model": 128,
+            "num_attention_heads": 8,
+            "num_hidden_layers": 3,
+            "ffn_dim": 512,
+            "dropout": 0.1,
+            "branch_mode": "both",
+            "vit_model_name": "facebook/dinov2-base",
+            "vit_feature_mode": "single",
+            "vit_layer_idx": 4,
+            "vit_mix_layers": None,
+            "vit_patch_size": 16,
+            "vit_stride": 0.5,
+            "vit_truncate_to_feature_layer": True,
+            "vit_num_hidden_layers": None,
+            "projector_type": "mlp",
+            "projector_dropout": 0.1,
+            "freeze_ts_backbone": False,
+            "freeze_vision_backbone": True,
+        }
+        if config:
+            default_config.update(config)
+        return default_config
+
+    def _build_encoder(
+        self,
+        *,
+        encoder_type: str,
+        device: str,
+        encoder_pretrained_path: Optional[str],
+        tslanet_config: Optional[Dict[str, Any]],
+        newts_dual_branch_config: Optional[Dict[str, Any]],
+    ):
+        if encoder_type == "transformer_cnn":
+            encoder = TransformerCNNEncoder().to(device)
+            return encoder, encoder.patch_size, {}
+
+        if encoder_type == "tslanet":
+            from ..encoder.TSLANetEncoder import TSLANetEncoder
+
+            config = self._build_default_tslanet_config(tslanet_config)
+            encoder = TSLANetEncoder(**config).to(device)
+            if encoder_pretrained_path:
+                encoder.load_pretrained(encoder_pretrained_path)
+                print(f"✅ Loaded TSLANet pretrained weights from: {encoder_pretrained_path}")
+            return encoder, config.get("patch_size", 8), config
+
+        if encoder_type == "newts_dual_branch":
+            config = self._build_default_newts_config(newts_dual_branch_config)
+            encoder = NewTSDualBranchEncoder(**config, device=device).to(device)
+            return encoder, 1, encoder.get_config()
+
+        raise ValueError(f"Unsupported encoder_type: {encoder_type}")

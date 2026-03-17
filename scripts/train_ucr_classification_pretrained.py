@@ -61,7 +61,22 @@ from opentslm.time_series_datasets.util import extend_time_series_to_match_patch
 ShotType = Union[int, Literal["full"]]
 
 
-def parse_args():
+def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+
+    items = []
+    for token in value.split(","):
+        stripped = token.strip()
+        if not stripped:
+            continue
+        items.append(int(stripped))
+    return items or None
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="M2: strict few-shot UCR classification with pretrained SP models"
     )
@@ -109,7 +124,7 @@ def parse_args():
         "--encoder_type",
         type=str,
         default="transformer_cnn",
-        choices=["transformer_cnn", "tslanet"],
+        choices=["transformer_cnn", "tslanet", "newts_dual_branch"],
         help="Encoder type (required when using local checkpoints or training from scratch)",
     )
     parser.add_argument(
@@ -130,13 +145,67 @@ def parse_args():
         help="Randomly initialize the LLM backbone for ablations",
     )
 
+    # NewTS dual-branch encoder
+    parser.add_argument("--branch_mode", type=str, default="both", choices=["both", "ts_only", "vision_only"])
+    parser.add_argument("--context_length", type=int, default=None)
+    parser.add_argument("--patch_length", type=int, default=16)
+    parser.add_argument("--stride", type=int, default=8)
+    parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument("--num_attention_heads", type=int, default=8)
+    parser.add_argument("--num_hidden_layers", type=int, default=3)
+    parser.add_argument("--ffn_dim", type=int, default=512)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--vit_model_name", type=str, default="facebook/dinov2-base")
+    parser.add_argument(
+        "--vit_feature_mode",
+        type=str,
+        default="single",
+        choices=["last", "single", "scalar_mix"],
+    )
+    parser.add_argument("--vit_layer_idx", type=int, default=4)
+    parser.add_argument(
+        "--vit_mix_layers",
+        type=str,
+        default=None,
+        help="Comma-separated 1-based layer indices used when vit_feature_mode=scalar_mix",
+    )
+    parser.add_argument("--vit_patch_size", type=int, default=16)
+    parser.add_argument("--vit_stride", type=float, default=0.5)
+    parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
+    parser.add_argument(
+        "--vit_truncate_to_feature_layer",
+        dest="vit_truncate_to_feature_layer",
+        action="store_true",
+        help="Truncate the loaded vision backbone to the minimum depth needed by the selected feature layer",
+    )
+    parser.add_argument(
+        "--no_vit_truncate_to_feature_layer",
+        dest="vit_truncate_to_feature_layer",
+        action="store_false",
+        help="Disable feature-layer-based truncation for the vision backbone",
+    )
+    parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "linear"]) #分支内投影
+    parser.add_argument("--projector_dropout", type=float, default=0.1) #分支内投影的dropout
+    parser.add_argument("--freeze_ts_backbone", action="store_true")
+    parser.add_argument("--freeze_vision_backbone",dest="freeze_vision_backbone",action="store_true",help="Freeze the vision backbone parameters",)
+    parser.add_argument(
+        "--no_freeze_vision_backbone",
+        dest="freeze_vision_backbone",
+        action="store_false",
+        help="Leave the vision backbone trainable",
+    )
+    parser.set_defaults(
+        vit_truncate_to_feature_layer=True,
+        freeze_vision_backbone=True,
+    )
+
     # LoRA
     parser.add_argument("--no_lora", action="store_true", help="Disable LoRA")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
 
     # Optimization
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--eval_batch_size", type=int, default=32)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--lr_encoder", type=float, default=2e-4)
@@ -177,7 +246,59 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
 
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
+    return args
+
+
+def hydrate_args_from_local_checkpoint_metadata(args):
+    args.local_checkpoint_model_config = None
+    if not args.local_checkpoint:
+        return args
+
+    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
+    model_config = checkpoint.get("model_config") or {}
+    args.local_checkpoint_model_config = model_config
+
+    llm_id = model_config.get("llm_id")
+    if llm_id:
+        args.llm_id = llm_id
+
+    encoder_type = model_config.get("encoder_type")
+    encoder_config = model_config.get("encoder_config") or {}
+    if encoder_type:
+        args.encoder_type = encoder_type
+
+    if encoder_type == "tslanet":
+        if "patch_size" in encoder_config:
+            args.tslanet_patch_size = encoder_config["patch_size"]
+    elif encoder_type == "newts_dual_branch":
+        structural_keys = [
+            "branch_mode",
+            "context_length",
+            "patch_length",
+            "stride",
+            "d_model",
+            "num_attention_heads",
+            "num_hidden_layers",
+            "ffn_dim",
+            "dropout",
+            "vit_model_name",
+            "vit_feature_mode",
+            "vit_layer_idx",
+            "vit_mix_layers",
+            "vit_patch_size",
+            "vit_stride",
+            "vit_truncate_to_feature_layer",
+            "vit_num_hidden_layers",
+            "projector_type",
+            "projector_dropout",
+        ]
+        for key in structural_keys:
+            if key in encoder_config:
+                setattr(args, key, encoder_config[key])
+
+    return args
 
 
 def setup_distributed() -> Tuple[int, int, int]:
@@ -241,11 +362,19 @@ def shot_to_name(shot: ShotType) -> str:
     return "full" if shot == "full" else str(shot)
 
 
+def resolve_collate_patch_size(args) -> int:
+    if args.encoder_type == "tslanet":
+        return args.tslanet_patch_size
+    if args.encoder_type == "newts_dual_branch":
+        return 1
+    return PATCH_SIZE
+
+
 def make_collate_fn(args, is_train: bool):
     def collate_fn(batch):
         return extend_time_series_to_match_patch_size_and_aggregate(
             batch,
-            patch_size=PATCH_SIZE,
+            patch_size=resolve_collate_patch_size(args),
             normalize=True,
             normalize_eps=1e-5,
             pad_mode=args.pad_mode,
@@ -371,27 +500,151 @@ def resolve_dataset_eos_token(args) -> str:
     return tokenizer.eos_token
 
 
+def validate_args(args):
+    if args.epochs < 1:
+        raise ValueError("--epochs must be >= 1")
+    if args.num_runs < 1:
+        raise ValueError("--num_runs must be >= 1")
+    if args.aug_scaling_min > args.aug_scaling_max:
+        raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
+
+    if args.encoder_type != "newts_dual_branch":
+        return
+
+    if args.pretrained_model:
+        raise ValueError("--pretrained_model is not supported with --encoder_type=newts_dual_branch")
+    if args.patch_length <= 0:
+        raise ValueError("--patch_length must be positive")
+    if args.stride <= 0:
+        raise ValueError("--stride must be positive")
+    if args.context_length is not None and args.context_length <= 0:
+        raise ValueError("--context_length must be positive when provided")
+    if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
+        raise ValueError("--vit_num_hidden_layers must be positive when provided")
+
+    target_layer = None
+    if args.vit_feature_mode == "single":
+        if args.vit_layer_idx <= 0:
+            raise ValueError("--vit_layer_idx must be positive when --vit_feature_mode=single")
+        target_layer = args.vit_layer_idx
+    elif args.vit_feature_mode == "scalar_mix":
+        if not args.vit_mix_layers:
+            raise ValueError("--vit_mix_layers is required when --vit_feature_mode=scalar_mix")
+        if any(layer <= 0 for layer in args.vit_mix_layers):
+            raise ValueError("--vit_mix_layers must contain positive 1-based layer indices")
+        target_layer = max(args.vit_mix_layers)
+
+    if args.vit_num_hidden_layers is not None and target_layer is not None:
+        if args.vit_num_hidden_layers < target_layer:
+            raise ValueError(
+                "--vit_num_hidden_layers must be >= the requested target feature layer depth"
+            )
+
+
+def infer_context_length_from_dataset(dataset: Dataset, patch_length: int) -> int:
+    if len(dataset) == 0:
+        raise ValueError("Cannot infer context_length from an empty dataset")
+
+    sample = dataset[0]["time_series"][0]
+    sample_length = int(torch.as_tensor(sample).numel())
+    return ((sample_length + patch_length - 1) // patch_length) * patch_length
+
+
+def build_tslanet_config(args) -> Dict[str, Any]:
+    return {
+        "patch_size": args.tslanet_patch_size,
+        "output_dim": ENCODER_OUTPUT_DIM,
+    }
+
+
+def build_newts_dual_branch_config(args) -> Dict[str, Any]:
+    if args.context_length is None:
+        raise ValueError("context_length must be resolved before building the newts_dual_branch config")
+
+    return {
+        "output_dim": ENCODER_OUTPUT_DIM,
+        "context_length": args.context_length,
+        "patch_length": args.patch_length,
+        "stride": args.stride,
+        "d_model": args.d_model,
+        "num_attention_heads": args.num_attention_heads,
+        "num_hidden_layers": args.num_hidden_layers,
+        "ffn_dim": args.ffn_dim,
+        "dropout": args.dropout,
+        "branch_mode": args.branch_mode,
+        "vit_model_name": args.vit_model_name,
+        "vit_feature_mode": args.vit_feature_mode,
+        "vit_layer_idx": args.vit_layer_idx,
+        "vit_mix_layers": list(args.vit_mix_layers) if args.vit_mix_layers else None,
+        "vit_patch_size": args.vit_patch_size,
+        "vit_stride": args.vit_stride,
+        "vit_truncate_to_feature_layer": args.vit_truncate_to_feature_layer,
+        "vit_num_hidden_layers": args.vit_num_hidden_layers,
+        "projector_type": args.projector_type,
+        "projector_dropout": args.projector_dropout,
+        "freeze_ts_backbone": args.freeze_ts_backbone,
+        "freeze_vision_backbone": args.freeze_vision_backbone,
+    }
+
+
+def resolve_model_init_kwargs(args) -> Dict[str, Any]:
+    init_kwargs: Dict[str, Any] = {
+        "llm_id": args.llm_id,
+        "encoder_type": args.encoder_type,
+        "tslanet_config": None,
+        "newts_dual_branch_config": None,
+    }
+    if args.encoder_type == "tslanet":
+        init_kwargs["tslanet_config"] = build_tslanet_config(args)
+    elif args.encoder_type == "newts_dual_branch":
+        init_kwargs["newts_dual_branch_config"] = build_newts_dual_branch_config(args)
+    return init_kwargs
+
+
+def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = checkpoint.get("model_config") or {}
+    init_kwargs = resolve_model_init_kwargs(args)
+
+    llm_id = metadata.get("llm_id")
+    encoder_type = metadata.get("encoder_type")
+    encoder_config = metadata.get("encoder_config")
+
+    if llm_id:
+        init_kwargs["llm_id"] = llm_id
+    if encoder_type:
+        init_kwargs["encoder_type"] = encoder_type
+
+    if encoder_type == "tslanet" and encoder_config:
+        init_kwargs["tslanet_config"] = dict(encoder_config)
+    elif encoder_type == "newts_dual_branch" and encoder_config:
+        merged_config = dict(encoder_config)
+        merged_config["freeze_ts_backbone"] = args.freeze_ts_backbone
+        merged_config["freeze_vision_backbone"] = args.freeze_vision_backbone
+        merged_config["output_dim"] = ENCODER_OUTPUT_DIM
+        init_kwargs["newts_dual_branch_config"] = merged_config
+
+    return init_kwargs
+
+
 def build_model(args, device: str, rank: int):
     use_lora = args.use_lora
 
     if args.local_checkpoint:
+        checkpoint = torch.load(args.local_checkpoint, map_location=device, weights_only=False)
+        model_init_kwargs = resolve_model_init_kwargs_from_checkpoint(args, checkpoint)
         if rank == 0:
             print(f"📂 Loading local checkpoint: {args.local_checkpoint}")
-            print(f"   encoder_type: {args.encoder_type}")
-            print(f"   llm_id: {args.llm_id}")
+            print(f"   encoder_type: {model_init_kwargs['encoder_type']}")
+            print(f"   llm_id: {model_init_kwargs['llm_id']}")
 
-        tslanet_config = {
-            "patch_size": args.tslanet_patch_size,
-            "output_dim": ENCODER_OUTPUT_DIM,
-        }
         model = OpenTSLMSP(
-            llm_id=args.llm_id,
+            llm_id=model_init_kwargs["llm_id"],
             device=device,
-            encoder_type=args.encoder_type,
-            tslanet_config=tslanet_config if args.encoder_type == "tslanet" else None,
+            encoder_type=model_init_kwargs["encoder_type"],
+            tslanet_config=model_init_kwargs["tslanet_config"],
+            newts_dual_branch_config=model_init_kwargs["newts_dual_branch_config"],
         )
 
-        checkpoint = torch.load(args.local_checkpoint, map_location=device, weights_only=False)
         model.encoder.load_state_dict(checkpoint["encoder_state"])
         model.projector.load_state_dict(checkpoint["projector_state"])
         if rank == 0:
@@ -418,20 +671,18 @@ def build_model(args, device: str, rank: int):
                 print(f"📎 Reconfigured LoRA: r={args.lora_r}, alpha={args.lora_alpha}")
 
     else:
+        model_init_kwargs = resolve_model_init_kwargs(args)
         if rank == 0:
             print("🆕 Training without pretrained checkpoint")
-            print(f"   encoder_type: {args.encoder_type}")
-            print(f"   llm_id: {args.llm_id}")
+            print(f"   encoder_type: {model_init_kwargs['encoder_type']}")
+            print(f"   llm_id: {model_init_kwargs['llm_id']}")
 
-        tslanet_config = {
-            "patch_size": args.tslanet_patch_size,
-            "output_dim": ENCODER_OUTPUT_DIM,
-        }
         model = OpenTSLMSP(
-            llm_id=args.llm_id,
+            llm_id=model_init_kwargs["llm_id"],
             device=device,
-            encoder_type=args.encoder_type,
-            tslanet_config=tslanet_config if args.encoder_type == "tslanet" else None,
+            encoder_type=model_init_kwargs["encoder_type"],
+            tslanet_config=model_init_kwargs["tslanet_config"],
+            newts_dual_branch_config=model_init_kwargs["newts_dual_branch_config"],
         )
 
         if use_lora:
@@ -757,6 +1008,7 @@ def save_checkpoint(
 
     underlying_model = get_model(model)
     checkpoint = {
+        "model_config": underlying_model.get_checkpoint_metadata(),
         "encoder_state": underlying_model.encoder.state_dict(),
         "projector_state": underlying_model.projector.state_dict(),
         "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
@@ -1157,15 +1409,11 @@ def run_single_experiment(
 def main():
     args = parse_args()
     args.use_lora = not args.no_lora
+    args = hydrate_args_from_local_checkpoint_metadata(args)
     local_rank, world_size, rank = setup_distributed()
 
     try:
-        if args.epochs < 1:
-            raise ValueError("--epochs must be >= 1")
-        if args.num_runs < 1:
-            raise ValueError("--num_runs must be >= 1")
-        if args.aug_scaling_min > args.aug_scaling_max:
-            raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
+        validate_args(args)
 
         if args.protocol == "fewshot":
             shots: List[ShotType] = parse_shots(args.shots)
@@ -1186,6 +1434,30 @@ def main():
         set_seed(args.seed)
 
         save_root = os.path.join(args.save_dir, args.dataset)
+
+        eos_rank0 = resolve_dataset_eos_token(args) if rank == 0 else None
+        dataset_eos = broadcast_object_from_rank0(eos_rank0, world_size, rank)
+
+        train_dataset = UCRClassificationDataset(
+            split="train",
+            EOS_TOKEN=dataset_eos,
+            dataset_name=args.dataset,
+            raw_data_path=args.data_path,
+        )
+        test_dataset = UCRClassificationDataset(
+            split="test",
+            EOS_TOKEN=dataset_eos,
+            dataset_name=args.dataset,
+            raw_data_path=args.data_path,
+        )
+
+        num_classes = UCRClassificationDataset.get_num_classes()
+        class_tokens = UCRClassificationDataset.get_class_tokens()
+        label_to_indices = build_label_to_indices(train_dataset)
+
+        if args.encoder_type == "newts_dual_branch" and args.context_length is None:
+            args.context_length = infer_context_length_from_dataset(train_dataset, args.patch_length)
+
         if rank == 0:
             os.makedirs(save_root, exist_ok=True)
             with open(os.path.join(save_root, "config.json"), "w") as f:
@@ -1207,30 +1479,16 @@ def main():
             print(f"pad_mode: {args.pad_mode}")
             print(f"augmentation: {args.enable_augmentation}")
             print(f"ddp world_size: {world_size}")
+            if args.encoder_type == "newts_dual_branch":
+                print(f"context_length: {args.context_length}")
+                print(
+                    "vision: "
+                    f"mode={args.vit_feature_mode}, "
+                    f"layer={args.vit_layer_idx if args.vit_feature_mode == 'single' else args.vit_mix_layers}, "
+                    f"truncate={args.vit_truncate_to_feature_layer}, "
+                    f"loaded_layers={args.vit_num_hidden_layers}"
+                )
             print("=" * 80)
-
-        if world_size > 1:
-            dist.barrier()
-
-        eos_rank0 = resolve_dataset_eos_token(args) if rank == 0 else None
-        dataset_eos = broadcast_object_from_rank0(eos_rank0, world_size, rank)
-
-        train_dataset = UCRClassificationDataset(
-            split="train",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
-        test_dataset = UCRClassificationDataset(
-            split="test",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
-
-        num_classes = UCRClassificationDataset.get_num_classes()
-        class_tokens = UCRClassificationDataset.get_class_tokens()
-        label_to_indices = build_label_to_indices(train_dataset)
 
         if rank == 0:
             class_size_brief = {k: len(v) for k, v in label_to_indices.items()}
