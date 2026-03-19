@@ -336,6 +336,35 @@ def test_train_ucr_newts_defaults_and_validation():
         script_module.validate_args(invalid_args)
 
 
+def test_train_ucr_strict_fewshot_way_sampling_and_epoch_enforcement():
+    script_module = load_train_ucr_script_module()
+
+    label_to_indices = {
+        0: [0, 1, 2],
+        1: [3, 4, 5],
+        2: [6, 7, 8],
+    }
+    support_info = script_module.sample_support_info(
+        label_to_indices=label_to_indices,
+        shot=2,
+        seed=123,
+        way=2,
+    )
+
+    assert support_info["way"] == 2
+    assert len(support_info["selected_class_ids"]) == 2
+    assert len(support_info["selected_indices"]) == 4
+    assert set(support_info["selected_by_class"].keys()) == {
+        str(class_id) for class_id in support_info["selected_class_ids"]
+    }
+
+    args = script_module.parse_args(["--protocol", "fewshot", "--epochs", "7", "--way", "2"])
+    script_module.validate_args(args)
+    args = script_module.enforce_strict_fewshot_protocol(args)
+
+    assert args.epochs == script_module.STRICT_FEWSHOT_EPOCHS == 100
+
+
 def test_train_ucr_newts_pma_config_and_validation():
     script_module = load_train_ucr_script_module()
 

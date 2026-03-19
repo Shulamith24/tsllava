@@ -3,14 +3,30 @@
 #
 # SPDX-License-Identifier: MIT
 
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+import sys
+
 import numpy as np
 import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_patchtst_classification_fewshot.py"
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from opentslm.model.PatchTSTClassifier import (
     PatchTSTClassifierAdapter,
     prepare_patchtst_classification_batch,
 )
 from transformers import PatchTSTConfig, PatchTSTForClassification
+
+
+def load_patchtst_fewshot_script_module():
+    spec = spec_from_file_location("train_ucr_patchtst_classification_fewshot", SCRIPT_PATH)
+    module = module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_prepare_patchtst_classification_batch_shapes_and_masks():
@@ -81,3 +97,31 @@ def test_build_model_from_local_pretrained_resets_head(tmp_path):
     assert adapter.config.num_targets == 3
     assert outputs.loss is not None
     assert outputs.prediction_logits.shape == (2, 3)
+
+
+def test_patchtst_fewshot_way_sampling_and_epoch_enforcement():
+    script_module = load_patchtst_fewshot_script_module()
+
+    label_to_indices = {
+        0: [0, 1, 2],
+        1: [3, 4, 5],
+        2: [6, 7, 8],
+    }
+    support_info = script_module.sample_support_info(
+        label_to_indices=label_to_indices,
+        shot=2,
+        seed=123,
+        way=2,
+    )
+
+    assert support_info["way"] == 2
+    assert len(support_info["selected_class_ids"]) == 2
+    assert len(support_info["selected_indices"]) == 4
+    assert set(support_info["selected_by_class"].keys()) == {
+        str(class_id) for class_id in support_info["selected_class_ids"]
+    }
+
+    args = script_module.parse_args(["--protocol", "fewshot", "--epochs", "7", "--way", "2"])
+    args = script_module.enforce_strict_fewshot_protocol(args)
+
+    assert args.epochs == script_module.STRICT_FEWSHOT_EPOCHS == 100

@@ -12,6 +12,7 @@ raw_data
 
 **/data/*
 !**/data/.gitkeep
+dataset/
 
 *.ts
 *.zip

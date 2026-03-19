@@ -59,6 +59,7 @@ from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassi
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
 
 ShotType = Union[int, Literal["full"]]
+STRICT_FEWSHOT_EPOCHS = 50
 
 
 def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]]:
@@ -84,6 +85,12 @@ def parse_args(argv=None):
     # Core protocol behavior
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot", "full"])
     parser.add_argument("--shots", type=str, default="1,2,5,10,full")
+    parser.add_argument(
+        "--way",
+        type=int,
+        default=None,
+        help="Number of classes to sample per run for strict N-way few-shot. Defaults to all classes.",
+    )
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
     parser.add_argument(
@@ -96,7 +103,7 @@ def parse_args(argv=None):
     parser.add_argument("--fewshot_batch_mode", type=str, default="manual", choices=["full", "manual"])
 
     # Phase setup
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=STRICT_FEWSHOT_EPOCHS)
     parser.add_argument("--phase1_epochs", type=int, default=5)
 
     # Must-specify switches / compatibility flags
@@ -412,6 +419,7 @@ def sample_support_info(
     label_to_indices: Dict[int, List[int]],
     shot: ShotType,
     seed: int,
+    way: Optional[int] = None,
 ) -> Dict[str, Any]:
     rng = random.Random(seed)
 
@@ -421,7 +429,13 @@ def sample_support_info(
     k_eff_per_class: Dict[str, int] = {}
     classes_with_shortage: List[int] = []
 
-    for class_id in sorted(label_to_indices.keys()):
+    all_class_ids = sorted(label_to_indices.keys())
+    if way is None or way >= len(all_class_ids):
+        selected_class_ids = all_class_ids
+    else:
+        selected_class_ids = sorted(rng.sample(all_class_ids, way))
+
+    for class_id in selected_class_ids:
         class_indices = list(label_to_indices[class_id])
         class_train_counts[str(class_id)] = len(class_indices)
 
@@ -447,6 +461,8 @@ def sample_support_info(
     any_shortage = len(classes_with_shortage) > 0
 
     return {
+        "selected_class_ids": selected_class_ids,
+        "way": len(selected_class_ids),
         "selected_indices": selected_indices,
         "selected_by_class": selected_by_class,
         "class_train_counts": class_train_counts,
@@ -455,6 +471,16 @@ def sample_support_info(
         "any_shortage": any_shortage,
         "support_size": support_size,
     }
+
+
+def filter_indices_by_class_ids(
+    label_to_indices: Dict[int, List[int]],
+    class_ids: List[int],
+) -> List[int]:
+    selected_indices: List[int] = []
+    for class_id in class_ids:
+        selected_indices.extend(label_to_indices.get(class_id, []))
+    return sorted(selected_indices)
 
 
 def broadcast_object_from_rank0(obj, world_size: int, rank: int):
@@ -515,6 +541,8 @@ def validate_args(args):
         raise ValueError("--epochs must be >= 1")
     if args.num_runs < 1:
         raise ValueError("--num_runs must be >= 1")
+    if args.way is not None and args.way < 1:
+        raise ValueError("--way must be >= 1 when provided")
     if args.aug_scaling_min > args.aug_scaling_max:
         raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
 
@@ -664,6 +692,14 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         init_kwargs["newts_dual_branch_config"] = merged_config
 
     return init_kwargs
+
+
+def enforce_strict_fewshot_protocol(args):
+    if args.protocol != "fewshot":
+        return args
+
+    args.epochs = STRICT_FEWSHOT_EPOCHS
+    return args
 
 
 def build_model(args, device: str, rank: int):
@@ -1235,6 +1271,7 @@ def run_single_experiment(
     train_dataset: Dataset,
     test_dataset: Dataset,
     label_to_indices: Dict[int, List[int]],
+    test_label_to_indices: Dict[int, List[int]],
     num_classes: int,
     expected_class_tokens: List[str],
     local_rank: int,
@@ -1255,11 +1292,21 @@ def run_single_experiment(
 
     support_info_rank0 = None
     if rank == 0:
-        support_info_rank0 = sample_support_info(label_to_indices, shot, run_seed)
+        support_info_rank0 = sample_support_info(
+            label_to_indices,
+            shot,
+            run_seed,
+            way=args.way,
+        )
     support_info = broadcast_object_from_rank0(support_info_rank0, world_size, rank)
 
     support_indices = support_info["selected_indices"]
     support_dataset = Subset(train_dataset, support_indices)
+    query_indices = filter_indices_by_class_ids(
+        test_label_to_indices,
+        support_info["selected_class_ids"],
+    )
+    query_dataset = Subset(test_dataset, query_indices)
 
     train_batch_size, grad_acc_steps = compute_fewshot_train_hparams(
         args=args,
@@ -1270,9 +1317,11 @@ def run_single_experiment(
     if rank == 0:
         print("-" * 80)
         print(
-            f"[shot={shot_name} run={run_id}] seed={run_seed}, support={len(support_indices)}, "
-            f"batch={train_batch_size}, grad_acc={grad_acc_steps}"
+            f"[shot={shot_name} run={run_id}] seed={run_seed}, "
+            f"way={support_info['way']}, support={len(support_indices)}, "
+            f"query={len(query_indices)}, batch={train_batch_size}, grad_acc={grad_acc_steps}"
         )
+        print(f"   selected classes: {support_info['selected_class_ids']}")
         if support_info["any_shortage"]:
             print(f"   classes with n<K use-all behavior: {support_info['classes_with_shortage']}")
 
@@ -1297,7 +1346,7 @@ def run_single_experiment(
     test_loader = None
     if rank == 0:
         test_loader = DataLoader(
-            test_dataset,
+            query_dataset,
             batch_size=args.eval_batch_size,
             shuffle=False,
             collate_fn=make_collate_fn(args, is_train=False),
@@ -1310,6 +1359,7 @@ def run_single_experiment(
         num_classes=num_classes,
         rank=rank,
     )
+    selected_class_token_ids = [class_token_ids[class_id] for class_id in support_info["selected_class_ids"]]
 
     if expected_class_tokens and class_tokens != expected_class_tokens:
         raise RuntimeError(
@@ -1373,7 +1423,7 @@ def run_single_experiment(
             model=model,
             data_loader=test_loader,
             max_new_tokens=args.max_new_tokens,
-            class_token_ids=class_token_ids,
+            class_token_ids=selected_class_token_ids,
             desc="Testing",
             rank=rank,
         )
@@ -1381,11 +1431,14 @@ def run_single_experiment(
         run_metrics = {
             "dataset": args.dataset,
             "protocol": args.protocol,
+            "way": support_info["way"],
+            "selected_class_ids": support_info["selected_class_ids"],
             "shot": shot_name,
             "run_id": run_id,
             "shot_index": shot_idx,
             "seed": run_seed,
             "support_size": len(support_indices),
+            "query_size": len(query_indices),
             "k_eff_per_class": support_info["k_eff_per_class"],
             "class_train_counts": support_info["class_train_counts"],
             "classes_with_shortage": support_info["classes_with_shortage"],
@@ -1408,9 +1461,11 @@ def run_single_experiment(
             json.dump(
                 {
                     "dataset": args.dataset,
+                    "way": support_info["way"],
                     "shot": shot_name,
                     "run_id": run_id,
                     "seed": run_seed,
+                    "selected_class_ids": support_info["selected_class_ids"],
                     "selected_indices": support_info["selected_indices"],
                     "selected_by_class": support_info["selected_by_class"],
                     "k_eff_per_class": support_info["k_eff_per_class"],
@@ -1454,6 +1509,7 @@ def main():
 
     try:
         validate_args(args)
+        args = enforce_strict_fewshot_protocol(args)
 
         if args.protocol == "fewshot":
             shots: List[ShotType] = parse_shots(args.shots)
@@ -1494,6 +1550,10 @@ def main():
         num_classes = UCRClassificationDataset.get_num_classes()
         class_tokens = UCRClassificationDataset.get_class_tokens()
         label_to_indices = build_label_to_indices(train_dataset)
+        test_label_to_indices = build_label_to_indices(test_dataset)
+
+        if args.way is not None and args.way > num_classes:
+            raise ValueError(f"--way ({args.way}) cannot exceed num_classes ({num_classes})")
 
         if args.encoder_type == "newts_dual_branch" and args.context_length is None:
             args.context_length = infer_context_length_from_dataset(train_dataset, args.patch_length)
@@ -1509,6 +1569,7 @@ def main():
             print(f"time: {datetime.datetime.now()}")
             print(f"dataset: {args.dataset}")
             print(f"protocol: {args.protocol}")
+            print(f"way: {args.way if args.way is not None else 'all'}")
             print(f"shots: {[shot_to_name(s) for s in shots]}")
             print(f"num_runs: {num_runs}")
             print(f"pretrained_model: {args.pretrained_model}")
@@ -1516,6 +1577,7 @@ def main():
             print(f"encoder_type: {args.encoder_type}")
             print(f"llm_id: {args.llm_id}")
             print(f"use_lora: {args.use_lora}")
+            print(f"strict few-shot epochs: {args.epochs if args.protocol == 'fewshot' else 'n/a'}")
             print(f"pad_mode: {args.pad_mode}")
             print(f"augmentation: {args.enable_augmentation}")
             print(f"ddp world_size: {world_size}")
@@ -1553,6 +1615,7 @@ def main():
                     train_dataset=train_dataset,
                     test_dataset=test_dataset,
                     label_to_indices=label_to_indices,
+                    test_label_to_indices=test_label_to_indices,
                     num_classes=num_classes,
                     expected_class_tokens=class_tokens,
                     local_rank=local_rank,
@@ -1584,6 +1647,7 @@ def main():
             overall_summary = {
                 "dataset": args.dataset,
                 "protocol": args.protocol,
+                "way": args.way if args.way is not None else num_classes,
                 "num_classes": num_classes,
                 "shots": [shot_to_name(s) for s in shots],
                 "num_runs": num_runs,
