@@ -16,19 +16,35 @@ from torch.nn.utils.rnn import pad_sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_classification_pretrained.py"
+FEWSHOT_SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_classification_pretrained_fewshot.py"
+FULL_SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_classification_pretrained_full.py"
 
 from opentslm.model.encoder.NewTSDualBranchEncoder import NewTSDualBranchEncoder
 from opentslm.model.encoder.NewTSVisionEncoder import NewTSVisionEncoder
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
+from opentslm.model_config import PATCH_SIZE
 
 
-def load_train_ucr_script_module():
-    spec = spec_from_file_location("train_ucr_classification_pretrained", SCRIPT_PATH)
+def load_script_module(script_path: Path, module_name: str):
+    spec = spec_from_file_location(module_name, script_path)
     module = module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_train_ucr_fewshot_script_module():
+    return load_script_module(
+        FEWSHOT_SCRIPT_PATH,
+        "train_ucr_classification_pretrained_fewshot",
+    )
+
+
+def load_train_ucr_full_script_module():
+    return load_script_module(
+        FULL_SCRIPT_PATH,
+        "train_ucr_classification_pretrained_full",
+    )
 
 
 class DummyProcessor:
@@ -255,10 +271,15 @@ def test_newts_vision_encoder_rejects_invalid_depth():
         )
 
 
-def test_opentslmsp_newts_checkpoint_metadata_roundtrip(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "script_loader",
+    [load_train_ucr_fewshot_script_module, load_train_ucr_full_script_module],
+    ids=["fewshot", "full"],
+)
+def test_opentslmsp_newts_checkpoint_metadata_roundtrip(script_loader, monkeypatch, tmp_path):
     install_dummy_vision_loader(monkeypatch)
     install_dummy_llm(monkeypatch)
-    script_module = load_train_ucr_script_module()
+    script_module = script_loader()
 
     model = OpenTSLMSP(
         llm_id="dummy-llm",
@@ -309,8 +330,13 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(monkeypatch, tmp_path):
     assert init_kwargs["newts_dual_branch_config"]["aggregator_num_queries"] == 3
 
 
-def test_train_ucr_newts_defaults_and_validation():
-    script_module = load_train_ucr_script_module()
+@pytest.mark.parametrize(
+    "script_loader",
+    [load_train_ucr_fewshot_script_module, load_train_ucr_full_script_module],
+    ids=["fewshot", "full"],
+)
+def test_train_ucr_newts_defaults_and_validation(script_loader):
+    script_module = script_loader()
 
     args = script_module.parse_args(["--encoder_type", "newts_dual_branch"])
     script_module.validate_args(args)
@@ -336,8 +362,8 @@ def test_train_ucr_newts_defaults_and_validation():
         script_module.validate_args(invalid_args)
 
 
-def test_train_ucr_strict_fewshot_way_sampling_and_epoch_enforcement():
-    script_module = load_train_ucr_script_module()
+def test_train_ucr_fewshot_way_sampling_and_epochs_are_user_controlled():
+    script_module = load_train_ucr_fewshot_script_module()
 
     label_to_indices = {
         0: [0, 1, 2],
@@ -360,13 +386,20 @@ def test_train_ucr_strict_fewshot_way_sampling_and_epoch_enforcement():
 
     args = script_module.parse_args(["--protocol", "fewshot", "--epochs", "7", "--way", "2"])
     script_module.validate_args(args)
-    args = script_module.enforce_strict_fewshot_protocol(args)
+    assert args.epochs == 7
 
-    assert args.epochs == script_module.STRICT_FEWSHOT_EPOCHS == 100
+    full_args = script_module.parse_args(["--protocol", "full", "--epochs", "9"])
+    script_module.validate_args(full_args)
+    assert full_args.epochs == 9
 
 
-def test_train_ucr_newts_pma_config_and_validation():
-    script_module = load_train_ucr_script_module()
+@pytest.mark.parametrize(
+    "script_loader",
+    [load_train_ucr_fewshot_script_module, load_train_ucr_full_script_module],
+    ids=["fewshot", "full"],
+)
+def test_train_ucr_newts_pma_config_and_validation(script_loader):
+    script_module = script_loader()
 
     args = script_module.parse_args(
         [
@@ -418,6 +451,18 @@ def test_train_ucr_newts_pma_config_and_validation():
     )
     with pytest.raises(ValueError, match="must evenly divide"):
         script_module.validate_args(invalid_args)
+
+
+def test_train_ucr_full_resolve_collate_patch_size():
+    script_module = load_train_ucr_full_script_module()
+
+    transformer_args = script_module.parse_args(["--encoder_type", "transformer_cnn"])
+    tslanet_args = script_module.parse_args(["--encoder_type", "tslanet", "--tslanet_patch_size", "16"])
+    newts_args = script_module.parse_args(["--encoder_type", "newts_dual_branch"])
+
+    assert script_module.resolve_collate_patch_size(transformer_args) == PATCH_SIZE
+    assert script_module.resolve_collate_patch_size(tslanet_args) == 16
+    assert script_module.resolve_collate_patch_size(newts_args) == 1
 
 
 def test_opentslmsp_pad_and_apply_batch_with_pma_tokens(monkeypatch):

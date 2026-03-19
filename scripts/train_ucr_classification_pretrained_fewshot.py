@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-M2: UCR single-dataset classification with pretrained SP models under a strict few-shot protocol.
+M2: UCR single-dataset classification with pretrained SP models under a few-shot protocol.
 
 This script aligns its protocol and training flow with Experiment A:
 - strict support-set sampling per shot/run
@@ -59,7 +59,7 @@ from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassi
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
 
 ShotType = Union[int, Literal["full"]]
-STRICT_FEWSHOT_EPOCHS = 50
+DEFAULT_EPOCHS = 50
 
 
 def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]]:
@@ -79,7 +79,7 @@ def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="M2: strict few-shot UCR classification with pretrained SP models"
+        description="M2: few-shot UCR classification with pretrained SP models"
     )
 
     # Core protocol behavior
@@ -103,7 +103,7 @@ def parse_args(argv=None):
     parser.add_argument("--fewshot_batch_mode", type=str, default="manual", choices=["full", "manual"])
 
     # Phase setup
-    parser.add_argument("--epochs", type=int, default=STRICT_FEWSHOT_EPOCHS)
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--phase1_epochs", type=int, default=5)
 
     # Must-specify switches / compatibility flags
@@ -184,7 +184,7 @@ def parse_args(argv=None):
     parser.add_argument("--projector_type", type=str, default="mlp", choices=["mlp", "linear"]) #分支内投影
     parser.add_argument("--projector_dropout", type=float, default=0.1) #分支内投影的dropout
     parser.add_argument("--use_pma", action="store_true", help="Enable PMA slot aggregation for newts_dual_branch")
-    parser.add_argument("--aggregator_layers", type=int, default=2)
+    parser.add_argument("--aggregator_layers", type=int, default=1)
     parser.add_argument("--aggregator_hidden_size", type=int, default=None)
     parser.add_argument("--aggregator_num_heads", type=int, default=8)
     parser.add_argument("--aggregator_ffn_dim", type=int, default=None)
@@ -692,16 +692,6 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         init_kwargs["newts_dual_branch_config"] = merged_config
 
     return init_kwargs
-
-
-def enforce_strict_fewshot_protocol(args):
-    if args.protocol != "fewshot":
-        return args
-
-    args.epochs = STRICT_FEWSHOT_EPOCHS
-    return args
-
-
 def build_model(args, device: str, rank: int):
     use_lora = args.use_lora
 
@@ -1509,7 +1499,6 @@ def main():
 
     try:
         validate_args(args)
-        args = enforce_strict_fewshot_protocol(args)
 
         if args.protocol == "fewshot":
             shots: List[ShotType] = parse_shots(args.shots)
@@ -1564,7 +1553,7 @@ def main():
                 json.dump(vars(args), f, indent=2)
 
             print("=" * 80)
-            print("M2: Strict Few-shot UCR Classification with Pretrained SP Models")
+            print("M2: Few-shot UCR Classification with Pretrained SP Models")
             print("=" * 80)
             print(f"time: {datetime.datetime.now()}")
             print(f"dataset: {args.dataset}")
@@ -1577,7 +1566,7 @@ def main():
             print(f"encoder_type: {args.encoder_type}")
             print(f"llm_id: {args.llm_id}")
             print(f"use_lora: {args.use_lora}")
-            print(f"strict few-shot epochs: {args.epochs if args.protocol == 'fewshot' else 'n/a'}")
+            print(f"epochs: {args.epochs}")
             print(f"pad_mode: {args.pad_mode}")
             print(f"augmentation: {args.enable_augmentation}")
             print(f"ddp world_size: {world_size}")
