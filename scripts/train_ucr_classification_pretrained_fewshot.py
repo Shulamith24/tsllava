@@ -77,7 +77,14 @@ def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]
     return items or None
 
 
+def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
+    if argv is None:
+        argv = sys.argv[1:]
+    return any(token == flag_name or token.startswith(f"{flag_name}=") for token in argv)
+
+
 def parse_args(argv=None):
+    provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
         description="M2: few-shot UCR classification with pretrained SP models"
     )
@@ -250,23 +257,17 @@ def parse_args(argv=None):
 
     # System and logging
     parser.add_argument("--save_dir", type=str, default="results/m2_ucr_pretrained_fewshot")
+    parser.add_argument("--resume", action="store_true", help="从已有 run_dir checkpoint 断点续训")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
+    args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
     return args
 
 
-def hydrate_args_from_local_checkpoint_metadata(args):
-    args.local_checkpoint_model_config = None
-    if not args.local_checkpoint:
-        return args
-
-    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
-    model_config = checkpoint.get("model_config") or {}
-    args.local_checkpoint_model_config = model_config
-
+def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
     llm_id = model_config.get("llm_id")
     if llm_id:
         args.llm_id = llm_id
@@ -315,6 +316,47 @@ def hydrate_args_from_local_checkpoint_metadata(args):
             if key in encoder_config:
                 setattr(args, key, encoder_config[key])
 
+    return args
+
+
+def hydrate_args_from_checkpoint(args, checkpoint: Dict[str, Any], fallback_llm_id: str):
+    resolved = OpenTSLM._resolve_sp_init_kwargs_from_checkpoint(checkpoint, fallback_llm_id=fallback_llm_id)
+    encoder_config = resolved["tslanet_config"] or resolved["newts_dual_branch_config"] or {}
+    model_config = {
+        "llm_id": resolved["llm_id"],
+        "encoder_type": resolved["encoder_type"],
+        "encoder_config": encoder_config,
+    }
+    return hydrate_args_from_model_config(args, model_config), model_config
+
+
+def hydrate_args_from_local_checkpoint_metadata(args):
+    args.local_checkpoint_model_config = None
+    if not args.local_checkpoint:
+        return args
+
+    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
+    args, model_config = hydrate_args_from_checkpoint(args, checkpoint, fallback_llm_id=args.llm_id)
+    args.local_checkpoint_model_config = model_config
+    return args
+
+
+def hydrate_args_from_pretrained_model_metadata(args):
+    args.pretrained_model_checkpoint = None
+    args.pretrained_model_model_config = None
+    if not args.pretrained_model:
+        return args
+
+    checkpoint_path = OpenTSLM._download_model_files(args.pretrained_model)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    args, model_config = hydrate_args_from_checkpoint(
+        args,
+        checkpoint,
+        fallback_llm_id=OpenTSLM._get_base_llm_id(args.pretrained_model),
+    )
+
+    args.pretrained_model_checkpoint = checkpoint_path
+    args.pretrained_model_model_config = model_config
     return args
 
 
@@ -521,6 +563,9 @@ def compute_fewshot_train_hparams(
 
 
 def resolve_base_llm_id(args) -> str:
+    pretrained_model_config = getattr(args, "pretrained_model_model_config", None) or {}
+    if args.pretrained_model and pretrained_model_config.get("llm_id"):
+        return pretrained_model_config["llm_id"]
     if args.pretrained_model:
         return OpenTSLM._get_base_llm_id(args.pretrained_model)
     return args.llm_id
@@ -546,11 +591,16 @@ def validate_args(args):
     if args.aug_scaling_min > args.aug_scaling_max:
         raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
 
-    if args.encoder_type != "newts_dual_branch":
+    if args.pretrained_model and getattr(args, "encoder_type_explicit", False):
+        raise ValueError("--pretrained_model and --encoder_type cannot be specified together")
+
+    encoder_type = getattr(args, "encoder_type", None)
+    if encoder_type is None:
+        raise ValueError("--encoder_type could not be resolved from CLI args or checkpoint metadata")
+
+    if encoder_type != "newts_dual_branch":
         return
 
-    if args.pretrained_model:
-        raise ValueError("--pretrained_model is not supported with --encoder_type=newts_dual_branch")
     if args.patch_length <= 0:
         raise ValueError("--patch_length must be positive")
     if args.stride <= 0:
@@ -728,6 +778,7 @@ def build_model(args, device: str, rank: int):
             repo_id=args.pretrained_model,
             device=device,
             enable_lora=use_lora,
+            checkpoint_path=getattr(args, "pretrained_model_checkpoint", None),
         )
 
         if use_lora and (args.lora_r != 16 or args.lora_alpha != 32):
@@ -1067,6 +1118,7 @@ def save_checkpoint(
     save_path: str,
     args,
     phase: str,
+    extra_state: Optional[Dict[str, Any]] = None,
     rank: int = 0,
 ):
     if rank != 0:
@@ -1087,6 +1139,8 @@ def save_checkpoint(
         "lm_head_weight": underlying_model.llm.lm_head.weight.detach().cpu(),
         "tokenizer_vocab_size": len(underlying_model.tokenizer),
     }
+    if extra_state:
+        checkpoint.update(extra_state)
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -1122,6 +1176,35 @@ def load_checkpoint(
     return checkpoint
 
 
+def resolve_phase_resume_state(
+    checkpoint: Dict[str, Any],
+    *,
+    phase_name: str,
+    phase_epochs: int,
+) -> Dict[str, Any]:
+    checkpoint_phase = checkpoint.get("phase")
+    if checkpoint_phase is not None and checkpoint_phase != phase_name:
+        raise ValueError(
+            f"Checkpoint phase mismatch: expected {phase_name}, got {checkpoint_phase}"
+        )
+
+    saved_phase_epochs = checkpoint.get("phase_epochs")
+    if saved_phase_epochs is not None and int(saved_phase_epochs) != int(phase_epochs):
+        raise ValueError(
+            f"Checkpoint phase_epochs mismatch: expected {phase_epochs}, got {saved_phase_epochs}"
+        )
+
+    completed_epoch = int(checkpoint.get("epoch", 0) or 0)
+    loss_history = list(checkpoint.get("loss_history", []))
+    return {
+        "completed_epoch": completed_epoch,
+        "start_epoch": completed_epoch + 1,
+        "loss_history": loss_history,
+        "last_loss": checkpoint.get("train_loss"),
+        "is_complete": completed_epoch >= phase_epochs,
+    }
+
+
 def train_phase(
     model,
     train_loader: DataLoader,
@@ -1133,7 +1216,9 @@ def train_phase(
     grad_acc_steps: int,
     epoch_offset: int,
     rank: int,
+    device: str,
     ckpt_path: Optional[str] = None,
+    resume: bool = False,
 ) -> Dict[str, Any]:
     if phase_epochs <= 0:
         return {"losses": [], "last_loss": None, "total_steps": 0, "warmup_steps": 0}
@@ -1157,7 +1242,36 @@ def train_phase(
         )
 
     losses: List[float] = []
-    for local_epoch in range(1, phase_epochs + 1):
+    start_local_epoch = 1
+
+    if resume and ckpt_path and os.path.exists(ckpt_path):
+        checkpoint = load_checkpoint(
+            model=model,
+            checkpoint_path=ckpt_path,
+            device=device,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        resume_state = resolve_phase_resume_state(
+            checkpoint,
+            phase_name=phase_name,
+            phase_epochs=phase_epochs,
+        )
+        start_local_epoch = resume_state["start_epoch"]
+        losses = resume_state["loss_history"]
+        if rank == 0:
+            print(
+                f"   {phase_name}: 断点续训，已完成 {resume_state['completed_epoch']} / {phase_epochs} 个 epoch"
+            )
+        if resume_state["is_complete"]:
+            return {
+                "losses": losses,
+                "last_loss": resume_state["last_loss"],
+                "total_steps": total_steps,
+                "warmup_steps": warmup_steps,
+            }
+
+    for local_epoch in range(start_local_epoch, phase_epochs + 1):
         global_epoch = epoch_offset + local_epoch
         if train_sampler is not None:
             train_sampler.set_epoch(global_epoch)
@@ -1179,19 +1293,29 @@ def train_phase(
         if rank == 0:
             print(f"   {phase_name} epoch {local_epoch}/{phase_epochs}: train_loss={train_loss:.6f}")
 
+        if ckpt_path is not None:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=local_epoch,
+                train_loss=train_loss,
+                save_path=ckpt_path,
+                args=args,
+                phase=phase_name,
+                extra_state={
+                    "phase_epochs": phase_epochs,
+                    "include_lora": include_lora,
+                    "gradient_accumulation_steps": grad_acc_steps,
+                    "epoch_offset": epoch_offset,
+                    "loss_history": losses,
+                    "total_steps": total_steps,
+                    "warmup_steps": warmup_steps,
+                },
+                rank=rank,
+            )
+
     last_loss = losses[-1] if losses else None
-    if ckpt_path is not None:
-        save_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=phase_epochs,
-            train_loss=last_loss,
-            save_path=ckpt_path,
-            args=args,
-            phase=phase_name,
-            rank=rank,
-        )
 
     return {
         "losses": losses,
@@ -1271,6 +1395,10 @@ def run_single_experiment(
 ) -> Optional[Dict[str, Any]]:
     shot_name = shot_to_name(shot)
     run_dir = os.path.join(base_save_dir, f"shot_{shot_name}", f"run_{run_id:02d}")
+    run_metrics_path = os.path.join(run_dir, "run_metrics.json")
+    support_info_path = os.path.join(run_dir, "fewshot_indices.json")
+    phase1_ckpt_path = os.path.join(run_dir, "phase1_last.pt")
+    phase2_ckpt_path = os.path.join(run_dir, "phase2_last.pt")
 
     if rank == 0:
         os.makedirs(run_dir, exist_ok=True)
@@ -1278,17 +1406,68 @@ def run_single_experiment(
     if world_size > 1:
         dist.barrier()
 
+    completed_run_exists_rank0 = (
+        args.resume and rank == 0 and os.path.exists(run_metrics_path) and os.path.exists(phase2_ckpt_path)
+    )
+    completed_run_exists = broadcast_object_from_rank0(
+        completed_run_exists_rank0 if rank == 0 else None,
+        world_size,
+        rank,
+    )
+    if completed_run_exists:
+        cached_metrics = None
+        if rank == 0:
+            print(f"[shot={shot_name} run={run_id}] 检测到已完成结果，直接复用: {run_metrics_path}")
+            with open(run_metrics_path, "r") as f:
+                cached_metrics = json.load(f)
+        if world_size > 1:
+            dist.barrier()
+        return cached_metrics
+
     set_seed(run_seed)
 
     support_info_rank0 = None
     if rank == 0:
-        support_info_rank0 = sample_support_info(
-            label_to_indices,
-            shot,
-            run_seed,
-            way=args.way,
-        )
+        if args.resume and os.path.exists(support_info_path):
+            with open(support_info_path, "r") as f:
+                support_info_rank0 = json.load(f)
+        else:
+            support_info_rank0 = sample_support_info(
+                label_to_indices,
+                shot,
+                run_seed,
+                way=args.way,
+            )
+            with open(support_info_path, "w") as f:
+                json.dump(
+                    {
+                        "dataset": args.dataset,
+                        "way": support_info_rank0["way"],
+                        "shot": shot_name,
+                        "run_id": run_id,
+                        "seed": run_seed,
+                        "selected_class_ids": support_info_rank0["selected_class_ids"],
+                        "selected_indices": support_info_rank0["selected_indices"],
+                        "selected_by_class": support_info_rank0["selected_by_class"],
+                        "k_eff_per_class": support_info_rank0["k_eff_per_class"],
+                        "class_train_counts": support_info_rank0["class_train_counts"],
+                        "classes_with_shortage": support_info_rank0["classes_with_shortage"],
+                        "any_shortage": support_info_rank0["any_shortage"],
+                        "support_size": support_info_rank0["support_size"],
+                    },
+                    f,
+                    indent=2,
+                )
     support_info = broadcast_object_from_rank0(support_info_rank0, world_size, rank)
+    support_info.setdefault("selected_class_ids", [])
+    support_info.setdefault("selected_indices", [])
+    support_info.setdefault("selected_by_class", {})
+    support_info.setdefault("k_eff_per_class", {})
+    support_info.setdefault("class_train_counts", {})
+    support_info.setdefault("classes_with_shortage", [])
+    support_info.setdefault("any_shortage", bool(support_info["classes_with_shortage"]))
+    support_info.setdefault("support_size", len(support_info["selected_indices"]))
+    support_info.setdefault("way", len(support_info["selected_class_ids"]))
 
     support_indices = support_info["selected_indices"]
     support_dataset = Subset(train_dataset, support_indices)
@@ -1373,8 +1552,6 @@ def run_single_experiment(
         if args.model_select_metric != "last":
             print("   note: model_select_metric is forced by design to phase2 last checkpoint.")
 
-    phase2_ckpt_path = os.path.join(run_dir, "phase2_last.pt")
-
     phase1_stats = train_phase(
         model=model,
         train_loader=train_loader,
@@ -1386,7 +1563,9 @@ def run_single_experiment(
         grad_acc_steps=grad_acc_steps,
         epoch_offset=0,
         rank=rank,
-        ckpt_path=None,
+        device=device,
+        ckpt_path=phase1_ckpt_path,
+        resume=args.resume,
     )
 
     phase2_stats = train_phase(
@@ -1400,7 +1579,9 @@ def run_single_experiment(
         grad_acc_steps=grad_acc_steps,
         epoch_offset=phase1_epochs,
         rank=rank,
+        device=device,
         ckpt_path=phase2_ckpt_path,
+        resume=args.resume,
     )
 
     if world_size > 1:
@@ -1444,27 +1625,8 @@ def run_single_experiment(
             "model_checkpoint": "phase2_last.pt",
         }
 
-        with open(os.path.join(run_dir, "run_metrics.json"), "w") as f:
+        with open(run_metrics_path, "w") as f:
             json.dump(run_metrics, f, indent=2)
-
-        with open(os.path.join(run_dir, "fewshot_indices.json"), "w") as f:
-            json.dump(
-                {
-                    "dataset": args.dataset,
-                    "way": support_info["way"],
-                    "shot": shot_name,
-                    "run_id": run_id,
-                    "seed": run_seed,
-                    "selected_class_ids": support_info["selected_class_ids"],
-                    "selected_indices": support_info["selected_indices"],
-                    "selected_by_class": support_info["selected_by_class"],
-                    "k_eff_per_class": support_info["k_eff_per_class"],
-                    "class_train_counts": support_info["class_train_counts"],
-                    "classes_with_shortage": support_info["classes_with_shortage"],
-                },
-                f,
-                indent=2,
-            )
 
         with open(os.path.join(run_dir, "test_predictions.json"), "w") as f:
             json.dump(
@@ -1495,6 +1657,7 @@ def main():
     args = parse_args()
     args.use_lora = not args.no_lora
     args = hydrate_args_from_local_checkpoint_metadata(args)
+    args = hydrate_args_from_pretrained_model_metadata(args)
     local_rank, world_size, rank = setup_distributed()
 
     try:

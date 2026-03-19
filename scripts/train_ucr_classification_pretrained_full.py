@@ -78,7 +78,14 @@ def parse_int_list(value: Optional[Union[str, List[int]]]) -> Optional[List[int]
     return items or None
 
 
+def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
+    if argv is None:
+        argv = sys.argv[1:]
+    return any(token == flag_name or token.startswith(f"{flag_name}=") for token in argv)
+
+
 def parse_args(argv=None):
+    provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(description="M2: UCR单数据集分类训练（基于Stage2预训练模型）")
 
     parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
@@ -100,11 +107,11 @@ def parse_args(argv=None):
         help="本地checkpoint路径 (如 results/curriculum_pretrain/.../best_model.pt)",
     )
     parser.add_argument(
-        "--tslanet",
+        "--encoder_type",
         type=str,
         default="tslanet",
         choices=["transformer_cnn", "tslanet", "newts_dual_branch"],
-        help="编码器类型（使用local_checkpoint时必须指定）",
+        help="编码器类型（使用checkpoint时会被checkpoint元数据覆盖）",
     )
     parser.add_argument(
         "--llm_id",
@@ -197,6 +204,7 @@ def parse_args(argv=None):
     parser.add_argument("--warmup_ratio", type=float, default=0.03, help="预热比例")
 
     parser.add_argument("--save_dir", type=str, default="results/m2_ucr_pretrained", help="结果保存目录")
+    parser.add_argument("--resume", action="store_true", help="从 save_dir/dataset/last_checkpoint.pt 断点续训")
 
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
 
@@ -209,6 +217,7 @@ def parse_args(argv=None):
 
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
+    args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
     return args
 
 
@@ -254,15 +263,7 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def hydrate_args_from_local_checkpoint_metadata(args):
-    args.local_checkpoint_model_config = None
-    if not args.local_checkpoint:
-        return args
-
-    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
-    model_config = checkpoint.get("model_config") or {}
-    args.local_checkpoint_model_config = model_config
-
+def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
     llm_id = model_config.get("llm_id")
     if llm_id:
         args.llm_id = llm_id
@@ -314,6 +315,47 @@ def hydrate_args_from_local_checkpoint_metadata(args):
     return args
 
 
+def hydrate_args_from_checkpoint(args, checkpoint: Dict[str, Any], fallback_llm_id: str):
+    resolved = OpenTSLM._resolve_sp_init_kwargs_from_checkpoint(checkpoint, fallback_llm_id=fallback_llm_id)
+    encoder_config = resolved["tslanet_config"] or resolved["newts_dual_branch_config"] or {}
+    model_config = {
+        "llm_id": resolved["llm_id"],
+        "encoder_type": resolved["encoder_type"],
+        "encoder_config": encoder_config,
+    }
+    return hydrate_args_from_model_config(args, model_config), model_config
+
+
+def hydrate_args_from_local_checkpoint_metadata(args):
+    args.local_checkpoint_model_config = None
+    if not args.local_checkpoint:
+        return args
+
+    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
+    args, model_config = hydrate_args_from_checkpoint(args, checkpoint, fallback_llm_id=args.llm_id)
+    args.local_checkpoint_model_config = model_config
+    return args
+
+
+def hydrate_args_from_pretrained_model_metadata(args):
+    args.pretrained_model_checkpoint = None
+    args.pretrained_model_model_config = None
+    if not args.pretrained_model:
+        return args
+
+    checkpoint_path = OpenTSLM._download_model_files(args.pretrained_model)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    args, model_config = hydrate_args_from_checkpoint(
+        args,
+        checkpoint,
+        fallback_llm_id=OpenTSLM._get_base_llm_id(args.pretrained_model),
+    )
+
+    args.pretrained_model_checkpoint = checkpoint_path
+    args.pretrained_model_model_config = model_config
+    return args
+
+
 def resolve_collate_patch_size(args) -> int:
     if args.encoder_type == "tslanet":
         return args.tslanet_patch_size
@@ -323,6 +365,9 @@ def resolve_collate_patch_size(args) -> int:
 
 
 def resolve_base_llm_id(args) -> str:
+    pretrained_model_config = getattr(args, "pretrained_model_model_config", None) or {}
+    if args.pretrained_model and pretrained_model_config.get("llm_id"):
+        return pretrained_model_config["llm_id"]
     if args.pretrained_model:
         return OpenTSLM._get_base_llm_id(args.pretrained_model)
     return args.llm_id
@@ -342,11 +387,16 @@ def validate_args(args):
     if args.epochs < 1:
         raise ValueError("--epochs must be >= 1")
 
-    if args.encoder_type != "newts_dual_branch":
+    if args.pretrained_model and getattr(args, "encoder_type_explicit", False):
+        raise ValueError("--pretrained_model and --encoder_type cannot be specified together")
+
+    encoder_type = getattr(args, "encoder_type", None)
+    if encoder_type is None:
+        raise ValueError("--encoder_type could not be resolved from CLI args or checkpoint metadata")
+
+    if encoder_type != "newts_dual_branch":
         return
 
-    if args.pretrained_model:
-        raise ValueError("--pretrained_model is not supported with --encoder_type=newts_dual_branch")
     if args.patch_length <= 0:
         raise ValueError("--patch_length must be positive")
     if args.stride <= 0:
@@ -526,6 +576,7 @@ def build_model(args, device: str, rank: int):
             repo_id=args.pretrained_model,
             device=device,
             enable_lora=use_lora,
+            checkpoint_path=getattr(args, "pretrained_model_checkpoint", None),
         )
 
         if use_lora and (args.lora_r != 16 or args.lora_alpha != 32):
@@ -1001,10 +1052,11 @@ def save_checkpoint(
     optimizer,
     scheduler,
     epoch: int,
-    val_loss: float,
-    val_acc: float,
+    val_loss: Optional[float],
+    val_acc: Optional[float],
     save_path: str,
     args,
+    extra_state: Optional[Dict[str, Any]] = None,
     rank: int = 0,
 ):
     """保存checkpoint（仅rank=0执行）"""
@@ -1023,6 +1075,8 @@ def save_checkpoint(
         "val_acc": val_acc,
         "args": vars(args),
     }
+    if extra_state:
+        checkpoint.update(extra_state)
     
     # 保存LoRA权重
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
@@ -1066,10 +1120,21 @@ def load_checkpoint(
     return checkpoint
 
 
+def resolve_training_resume_state(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    last_epoch = int(checkpoint.get("epoch", 0) or 0)
+    return {
+        "start_epoch": last_epoch + 1,
+        "best_val_acc": float(checkpoint.get("best_val_acc", float("-inf"))),
+        "patience_counter": int(checkpoint.get("patience_counter", 0) or 0),
+        "loss_history": list(checkpoint.get("loss_history", [])),
+    }
+
+
 def main():
     args = parse_args()
     args.use_lora = not args.no_lora
     args = hydrate_args_from_local_checkpoint_metadata(args)
+    args = hydrate_args_from_pretrained_model_metadata(args)
 
     local_rank, world_size, rank = setup_distributed()
 
@@ -1192,12 +1257,38 @@ def main():
             print(f"   Warmup steps: {warmup_steps}")
             print("\n🚀 开始训练...")
 
+        best_checkpoint_path = os.path.join(save_dir, "best_model.pt")
+        last_checkpoint_path = os.path.join(save_dir, "last_checkpoint.pt")
         best_val_acc = float("-inf")
         patience_counter = 0
         loss_history = []
-        epoch = 0
+        start_epoch = 1
+        completed_epochs = 0
 
-        for epoch in range(1, args.epochs + 1):
+        if args.resume:
+            if os.path.exists(last_checkpoint_path):
+                resume_checkpoint = load_checkpoint(
+                    model,
+                    last_checkpoint_path,
+                    device=device,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                )
+                resume_state = resolve_training_resume_state(resume_checkpoint)
+                start_epoch = resume_state["start_epoch"]
+                best_val_acc = resume_state["best_val_acc"]
+                patience_counter = resume_state["patience_counter"]
+                loss_history = resume_state["loss_history"]
+                completed_epochs = start_epoch - 1
+                if rank == 0:
+                    print(
+                        f"📂 断点续训: 已完成 {completed_epochs} / {args.epochs} 个 epoch，"
+                        f"从 epoch {start_epoch} 继续"
+                    )
+            elif rank == 0:
+                print("⚠️ 未找到 last_checkpoint.pt，将从头开始训练")
+
+        for epoch in range(start_epoch, args.epochs + 1):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
 
@@ -1248,8 +1339,14 @@ def main():
                         save_checkpoint(
                             model, optimizer, scheduler, epoch,
                             val_loss, val_acc,
-                            os.path.join(save_dir, "best_model.pt"),
-                            args, rank
+                            best_checkpoint_path,
+                            args,
+                            extra_state={
+                                "best_val_acc": best_val_acc,
+                                "patience_counter": patience_counter,
+                                "loss_history": loss_history,
+                            },
+                            rank=rank,
                         )
                     else:
                         patience_counter += 1
@@ -1264,6 +1361,24 @@ def main():
                     with open(os.path.join(save_dir, "loss_history.json"), "w") as f:
                         json.dump(loss_history, f, indent=2)
 
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        epoch,
+                        val_loss,
+                        val_acc,
+                        last_checkpoint_path,
+                        args,
+                        extra_state={
+                            "best_val_acc": best_val_acc,
+                            "patience_counter": patience_counter,
+                            "loss_history": loss_history,
+                            "last_train_loss": train_loss,
+                        },
+                        rank=rank,
+                    )
+
                 if world_size > 1:
                     patience_tensor = torch.tensor([patience_counter], device=device)
                     best_val_acc_tensor = torch.tensor([best_val_acc], device=device)
@@ -1274,6 +1389,25 @@ def main():
             else:
                 if rank == 0:
                     print(f"Epoch {epoch}: Train Loss = {train_loss:.4f}")
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        epoch,
+                        None,
+                        None,
+                        last_checkpoint_path,
+                        args,
+                        extra_state={
+                            "best_val_acc": best_val_acc,
+                            "patience_counter": patience_counter,
+                            "loss_history": loss_history,
+                            "last_train_loss": train_loss,
+                        },
+                        rank=rank,
+                    )
+
+            completed_epochs = epoch
 
             if patience_counter >= args.early_stop:
                 if rank == 0:
@@ -1284,7 +1418,13 @@ def main():
             print("\n" + "=" * 60)
             print("📋 最终测试评估...")
 
-        load_checkpoint(model, os.path.join(save_dir, "best_model.pt"), device=device)
+        final_checkpoint_path = best_checkpoint_path
+        if not os.path.exists(final_checkpoint_path):
+            final_checkpoint_path = last_checkpoint_path
+            if rank == 0:
+                print("⚠️ 未找到 best_model.pt，回退到 last_checkpoint.pt 进行测试")
+
+        load_checkpoint(model, final_checkpoint_path, device=device)
 
         if world_size > 1:
             dist.barrier()
@@ -1307,7 +1447,7 @@ def main():
                 "best_val_acc": best_val_acc,
                 "test_loss": test_results["loss"],
                 "test_accuracy": test_results["accuracy"],
-                "epochs_trained": epoch,
+                "epochs_trained": completed_epochs,
             }
 
             with open(os.path.join(save_dir, "final_results.json"), "w") as f:

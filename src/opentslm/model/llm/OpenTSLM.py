@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 import torch
-from typing import Optional, TYPE_CHECKING, Union
+from typing import Any, Dict, Optional, TYPE_CHECKING, Union
 from enum import Enum
 from huggingface_hub import hf_hub_download
 
@@ -52,6 +52,7 @@ class OpenTSLM:
         device: Optional[str] = None,
         cache_dir: Optional[str] = None,
         enable_lora: Optional[bool] = False,
+        checkpoint_path: Optional[str] = None,
     ) -> Union[OpenTSLMSP, "OpenTSLMFlamingo"]:
         """
         Load a pretrained model from Hugging Face Hub.
@@ -61,6 +62,7 @@ class OpenTSLM:
             device: Device to load the model on (default: auto-detect)
             cache_dir: Directory to cache downloaded models (optional)
             enable_lora: Whether to enable LoRA (default: False)
+            checkpoint_path: Optional local path to a previously downloaded checkpoint file
 
         Returns:
             Union[OpenTSLMSP, OpenTSLMFlamingo]: The loaded model instance
@@ -72,20 +74,38 @@ class OpenTSLM:
         """
         device = cls._get_device(device)
         model_type = cls._detect_model_type(repo_id)
-        checkpoint_path = cls._download_model_files(repo_id, cache_dir)
+        checkpoint_path = checkpoint_path or cls._download_model_files(repo_id, cache_dir)
         base_llm_id = cls._get_base_llm_id(repo_id)
+        checkpoint = None
+        resolved_llm_id = base_llm_id
+        resolved_encoder_type = None
+        if model_type == ModelType.SP:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            sp_init_kwargs = cls._resolve_sp_init_kwargs_from_checkpoint(
+                checkpoint=checkpoint,
+                fallback_llm_id=base_llm_id,
+            )
+            resolved_llm_id = sp_init_kwargs["llm_id"]
+            resolved_encoder_type = sp_init_kwargs["encoder_type"]
 
         print(f"🚀 Loading {model_type.value.upper()} model...")
         print(f"   Repository: {repo_id}")
-        print(f"   Base LLM: {base_llm_id}")
+        print(f"   Base LLM: {resolved_llm_id}")
+        if resolved_encoder_type is not None:
+            print(f"   Encoder: {resolved_encoder_type}")
         print(f"   Device: {device}")
 
-        # Instantiate model with fixed training parameters
         if model_type == ModelType.SP:
-            # OpenTSLMSP uses default parameters from curriculum learning
-            model = OpenTSLMSP(llm_id=base_llm_id, device=device)
+            model = OpenTSLMSP(
+                llm_id=sp_init_kwargs["llm_id"],
+                device=device,
+                encoder_type=sp_init_kwargs["encoder_type"],
+                tslanet_config=sp_init_kwargs["tslanet_config"],
+                newts_dual_branch_config=sp_init_kwargs["newts_dual_branch_config"],
+            )
             if enable_lora:
-                model.enable_lora()
+                lora_r, lora_alpha = cls._resolve_lora_hparams_from_checkpoint(checkpoint)
+                model.enable_lora(lora_r=lora_r, lora_alpha=lora_alpha)
         elif model_type == ModelType.FLAMINGO:
             from .OpenTSLMFlamingo import OpenTSLMFlamingo
 
@@ -105,6 +125,83 @@ class OpenTSLM:
 
         print(f"✅ {model_type.value.upper()} model loaded successfully!")
         return model
+
+    @staticmethod
+    def _resolve_sp_init_kwargs_from_checkpoint(
+        checkpoint: Dict[str, Any],
+        fallback_llm_id: str,
+    ) -> Dict[str, Any]:
+        model_config = checkpoint.get("model_config") or {}
+        encoder_type = model_config.get("encoder_type") or OpenTSLM._infer_sp_encoder_type_from_checkpoint(checkpoint)
+        encoder_config = model_config.get("encoder_config") or {}
+
+        if not encoder_config and encoder_type == "tslanet":
+            encoder_config = OpenTSLM._infer_legacy_tslanet_config(checkpoint)
+
+        return {
+            "llm_id": model_config.get("llm_id") or fallback_llm_id,
+            "encoder_type": encoder_type,
+            "tslanet_config": dict(encoder_config) if encoder_type == "tslanet" else None,
+            "newts_dual_branch_config": (
+                dict(encoder_config) if encoder_type == "newts_dual_branch" else None
+            ),
+        }
+
+    @staticmethod
+    def _resolve_lora_hparams_from_checkpoint(checkpoint: Dict[str, Any]) -> tuple[int, int]:
+        lora_config = checkpoint.get("lora_config")
+        config_obj: Any = lora_config
+
+        if isinstance(lora_config, dict):
+            config_obj = lora_config.get("default")
+            if config_obj is None and lora_config:
+                config_obj = next(iter(lora_config.values()))
+
+        lora_r = getattr(config_obj, "r", None)
+        lora_alpha = getattr(config_obj, "lora_alpha", None)
+
+        if isinstance(config_obj, dict):
+            lora_r = config_obj.get("r", lora_r)
+            lora_alpha = config_obj.get("lora_alpha", lora_alpha)
+
+        return int(lora_r) if lora_r is not None else 16, int(lora_alpha) if lora_alpha is not None else 32
+
+    @staticmethod
+    def _infer_sp_encoder_type_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
+        encoder_state = checkpoint.get("encoder_state") or {}
+        if not encoder_state:
+            return "transformer_cnn"
+
+        keys = list(encoder_state.keys())
+        if any(key.startswith("ts_backbone.") or key.startswith("vision_encoder.") or key.startswith("aggregator.") for key in keys):
+            return "newts_dual_branch"
+        if any(key.startswith("tsla_blocks.") or key.startswith("patch_embed.proj.") for key in keys):
+            return "tslanet"
+        return "transformer_cnn"
+
+    @staticmethod
+    def _infer_legacy_tslanet_config(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+        encoder_state = checkpoint.get("encoder_state") or {}
+        patch_weight = encoder_state.get("patch_embed.proj.weight")
+        pos_embed = encoder_state.get("pos_embed")
+
+        depth = 0
+        for key in encoder_state:
+            if key.startswith("tsla_blocks."):
+                try:
+                    depth = max(depth, int(key.split(".")[1]) + 1)
+                except (IndexError, ValueError):
+                    continue
+
+        config: Dict[str, Any] = {}
+        if patch_weight is not None:
+            config["patch_size"] = int(patch_weight.shape[-1])
+            config["emb_dim"] = int(patch_weight.shape[0])
+        if depth > 0:
+            config["depth"] = depth
+        if pos_embed is not None and "emb_dim" not in config:
+            config["emb_dim"] = int(pos_embed.shape[-1])
+        return config
 
     @staticmethod
     def _get_device(device: Optional[str]) -> str:

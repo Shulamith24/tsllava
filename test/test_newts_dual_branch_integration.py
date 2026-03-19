@@ -358,8 +358,14 @@ def test_train_ucr_newts_defaults_and_validation(script_loader):
             "OpenTSLM/llama-3.2-1b-m4-sp",
         ]
     )
-    with pytest.raises(ValueError, match="--pretrained_model is not supported"):
+    with pytest.raises(ValueError, match="cannot be specified together"):
         script_module.validate_args(invalid_args)
+
+    pretrained_only_args = script_module.parse_args(
+        ["--pretrained_model", "OpenTSLM/llama-3.2-1b-m4-sp"]
+    )
+    script_module.validate_args(pretrained_only_args)
+    assert pretrained_only_args.encoder_type_explicit is False
 
 
 def test_train_ucr_fewshot_way_sampling_and_epochs_are_user_controlled():
@@ -391,6 +397,53 @@ def test_train_ucr_fewshot_way_sampling_and_epochs_are_user_controlled():
     full_args = script_module.parse_args(["--protocol", "full", "--epochs", "9"])
     script_module.validate_args(full_args)
     assert full_args.epochs == 9
+
+
+def test_train_ucr_full_resume_state_helper():
+    script_module = load_train_ucr_full_script_module()
+
+    resume_state = script_module.resolve_training_resume_state(
+        {
+            "epoch": 3,
+            "best_val_acc": 0.82,
+            "patience_counter": 2,
+            "loss_history": [{"epoch": 1}, {"epoch": 2}, {"epoch": 3}],
+        }
+    )
+
+    assert resume_state["start_epoch"] == 4
+    assert resume_state["best_val_acc"] == pytest.approx(0.82)
+    assert resume_state["patience_counter"] == 2
+    assert len(resume_state["loss_history"]) == 3
+
+
+def test_train_ucr_fewshot_phase_resume_state_helper():
+    script_module = load_train_ucr_fewshot_script_module()
+
+    resume_state = script_module.resolve_phase_resume_state(
+        {
+            "epoch": 2,
+            "phase": "phase2_joint",
+            "phase_epochs": 5,
+            "train_loss": 0.123,
+            "loss_history": [0.4, 0.3],
+        },
+        phase_name="phase2_joint",
+        phase_epochs=5,
+    )
+
+    assert resume_state["completed_epoch"] == 2
+    assert resume_state["start_epoch"] == 3
+    assert resume_state["last_loss"] == pytest.approx(0.123)
+    assert resume_state["loss_history"] == [0.4, 0.3]
+    assert resume_state["is_complete"] is False
+
+    completed_state = script_module.resolve_phase_resume_state(
+        {"epoch": 5, "phase": "phase2_joint", "phase_epochs": 5},
+        phase_name="phase2_joint",
+        phase_epochs=5,
+    )
+    assert completed_state["is_complete"] is True
 
 
 @pytest.mark.parametrize(
