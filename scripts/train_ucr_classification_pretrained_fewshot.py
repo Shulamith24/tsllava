@@ -264,6 +264,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
     args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
+    args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
+    args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
     return args
 
 
@@ -283,7 +285,6 @@ def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
     elif encoder_type == "newts_dual_branch":
         structural_keys = [
             "branch_mode",
-            "context_length",
             "patch_length",
             "stride",
             "d_model",
@@ -429,6 +430,21 @@ def resolve_collate_patch_size(args) -> int:
     return PATCH_SIZE
 
 
+def resolve_effective_pad_mode(args) -> str:
+    if args.encoder_type == "newts_dual_branch" and not getattr(args, "pad_mode_explicit", False):
+        return "last"
+    return args.pad_mode
+
+
+def warn_deprecated_newts_context_length(args, rank: int):
+    if rank != 0:
+        return
+    if args.encoder_type != "newts_dual_branch":
+        return
+    if getattr(args, "context_length_explicit", False):
+        print("⚠️ --context_length is deprecated for newts_dual_branch and is ignored in dynamic-length mode")
+
+
 def make_collate_fn(args, is_train: bool):
     def collate_fn(batch):
         return extend_time_series_to_match_patch_size_and_aggregate(
@@ -436,7 +452,7 @@ def make_collate_fn(args, is_train: bool):
             patch_size=resolve_collate_patch_size(args),
             normalize=True,
             normalize_eps=1e-5,
-            pad_mode=args.pad_mode,
+            pad_mode=resolve_effective_pad_mode(args),
             augment=is_train and args.enable_augmentation,
             jitter_std=args.aug_jitter_std,
             scaling_range=(args.aug_scaling_min, args.aug_scaling_max),
@@ -605,8 +621,6 @@ def validate_args(args):
         raise ValueError("--patch_length must be positive")
     if args.stride <= 0:
         raise ValueError("--stride must be positive")
-    if args.context_length is not None and args.context_length <= 0:
-        raise ValueError("--context_length must be positive when provided")
     if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
 
@@ -666,12 +680,10 @@ def build_tslanet_config(args) -> Dict[str, Any]:
 
 
 def build_newts_dual_branch_config(args) -> Dict[str, Any]:
-    if args.context_length is None:
-        raise ValueError("context_length must be resolved before building the newts_dual_branch config")
-
     return {
         "output_dim": ENCODER_OUTPUT_DIM,
-        "context_length": args.context_length,
+        "dynamic_length": True,
+        "ts_positional_encoding": "sinusoidal",
         "patch_length": args.patch_length,
         "stride": args.stride,
         "d_model": args.d_model,
@@ -736,6 +748,9 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         init_kwargs["tslanet_config"] = dict(encoder_config)
     elif encoder_type == "newts_dual_branch" and encoder_config:
         merged_config = dict(encoder_config)
+        merged_config.pop("context_length", None)
+        merged_config["dynamic_length"] = True
+        merged_config["ts_positional_encoding"] = "sinusoidal"
         merged_config["freeze_ts_backbone"] = args.freeze_ts_backbone
         merged_config["freeze_vision_backbone"] = args.freeze_vision_backbone
         merged_config["output_dim"] = ENCODER_OUTPUT_DIM
@@ -1680,6 +1695,7 @@ def main():
             device = "cpu"
 
         set_seed(args.seed)
+        warn_deprecated_newts_context_length(args, rank)
 
         save_root = os.path.join(args.save_dir, args.dataset)
 
@@ -1707,9 +1723,6 @@ def main():
         if args.way is not None and args.way > num_classes:
             raise ValueError(f"--way ({args.way}) cannot exceed num_classes ({num_classes})")
 
-        if args.encoder_type == "newts_dual_branch" and args.context_length is None:
-            args.context_length = infer_context_length_from_dataset(train_dataset, args.patch_length)
-
         if rank == 0:
             os.makedirs(save_root, exist_ok=True)
             with open(os.path.join(save_root, "config.json"), "w") as f:
@@ -1730,11 +1743,11 @@ def main():
             print(f"llm_id: {args.llm_id}")
             print(f"use_lora: {args.use_lora}")
             print(f"epochs: {args.epochs}")
-            print(f"pad_mode: {args.pad_mode}")
+            print(f"pad_mode: {resolve_effective_pad_mode(args)}")
             print(f"augmentation: {args.enable_augmentation}")
             print(f"ddp world_size: {world_size}")
             if args.encoder_type == "newts_dual_branch":
-                print(f"context_length: {args.context_length}")
+                print("dynamic_length: enabled")
                 print(
                     "vision: "
                     f"mode={args.vit_feature_mode}, "

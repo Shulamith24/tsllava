@@ -5,6 +5,7 @@
 
 from .TransformerCNNEncoder import TransformerCNNEncoder
 from .TSLANetEncoder import TSLANetEncoder
+from .DynamicPatchTSTBackbone import DynamicPatchTSTBackbone
 from .NewTSDualBranchEncoder import NewTSDualBranchEncoder
 from .NewTSPMAAggregator import NewTSPMAAggregator
 from .NewTSVisionEncoder import NewTSVisionEncoder
@@ -14,6 +15,7 @@ __all__ = [
     "NewTSDualBranchEncoder",
     "NewTSPMAAggregator",
     "NewTSVisionEncoder",
+    "DynamicPatchTSTBackbone",
     "TransformerCNNEncoder",
     "TSLANetEncoder",
     "TimeSeriesEncoderBase",

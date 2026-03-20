@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 FEWSHOT_SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_classification_pretrained_fewshot.py"
 FULL_SCRIPT_PATH = REPO_ROOT / "scripts" / "train_ucr_classification_pretrained_full.py"
+STAGE12_SCRIPT_PATH = REPO_ROOT / "scripts" / "train_curriculum_pretrain_stage12.py"
 
 from opentslm.model.encoder.NewTSDualBranchEncoder import NewTSDualBranchEncoder
 from opentslm.model.encoder.NewTSVisionEncoder import NewTSVisionEncoder
@@ -44,6 +45,13 @@ def load_train_ucr_full_script_module():
     return load_script_module(
         FULL_SCRIPT_PATH,
         "train_ucr_classification_pretrained_full",
+    )
+
+
+def load_train_curriculum_stage12_script_module():
+    return load_script_module(
+        STAGE12_SCRIPT_PATH,
+        "train_curriculum_pretrain_stage12",
     )
 
 
@@ -135,14 +143,16 @@ def install_dummy_llm(monkeypatch):
 
 def test_newts_dual_branch_encoder_output_shapes_and_freeze_behavior(monkeypatch):
     install_dummy_vision_loader(monkeypatch)
-    x = torch.randn(2, 12)
+    x_short = torch.randn(2, 12)
+    x_long = torch.randn(2, 20)
 
     both_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="both",
         freeze_ts_backbone=True,
         freeze_vision_backbone=True,
@@ -150,26 +160,31 @@ def test_newts_dual_branch_encoder_output_shapes_and_freeze_behavior(monkeypatch
     )
     ts_only_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="ts_only",
         device="cpu",
     )
     vision_only_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="vision_only",
         device="cpu",
     )
 
-    assert both_encoder(x).shape == (2, 7, 8)
-    assert ts_only_encoder(x).shape == (2, 3, 8)
-    assert vision_only_encoder(x).shape == (2, 4, 8)
+    assert both_encoder(x_short).shape == (2, 7, 8)
+    assert both_encoder(x_long).shape == (2, 9, 8)
+    assert ts_only_encoder(x_short).shape == (2, 3, 8)
+    assert ts_only_encoder(x_long).shape == (2, 5, 8)
+    assert vision_only_encoder(x_short).shape == (2, 4, 8)
+    assert vision_only_encoder(x_long).shape == (2, 4, 8)
     assert all(not param.requires_grad for param in both_encoder.ts_backbone.parameters())
     assert all(not param.requires_grad for param in both_encoder.vision_encoder.vit.parameters())
 
@@ -180,10 +195,11 @@ def test_newts_dual_branch_encoder_with_pma_returns_slot_tokens(monkeypatch):
 
     both_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="both",
         use_pma=True,
         aggregator_num_queries=3,
@@ -191,10 +207,11 @@ def test_newts_dual_branch_encoder_with_pma_returns_slot_tokens(monkeypatch):
     )
     ts_only_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="ts_only",
         use_pma=True,
         aggregator_num_queries=3,
@@ -202,10 +219,11 @@ def test_newts_dual_branch_encoder_with_pma_returns_slot_tokens(monkeypatch):
     )
     vision_only_encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="vision_only",
         use_pma=True,
         aggregator_num_queries=3,
@@ -221,15 +239,15 @@ def test_newts_dual_branch_encoder_with_pma_projects_back_to_output_dim(monkeypa
     install_dummy_vision_loader(monkeypatch)
     encoder = NewTSDualBranchEncoder(
         output_dim=8,
-        context_length=12,
         patch_length=4,
         stride=4,
         d_model=8,
+        num_hidden_layers=1,
+        ffn_dim=16,
         branch_mode="both",
         use_pma=True,
         aggregator_hidden_size=16,
         aggregator_num_heads=4,
-        aggregator_ffn_dim=32,
         aggregator_num_queries=2,
         device="cpu",
     )
@@ -286,7 +304,6 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(script_loader, monkeypat
         device="cpu",
         encoder_type="newts_dual_branch",
         newts_dual_branch_config={
-            "context_length": 12,
             "patch_length": 4,
             "stride": 4,
             "d_model": 8,
@@ -314,6 +331,9 @@ def test_opentslmsp_newts_checkpoint_metadata_roundtrip(script_loader, monkeypat
 
     assert checkpoint["model_config"]["llm_id"] == "dummy-llm"
     assert checkpoint["model_config"]["encoder_type"] == "newts_dual_branch"
+    assert checkpoint["model_config"]["encoder_config"]["dynamic_length"] is True
+    assert checkpoint["model_config"]["encoder_config"]["ts_positional_encoding"] == "sinusoidal"
+    assert "context_length" not in checkpoint["model_config"]["encoder_config"]
     assert checkpoint["model_config"]["encoder_config"]["vit_num_hidden_layers"] == 4
     assert checkpoint["model_config"]["encoder_config"]["use_pma"] is True
     assert checkpoint["model_config"]["encoder_config"]["aggregator_num_queries"] == 3
@@ -340,15 +360,22 @@ def test_train_ucr_newts_defaults_and_validation(script_loader):
 
     args = script_module.parse_args(["--encoder_type", "newts_dual_branch"])
     script_module.validate_args(args)
+    config = script_module.build_newts_dual_branch_config(args)
 
     assert args.vit_feature_mode == "single"
     assert args.vit_layer_idx == 4
     assert args.vit_truncate_to_feature_layer is True
     assert args.use_pma is False
-    assert script_module.infer_context_length_from_dataset(
-        [{"time_series": [torch.arange(9)]}],
-        patch_length=4,
-    ) == 12
+    assert config["dynamic_length"] is True
+    assert config["ts_positional_encoding"] == "sinusoidal"
+    assert "context_length" not in config
+    assert script_module.resolve_effective_pad_mode(args) == "last"
+
+    explicit_pad_args = script_module.parse_args(
+        ["--encoder_type", "newts_dual_branch", "--pad_mode", "repeat"]
+    )
+    script_module.validate_args(explicit_pad_args)
+    assert script_module.resolve_effective_pad_mode(explicit_pad_args) == "repeat"
 
     invalid_args = script_module.parse_args(
         [
@@ -477,11 +504,11 @@ def test_train_ucr_newts_pma_config_and_validation(script_loader):
             "2",
         ]
     )
-    args.context_length = 12
     script_module.validate_args(args)
     config = script_module.build_newts_dual_branch_config(args)
 
     assert config["use_pma"] is True
+    assert config["dynamic_length"] is True
     assert config["aggregator_hidden_size"] == 16
     assert config["aggregator_num_heads"] == 4
     assert config["aggregator_ffn_dim"] == 32
@@ -527,7 +554,6 @@ def test_opentslmsp_pad_and_apply_batch_with_pma_tokens(monkeypatch):
         device="cpu",
         encoder_type="newts_dual_branch",
         newts_dual_branch_config={
-            "context_length": 12,
             "patch_length": 4,
             "stride": 4,
             "d_model": 8,
@@ -564,3 +590,62 @@ def test_opentslmsp_pad_and_apply_batch_with_pma_tokens(monkeypatch):
     assert inputs_embeds.shape == (2, 5, model.llm.config.hidden_size)
     assert attention_mask.shape == (2, 5)
     assert torch.all(attention_mask == 1)
+
+
+@pytest.mark.parametrize(
+    "script_loader",
+    [
+        load_train_ucr_fewshot_script_module,
+        load_train_ucr_full_script_module,
+        load_train_curriculum_stage12_script_module,
+    ],
+    ids=["fewshot", "full", "stage12"],
+)
+def test_newts_context_length_flag_warns_but_is_ignored(script_loader, capsys):
+    script_module = script_loader()
+
+    args = script_module.parse_args(
+        ["--encoder_type", "newts_dual_branch", "--context_length", "128"]
+    )
+    script_module.validate_args(args)
+    script_module.warn_deprecated_newts_context_length(args, rank=0)
+    captured = capsys.readouterr()
+
+    assert "deprecated" in captured.out
+    assert script_module.build_newts_dual_branch_config(args)["dynamic_length"] is True
+
+
+def test_stage12_length_bucket_batch_sampler_groups_similar_lengths():
+    script_module = load_train_curriculum_stage12_script_module()
+
+    class DummyDataset:
+        def __init__(self, lengths):
+            self.lengths = list(lengths)
+
+        def __len__(self):
+            return len(self.lengths)
+
+        def __getitem__(self, idx):
+            return {"time_series": [torch.arange(self.lengths[idx])]}
+
+    dataset = DummyDataset([64, 512, 128, 256, 68, 500, 132, 260])
+    sampler = script_module.LengthBucketBatchSampler(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        num_replicas=1,
+    )
+
+    batches = list(iter(sampler))
+    batch_lengths = [[dataset.lengths[idx] for idx in batch] for batch in batches]
+
+    assert batch_lengths == [[64, 68], [128, 132], [256, 260], [500, 512]]
+
+
+def test_stage12_newts_run_name_and_pad_mode_defaults():
+    script_module = load_train_curriculum_stage12_script_module()
+
+    args = script_module.parse_args(["--encoder_type", "newts_dual_branch", "--branch_mode", "both"])
+
+    assert script_module.default_run_name(args) == "newts_dual_branch_both_dynamic"
+    assert script_module.resolve_effective_pad_mode(args) == "last"

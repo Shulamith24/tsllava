@@ -7,9 +7,9 @@ from typing import Any, Dict, Optional, Sequence
 
 import torch
 import torch.nn as nn
-from transformers import PatchTSTConfig, PatchTSTModel
 
 from opentslm.model_config import ENCODER_OUTPUT_DIM
+from opentslm.model.encoder.DynamicPatchTSTBackbone import DynamicPatchTSTBackbone
 from opentslm.model.encoder.NewTSPMAAggregator import NewTSPMAAggregator
 from opentslm.model.encoder.NewTSVisionEncoder import NewTSVisionEncoder
 from opentslm.model.encoder.TimeSeriesEncoderBase import TimeSeriesEncoderBase
@@ -31,7 +31,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
     def __init__(
         self,
         output_dim: int = ENCODER_OUTPUT_DIM,
-        context_length: int = 512,
+        context_length: Optional[int] = None,
         patch_length: int = 16,
         stride: int = 8,
         d_model: int = 128,
@@ -39,6 +39,8 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         num_hidden_layers: int = 3,
         ffn_dim: int = 512,
         dropout: float = 0.1,
+        dynamic_length: bool = True,
+        ts_positional_encoding: str = "sinusoidal",
         branch_mode: str = "both",
         vit_model_name: str = "facebook/dinov2-base",
         vit_feature_mode: str = "single",
@@ -66,8 +68,6 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
     ):
         super().__init__(output_dim=output_dim, dropout=dropout)
 
-        if context_length <= 0:
-            raise ValueError("context_length must be positive")
         if patch_length <= 0:
             raise ValueError("patch_length must be positive")
         if stride <= 0:
@@ -84,13 +84,19 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             raise ValueError("aggregator_num_queries must be positive")
         if aggregator_fuse_layers < 0:
             raise ValueError("aggregator_fuse_layers must be non-negative")
+        if not dynamic_length:
+            raise ValueError("NewTSDualBranchEncoder now requires dynamic_length=True")
+        if ts_positional_encoding != "sinusoidal":
+            raise ValueError(f"Unsupported ts_positional_encoding: {ts_positional_encoding}")
 
         self.output_dim = output_dim
-        self.context_length = int(context_length)
+        self.context_length = int(context_length) if context_length is not None else None
         self.patch_length = int(patch_length)
         self.stride = int(stride)
         self.d_model = int(d_model)
         self.branch_mode = branch_mode
+        self.dynamic_length = bool(dynamic_length)
+        self.ts_positional_encoding = ts_positional_encoding
         self.projector_type = projector_type
         self.projector_dropout = float(projector_dropout)
         self.use_pma = bool(use_pma)
@@ -122,24 +128,19 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             raise ValueError("aggregator_hidden_size must be divisible by aggregator_num_heads")
 
         if branch_mode in {"both", "ts_only"}:
-            patchtst_config = PatchTSTConfig(
-                num_input_channels=1,
-                context_length=self.context_length,
+            self.ts_backbone = DynamicPatchTSTBackbone(
                 patch_length=self.patch_length,
-                patch_stride=self.stride,
                 d_model=self.d_model,
                 num_attention_heads=num_attention_heads,
                 num_hidden_layers=num_hidden_layers,
                 ffn_dim=ffn_dim,
                 dropout=dropout,
-                use_cls_token=False,
+                stride=self.stride,
+                positional_encoding=self.ts_positional_encoding,
             )
-            self.ts_backbone = PatchTSTModel(config=patchtst_config)
-            self.ts_num_patches = max(0, (self.context_length - self.patch_length) // self.stride + 1)
             self.ts_projector = self._build_projector(self.d_model, self.token_output_dim)
         else:
             self.ts_backbone = None
-            self.ts_num_patches = 0
             self.ts_projector = None
 
         if branch_mode in {"both", "vision_only"}:
@@ -230,36 +231,19 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         if self.vision_encoder is not None:
             self.vision_encoder.enable_gradient_checkpointing()
 
-    def _prepare_past_values(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = x.shape
-        past_values = x.unsqueeze(-1)
-
-        if seq_len < self.context_length:
-            pad_len = self.context_length - seq_len
-            pad = past_values.new_zeros(batch_size, pad_len, 1)
-            past_values = torch.cat([past_values, pad], dim=1)
-        elif seq_len > self.context_length:
-            past_values = past_values[:, : self.context_length, :]
-
-        return past_values
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 2:
             raise ValueError(f"Expected 2D input [B, L], got shape {tuple(x.shape)}")
 
-        past_values = self._prepare_past_values(x)
         ts_embeddings = None
         vision_embeddings = None
 
         if self.ts_backbone is not None:
-            ts_output = self.ts_backbone(past_values=past_values)
-            ts_embeddings = ts_output.last_hidden_state
-            if ts_embeddings.dim() == 4:
-                ts_embeddings = ts_embeddings.squeeze(1)
+            ts_embeddings = self.ts_backbone(x)
             ts_embeddings = self.ts_projector(ts_embeddings)
 
         if self.vision_encoder is not None:
-            vision_embeddings = self.vision_encoder(past_values)
+            vision_embeddings = self.vision_encoder(x.unsqueeze(-1))
             vision_embeddings = self.vision_projector(vision_embeddings)
 
         if ts_embeddings is None and vision_embeddings is None:
@@ -281,7 +265,8 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
     def get_config(self) -> Dict[str, Any]:
         config = {
             "output_dim": self.output_dim,
-            "context_length": self.context_length,
+            "dynamic_length": self.dynamic_length,
+            "ts_positional_encoding": self.ts_positional_encoding,
             "patch_length": self.patch_length,
             "stride": self.stride,
             "d_model": self.d_model,
@@ -302,13 +287,12 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             "freeze_vision_backbone": self.freeze_vision_backbone_default,
         }
         if self.ts_backbone is not None:
-            ts_config = self.ts_backbone.config
             config.update(
                 {
-                    "num_attention_heads": ts_config.num_attention_heads,
-                    "num_hidden_layers": ts_config.num_hidden_layers,
-                    "ffn_dim": ts_config.ffn_dim,
-                    "dropout": ts_config.dropout,
+                    "num_attention_heads": self.ts_backbone.num_attention_heads,
+                    "num_hidden_layers": self.ts_backbone.num_hidden_layers,
+                    "ffn_dim": self.ts_backbone.ffn_dim,
+                    "dropout": self.ts_backbone.dropout,
                 }
             )
         if self.vision_encoder is not None:

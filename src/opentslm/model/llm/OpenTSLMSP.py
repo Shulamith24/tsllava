@@ -581,7 +581,6 @@ class OpenTSLMSP(TimeSeriesLLM):
     def _build_default_newts_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         default_config = {
             "output_dim": ENCODER_OUTPUT_DIM,
-            "context_length": 512,
             "patch_length": 16,
             "stride": 8,
             "d_model": 128,
@@ -589,6 +588,8 @@ class OpenTSLMSP(TimeSeriesLLM):
             "num_hidden_layers": 3,
             "ffn_dim": 512,
             "dropout": 0.1,
+            "dynamic_length": True,
+            "ts_positional_encoding": "sinusoidal",
             "branch_mode": "both",
             "vit_model_name": "facebook/dinov2-base",
             "vit_feature_mode": "single",

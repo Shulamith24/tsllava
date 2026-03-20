@@ -47,7 +47,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
@@ -110,13 +110,18 @@ def sanitize_llm_id(llm_id: str) -> str:
     return name
 
 
+def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
+    if argv is None:
+        argv = sys.argv[1:]
+    return any(token == flag_name or token.startswith(f"{flag_name}=") for token in argv)
+
+
 def default_run_name(args) -> str:
     if args.encoder_type == "transformer_cnn":
         return "transformer_cnn"
     if args.encoder_type == "tslanet":
         return f"tslanet_ps{args.tslanet_patch_size}"
-    context = args.context_length if args.context_length is not None else "auto"
-    return f"newts_dual_branch_{args.branch_mode}_ctx{context}"
+    return f"newts_dual_branch_{args.branch_mode}_dynamic"
 
 
 def get_dataset_class(stage_name: str):
@@ -132,6 +137,7 @@ def get_dataset_class(stage_name: str):
 
 
 def parse_args(argv=None):
+    provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
         description="Reproduce stage1/stage2 curriculum pretraining with configurable encoders"
     )
@@ -248,6 +254,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     args.stages = parse_stage_list(args.stages)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
+    args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
+    args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
     validate_args(args)
     return args
 
@@ -269,8 +277,6 @@ def validate_args(args):
         raise ValueError("--patch_length must be positive")
     if args.stride <= 0:
         raise ValueError("--stride must be positive")
-    if args.context_length is not None and args.context_length <= 0:
-        raise ValueError("--context_length must be positive when provided")
     if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
 
@@ -357,12 +363,10 @@ def build_tslanet_config(args) -> Dict[str, Any]:
 
 
 def build_newts_dual_branch_config(args) -> Dict[str, Any]:
-    if args.context_length is None:
-        raise ValueError("context_length must be resolved before building the newts_dual_branch config")
-
     return {
         "output_dim": ENCODER_OUTPUT_DIM,
-        "context_length": args.context_length,
+        "dynamic_length": True,
+        "ts_positional_encoding": "sinusoidal",
         "patch_length": args.patch_length,
         "stride": args.stride,
         "d_model": args.d_model,
@@ -419,6 +423,12 @@ def resolve_collate_patch_size(args) -> int:
     return PATCH_SIZE
 
 
+def resolve_effective_pad_mode(args) -> str:
+    if args.encoder_type == "newts_dual_branch" and not getattr(args, "pad_mode_explicit", False):
+        return "last"
+    return args.pad_mode
+
+
 def resolve_base_eos_token(llm_id: str) -> str:
     tokenizer = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
     if tokenizer.pad_token is None:
@@ -428,39 +438,106 @@ def resolve_base_eos_token(llm_id: str) -> str:
     return tokenizer.eos_token
 
 
-def infer_max_context_length(dataset: Dataset) -> int:
-    max_len = 0
-    for sample in dataset:
-        for ts in sample["time_series"]:
+def warn_deprecated_newts_context_length(args, rank: int):
+    if rank != 0:
+        return
+    if args.encoder_type != "newts_dual_branch":
+        return
+    if getattr(args, "context_length_explicit", False):
+        print("⚠️ --context_length is deprecated for newts_dual_branch and is ignored in dynamic-length mode")
+
+
+class LengthBucketBatchSampler(Sampler[List[int]]):
+    def __init__(
+        self,
+        dataset: Dataset,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        num_replicas: int = 1,
+        rank: int = 0,
+        drop_last: bool = False,
+        bucket_size_multiplier: int = 20,
+        seed: int = 0,
+    ):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if num_replicas <= 0:
+            raise ValueError("num_replicas must be positive")
+        if rank < 0 or rank >= num_replicas:
+            raise ValueError("rank must be within [0, num_replicas)")
+
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.drop_last = bool(drop_last)
+        self.bucket_size = max(self.batch_size, self.batch_size * int(bucket_size_multiplier))
+        self.seed = int(seed)
+        self.epoch = 0
+        self.sample_lengths = [self._infer_sample_length(dataset[idx]) for idx in range(len(dataset))]
+
+    @staticmethod
+    def _infer_sample_length(sample: Dict[str, Any]) -> int:
+        max_len = 0
+        for ts in sample.get("time_series", []):
             max_len = max(max_len, int(torch.as_tensor(ts).numel()))
-    if max_len <= 0:
-        raise ValueError("Could not infer a positive context_length from the dataset")
-    return max_len
+        if max_len <= 0:
+            raise ValueError("Encountered a sample without a positive time-series length")
+        return max_len
 
+    def _build_all_batches(self) -> List[List[int]]:
+        rng = random.Random(self.seed + self.epoch)
+        indices = list(range(len(self.sample_lengths)))
+        if self.shuffle:
+            rng.shuffle(indices)
+        indices.sort(key=self.sample_lengths.__getitem__)
 
-def maybe_resolve_context_length(args, rank: int):
-    if args.encoder_type != "newts_dual_branch" or args.context_length is not None:
-        return args
+        batches: List[List[int]] = []
+        for bucket_start in range(0, len(indices), self.bucket_size):
+            bucket = list(indices[bucket_start : bucket_start + self.bucket_size])
+            if self.shuffle:
+                rng.shuffle(bucket)
+            for batch_start in range(0, len(bucket), self.batch_size):
+                batch = bucket[batch_start : batch_start + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    batches.append(batch)
 
-    if rank == 0:
-        eos_token = resolve_base_eos_token(args.llm_id)
-        inferred_lengths: Dict[str, int] = {}
-        for stage_name in args.stages:
-            dataset_class = get_dataset_class(stage_name)
-            stage_max = 0
-            for split in ("train", "validation", "test"):
-                dataset = dataset_class(split, EOS_TOKEN=eos_token)
-                stage_max = max(stage_max, infer_max_context_length(dataset))
-            inferred_lengths[stage_name] = stage_max
+        if self.shuffle:
+            rng.shuffle(batches)
+        return batches
 
-        args.context_length = max(inferred_lengths.values())
-        print("🔍 Inferred newts_dual_branch context_length from datasets:")
-        for stage_name in args.stages:
-            print(f"   {stage_name}: {inferred_lengths[stage_name]}")
-        print(f"   Using context_length={args.context_length}")
+    def _get_rank_batches(self) -> List[List[int]]:
+        batches = self._build_all_batches()
+        if self.num_replicas == 1:
+            return batches
 
-    args.context_length = broadcast_object_from_rank0(args.context_length, rank)
-    return args
+        if self.drop_last:
+            total_batches = (len(batches) // self.num_replicas) * self.num_replicas
+            batches = batches[:total_batches]
+        elif batches:
+            total_batches = math.ceil(len(batches) / self.num_replicas) * self.num_replicas
+            if len(batches) < total_batches:
+                batches.extend(batches[: total_batches - len(batches)])
+
+        return batches[self.rank : len(batches) : self.num_replicas]
+
+    def __iter__(self):
+        yield from self._get_rank_batches()
+
+    def __len__(self) -> int:
+        total_batches = len(self.sample_lengths) // self.batch_size
+        if not self.drop_last and len(self.sample_lengths) % self.batch_size != 0:
+            total_batches += 1
+        if self.num_replicas == 1:
+            return total_batches
+        if self.drop_last:
+            return total_batches // self.num_replicas
+        return math.ceil(total_batches / self.num_replicas)
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
 
 def create_data_loader(
@@ -475,18 +552,32 @@ def create_data_loader(
     world_size: int,
     rank: int,
     distribute_data: bool,
+    use_length_bucket: bool,
+    seed: int,
 ) -> DataLoader:
     dataset = dataset_class(split, EOS_TOKEN=eos_token)
     sampler = None
-    if distribute_data and world_size > 1:
+    batch_sampler = None
+    if use_length_bucket:
+        batch_sampler = LengthBucketBatchSampler(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_replicas=world_size if distribute_data else 1,
+            rank=rank if distribute_data else 0,
+            seed=seed,
+        )
+        shuffle = False
+    elif distribute_data and world_size > 1:
         sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=shuffle)
         shuffle = False
 
     return DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=None if batch_sampler is not None else batch_size,
         shuffle=shuffle,
         sampler=sampler,
+        batch_sampler=batch_sampler,
         collate_fn=lambda batch: extend_time_series_to_match_patch_size_and_aggregate(
             batch,
             patch_size=collate_patch_size,
@@ -787,6 +878,8 @@ def train_stage(
     lr_projector = cfg["lr_projector"]
     metric_type = cfg["metric_type"]
     collate_patch_size = resolve_collate_patch_size(args)
+    pad_mode = resolve_effective_pad_mode(args)
+    use_length_bucket = args.encoder_type == "newts_dual_branch"
 
     if rank == 0:
         print("\n" + "=" * 72)
@@ -797,6 +890,9 @@ def train_stage(
         print(f"   batch_size={args.batch_size}")
         print(f"   grad_accum={args.gradient_accumulation_steps}")
         print(f"   collate_patch_size={collate_patch_size}")
+        print(f"   pad_mode={pad_mode}")
+        if use_length_bucket:
+            print("   length_bucket_batching=True")
         print("=" * 72)
 
     eos_token = get_model(model).get_eos_token()
@@ -807,10 +903,12 @@ def train_stage(
         batch_size=args.batch_size,
         shuffle=True,
         collate_patch_size=collate_patch_size,
-        pad_mode=args.pad_mode,
+        pad_mode=pad_mode,
         world_size=world_size,
         rank=rank,
         distribute_data=True,
+        use_length_bucket=use_length_bucket,
+        seed=args.seed,
     )
     val_loader = create_data_loader(
         dataset_class=dataset_class,
@@ -819,10 +917,12 @@ def train_stage(
         batch_size=args.eval_batch_size,
         shuffle=False,
         collate_patch_size=collate_patch_size,
-        pad_mode=args.pad_mode,
+        pad_mode=pad_mode,
         world_size=1,
         rank=0,
         distribute_data=False,
+        use_length_bucket=use_length_bucket,
+        seed=args.seed,
     )
     test_loader = create_data_loader(
         dataset_class=dataset_class,
@@ -831,10 +931,12 @@ def train_stage(
         batch_size=args.eval_batch_size,
         shuffle=False,
         collate_patch_size=collate_patch_size,
-        pad_mode=args.pad_mode,
+        pad_mode=pad_mode,
         world_size=1,
         rank=0,
         distribute_data=False,
+        use_length_bucket=use_length_bucket,
+        seed=args.seed,
     )
 
     underlying_model = get_model(model)
@@ -886,8 +988,9 @@ def train_stage(
     epochs_no_improve = 0
     if start_epoch <= num_epochs:
         for epoch in range(start_epoch, num_epochs + 1):
-            if hasattr(train_loader.sampler, "set_epoch"):
-                train_loader.sampler.set_epoch(epoch)
+            epoch_sampler = getattr(train_loader, "batch_sampler", None) or getattr(train_loader, "sampler", None)
+            if hasattr(epoch_sampler, "set_epoch"):
+                epoch_sampler.set_epoch(epoch)
 
             train_loss = train_one_epoch(
                 model=model,
@@ -999,7 +1102,7 @@ def main():
             device = "cpu"
 
         set_seed(args.seed + rank)
-        args = maybe_resolve_context_length(args, rank)
+        warn_deprecated_newts_context_length(args, rank)
 
         run_name = args.run_name or default_run_name(args)
         run_dir = os.path.join(args.save_dir, sanitize_llm_id(args.llm_id), run_name)
@@ -1017,7 +1120,8 @@ def main():
             print(f"Resume: {args.resume}")
             print(f"LoRA: {args.use_lora}")
             if args.encoder_type == "newts_dual_branch":
-                print(f"Context length: {args.context_length}")
+                print("Dynamic length: enabled")
+                print(f"Pad mode: {resolve_effective_pad_mode(args)}")
             print("=" * 72)
 
             os.makedirs(run_dir, exist_ok=True)

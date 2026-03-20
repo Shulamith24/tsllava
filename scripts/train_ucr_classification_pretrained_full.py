@@ -196,6 +196,7 @@ def parse_args(argv=None):
 
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
+    parser.add_argument("--pad_mode", type=str, default="zero", choices=["zero", "last", "repeat"], help="时序padding策略")
     parser.add_argument("--lr_encoder", type=float, default=2e-4, help="编码器学习率")
     parser.add_argument("--lr_projector", type=float, default=1e-4, help="投影层学习率")
     parser.add_argument("--lr_lora", type=float, default=1e-4, help="LoRA学习率")
@@ -218,6 +219,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
     args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
+    args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
+    args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
     return args
 
 
@@ -279,7 +282,6 @@ def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
     elif encoder_type == "newts_dual_branch":
         structural_keys = [
             "branch_mode",
-            "context_length",
             "patch_length",
             "stride",
             "d_model",
@@ -364,6 +366,21 @@ def resolve_collate_patch_size(args) -> int:
     return PATCH_SIZE
 
 
+def resolve_effective_pad_mode(args) -> str:
+    if args.encoder_type == "newts_dual_branch" and not getattr(args, "pad_mode_explicit", False):
+        return "last"
+    return args.pad_mode
+
+
+def warn_deprecated_newts_context_length(args, rank: int):
+    if rank != 0:
+        return
+    if args.encoder_type != "newts_dual_branch":
+        return
+    if getattr(args, "context_length_explicit", False):
+        print("⚠️ --context_length is deprecated for newts_dual_branch and is ignored in dynamic-length mode")
+
+
 def resolve_base_llm_id(args) -> str:
     pretrained_model_config = getattr(args, "pretrained_model_model_config", None) or {}
     if args.pretrained_model and pretrained_model_config.get("llm_id"):
@@ -401,8 +418,6 @@ def validate_args(args):
         raise ValueError("--patch_length must be positive")
     if args.stride <= 0:
         raise ValueError("--stride must be positive")
-    if args.context_length is not None and args.context_length <= 0:
-        raise ValueError("--context_length must be positive when provided")
     if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
 
@@ -462,12 +477,10 @@ def build_tslanet_config(args) -> Dict[str, Any]:
 
 
 def build_newts_dual_branch_config(args) -> Dict[str, Any]:
-    if args.context_length is None:
-        raise ValueError("context_length must be resolved before building the newts_dual_branch config")
-
     return {
         "output_dim": ENCODER_OUTPUT_DIM,
-        "context_length": args.context_length,
+        "dynamic_length": True,
+        "ts_positional_encoding": "sinusoidal",
         "patch_length": args.patch_length,
         "stride": args.stride,
         "d_model": args.d_model,
@@ -532,6 +545,9 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         init_kwargs["tslanet_config"] = dict(encoder_config)
     elif encoder_type == "newts_dual_branch" and encoder_config:
         merged_config = dict(encoder_config)
+        merged_config.pop("context_length", None)
+        merged_config["dynamic_length"] = True
+        merged_config["ts_positional_encoding"] = "sinusoidal"
         merged_config["freeze_ts_backbone"] = args.freeze_ts_backbone
         merged_config["freeze_vision_backbone"] = args.freeze_vision_backbone
         merged_config["output_dim"] = ENCODER_OUTPUT_DIM
@@ -802,6 +818,7 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         return extend_time_series_to_match_patch_size_and_aggregate(
             batch,
             patch_size=resolve_collate_patch_size(args),
+            pad_mode=resolve_effective_pad_mode(args),
         )
     
     # 分布式采样器
@@ -1151,6 +1168,7 @@ def main():
             device = "cpu"
 
         set_seed(args.seed + rank)
+        warn_deprecated_newts_context_length(args, rank)
 
         eos_rank0 = resolve_dataset_eos_token(args) if rank == 0 else None
         dataset_eos = broadcast_object_from_rank0(eos_rank0, world_size, rank)
@@ -1166,9 +1184,6 @@ def main():
             test_size,
             train_dataset,
         ) = create_data_loaders(args, dataset_eos, world_size, rank)
-
-        if args.encoder_type == "newts_dual_branch" and args.context_length is None:
-            args.context_length = infer_context_length_from_dataset(train_dataset, args.patch_length)
 
         save_dir = os.path.join(args.save_dir, args.dataset)
         num_classes = UCRClassificationDataset.get_num_classes()
@@ -1192,7 +1207,8 @@ def main():
             print(f"梯度累积: {args.gradient_accumulation_steps}")
             print(f"梯度检查点: {args.gradient_checkpointing}")
             if args.encoder_type == "newts_dual_branch":
-                print(f"context_length: {args.context_length}")
+                print("dynamic_length: enabled")
+                print(f"pad_mode: {resolve_effective_pad_mode(args)}")
             print("=" * 60)
             print(f"   Train batches: {len(train_loader)}")
             print(f"   Val batches: {len(val_loader)}")
