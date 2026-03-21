@@ -572,17 +572,23 @@ def create_data_loader(
         sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=shuffle)
         shuffle = False
 
+    collate = lambda batch: extend_time_series_to_match_patch_size_and_aggregate(
+        batch,
+        patch_size=collate_patch_size,
+        pad_mode=pad_mode,
+    )
+    if batch_sampler is not None:
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=collate,
+        )
     return DataLoader(
         dataset,
-        batch_size=None if batch_sampler is not None else batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
-        batch_sampler=batch_sampler,
-        collate_fn=lambda batch: extend_time_series_to_match_patch_size_and_aggregate(
-            batch,
-            patch_size=collate_patch_size,
-            pad_mode=pad_mode,
-        ),
+        collate_fn=collate,
     )
 
 
