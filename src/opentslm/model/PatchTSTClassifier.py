@@ -246,6 +246,7 @@ class PatchTSTClassifierAdapter(nn.Module):
         context_length: int,
         label_mapping: Dict[str, Any],
         args: Dict[str, Any],
+        extra_state: Optional[Dict[str, Any]] = None,
         rank: int = 0,
     ):
         if rank != 0:
@@ -265,6 +266,8 @@ class PatchTSTClassifierAdapter(nn.Module):
             "head_was_reset": self.head_was_reset,
             "pretrained_source": self.pretrained_source,
         }
+        if extra_state:
+            checkpoint.update(extra_state)
 
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save(checkpoint, save_path)

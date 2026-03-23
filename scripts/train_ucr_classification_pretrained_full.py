@@ -214,7 +214,7 @@ def parse_args(argv=None):
     parser.add_argument("--eval_every", type=int, default=5, help="每N轮评估一次")
     parser.add_argument("--early_stop", type=int, default=10, help="早停耐心值")
     parser.add_argument("--max_new_tokens", type=int, default=2, help="生成最大token数（类别token + EOS）")
-    parser.add_argument("--eval_batch_size", type=int, default=32, help="评估批次大小")
+    parser.add_argument("--eval_batch_size", type=int, default=16, help="评估批次大小")
 
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)

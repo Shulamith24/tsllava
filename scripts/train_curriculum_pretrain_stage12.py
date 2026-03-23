@@ -63,7 +63,7 @@ from opentslm.time_series_datasets.util import extend_time_series_to_match_patch
 STAGE_ORDER = ["stage1_mcq", "stage2_captioning"]
 STAGE_SPECS = {
     "stage1_mcq": {
-        "default_epochs": 30,
+        "default_epochs": 25,
         "default_lr_encoder": 2e-4,
         "default_lr_projector": 1e-4,
         "metric_type": "accuracy",

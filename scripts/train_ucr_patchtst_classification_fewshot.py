@@ -51,9 +51,12 @@ from opentslm.time_series_datasets.ucr.UCRClassificationDataset import (  # noqa
 
 ShotType = Union[int, Literal["full"]]
 STRICT_FEWSHOT_EPOCHS = 100
+DEFAULT_FEWSHOT_SAVE_DIR = "results/patchtst_ucr_fewshot"
+DEFAULT_FULL_SAVE_DIR = "results/patchtst_ucr_full"
 
 
 def parse_args(argv=None):
+    provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
         description="Strict few-shot supervised UCR classification with PatchTST"
     )
@@ -69,7 +72,7 @@ def parse_args(argv=None):
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
     parser.add_argument("--model_select_metric", type=str, default="last", choices=["last", "train_loss"])
-    parser.add_argument("--fewshot_batch_mode", type=str, default="full", choices=["full", "manual"])
+    parser.add_argument("--fewshot_batch_mode", type=str, default="manual", choices=["full", "manual"])
 
     parser.add_argument("--epochs", type=int, default=STRICT_FEWSHOT_EPOCHS)
     parser.add_argument("--phase1_epochs", type=int, default=5)
@@ -111,11 +114,16 @@ def parse_args(argv=None):
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
 
-    parser.add_argument("--save_dir", type=str, default="results/patchtst_ucr_fewshot")
+    parser.add_argument("--save_dir", type=str, default=DEFAULT_FEWSHOT_SAVE_DIR)
+    parser.add_argument("--resume", action="store_true", help="Resume from existing run checkpoints when available.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.save_dir_explicit = any(
+        token == "--save_dir" or token.startswith("--save_dir=") for token in provided_argv
+    )
+    return args
 
 
 def setup_distributed() -> Tuple[int, int, int]:
@@ -144,6 +152,21 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def normalize_protocol_args(args):
+    if args.protocol == "full":
+        if args.way is not None:
+            raise ValueError("--way is not allowed when --protocol=full; full supervision must use all classes.")
+        args.shots = "full"
+        args.num_runs = 1
+        if not getattr(args, "save_dir_explicit", False):
+            args.save_dir = DEFAULT_FULL_SAVE_DIR
+        return args
+
+    if not getattr(args, "save_dir_explicit", False):
+        args.save_dir = DEFAULT_FEWSHOT_SAVE_DIR
+    return args
 
 
 def parse_shots(shots_str: str) -> List[ShotType]:
@@ -495,6 +518,7 @@ def train_phase(
     label_mapping: Dict[str, Any],
     run_dir: str,
     rank: int,
+    resume: bool,
 ) -> Dict[str, Any]:
     if phase_epochs <= 0:
         return {"losses": [], "last_loss": None, "total_steps": 0, "warmup_steps": 0}
@@ -520,8 +544,42 @@ def train_phase(
             f"steps={total_steps}, warmup={warmup_steps}"
         )
 
-    losses = []
-    for local_epoch in range(1, phase_epochs + 1):
+    ckpt_path = os.path.join(run_dir, f"{phase_name}.pt")
+    losses: List[float] = []
+    start_local_epoch = 1
+    if resume and os.path.exists(ckpt_path):
+        checkpoint = underlying.load_checkpoint(
+            checkpoint_path=ckpt_path,
+            device=device,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        checkpoint_phase = checkpoint.get("phase")
+        if checkpoint_phase is not None and checkpoint_phase != phase_name:
+            raise ValueError(f"Checkpoint phase mismatch: expected {phase_name}, got {checkpoint_phase}")
+
+        saved_phase_epochs = checkpoint.get("phase_epochs")
+        if saved_phase_epochs is not None and int(saved_phase_epochs) != phase_epochs:
+            raise ValueError(
+                f"Phase epoch mismatch for {phase_name}: checkpoint has {saved_phase_epochs}, expected {phase_epochs}"
+            )
+
+        losses = [float(item) for item in checkpoint.get("loss_history", [])]
+        completed_epoch = int(checkpoint.get("epoch", 0) or 0)
+        start_local_epoch = completed_epoch + 1
+        if rank == 0:
+            print(
+                f"   {phase_name}: resume from epoch {completed_epoch}/{phase_epochs}"
+            )
+        if completed_epoch >= phase_epochs:
+            return {
+                "losses": losses,
+                "last_loss": checkpoint.get("last_loss", losses[-1] if losses else None),
+                "total_steps": total_steps,
+                "warmup_steps": warmup_steps,
+            }
+
+    for local_epoch in range(start_local_epoch, phase_epochs + 1):
         global_epoch = epoch_offset + local_epoch
         if train_sampler is not None:
             train_sampler.set_epoch(global_epoch)
@@ -545,25 +603,23 @@ def train_phase(
 
         if rank == 0:
             print(f"   {phase_name} epoch {local_epoch}/{phase_epochs}: train_loss={train_loss:.6f}")
-
-    ckpt_path = os.path.join(run_dir, f"{phase_name}.pt")
-    underlying.save_checkpoint(
-        save_path=ckpt_path,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        epoch=phase_epochs,
-        phase=phase_name,
-        num_classes=num_classes,
-        context_length=context_length,
-        label_mapping=label_mapping,
-        args=vars(args),
-        rank=rank,
-    )
-
-    if phase_name == "phase2_last":
-        final_ckpt_path = os.path.join(run_dir, "phase2_last.pt")
-        if rank == 0 and ckpt_path != final_ckpt_path:
-            os.replace(ckpt_path, final_ckpt_path)
+        underlying.save_checkpoint(
+            save_path=ckpt_path,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=local_epoch,
+            phase=phase_name,
+            num_classes=num_classes,
+            context_length=context_length,
+            label_mapping=label_mapping,
+            args=vars(args),
+            extra_state={
+                "phase_epochs": phase_epochs,
+                "loss_history": losses,
+                "last_loss": train_loss,
+            },
+            rank=rank,
+        )
 
     return {
         "losses": losses,
@@ -645,22 +701,62 @@ def run_single_experiment(
 ) -> Optional[Dict[str, Any]]:
     shot_name = shot_to_name(shot)
     run_dir = os.path.join(base_save_dir, f"shot_{shot_name}", f"run_{run_id:02d}")
+    run_metrics_path = os.path.join(run_dir, "run_metrics.json")
+    support_info_path = os.path.join(run_dir, "fewshot_indices.json")
 
     if rank == 0:
         os.makedirs(run_dir, exist_ok=True)
     if world_size > 1:
         dist.barrier()
 
+    completed_run_exists_rank0 = args.resume and rank == 0 and os.path.exists(run_metrics_path)
+    completed_run_exists = broadcast_object_from_rank0(
+        completed_run_exists_rank0 if rank == 0 else None,
+        world_size,
+        rank,
+    )
+    if completed_run_exists:
+        cached_metrics = None
+        if rank == 0:
+            print(f"[shot={shot_name} run={run_id}] reuse completed run: {run_metrics_path}")
+            with open(run_metrics_path, "r", encoding="utf-8") as f:
+                cached_metrics = json.load(f)
+        if world_size > 1:
+            dist.barrier()
+        return cached_metrics
+
     set_seed(run_seed)
 
     support_info_rank0 = None
     if rank == 0:
-        support_info_rank0 = sample_support_info(
-            label_to_indices,
-            shot,
-            run_seed,
-            way=args.way,
-        )
+        if args.resume and os.path.exists(support_info_path):
+            with open(support_info_path, "r", encoding="utf-8") as f:
+                support_info_rank0 = json.load(f)
+        else:
+            support_info_rank0 = sample_support_info(
+                label_to_indices,
+                shot,
+                run_seed,
+                way=args.way,
+            )
+            with open(support_info_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "dataset": args.dataset,
+                        "way": support_info_rank0["way"],
+                        "shot": shot_name,
+                        "run_id": run_id,
+                        "seed": run_seed,
+                        "selected_class_ids": support_info_rank0["selected_class_ids"],
+                        "selected_indices": support_info_rank0["selected_indices"],
+                        "selected_by_class": support_info_rank0["selected_by_class"],
+                        "k_eff_per_class": support_info_rank0["k_eff_per_class"],
+                        "class_train_counts": support_info_rank0["class_train_counts"],
+                        "classes_with_shortage": support_info_rank0["classes_with_shortage"],
+                    },
+                    f,
+                    indent=2,
+                )
     support_info = broadcast_object_from_rank0(support_info_rank0, world_size, rank)
 
     support_indices = support_info["selected_indices"]
@@ -753,6 +849,7 @@ def run_single_experiment(
         label_mapping=label_mapping,
         run_dir=run_dir,
         rank=rank,
+        resume=args.resume,
     )
 
     phase2_stats = train_phase(
@@ -771,6 +868,7 @@ def run_single_experiment(
         label_mapping=label_mapping,
         run_dir=run_dir,
         rank=rank,
+        resume=args.resume,
     )
 
     if world_size > 1:
@@ -821,27 +919,8 @@ def run_single_experiment(
             "model_checkpoint": "phase2_last.pt",
         }
 
-        with open(os.path.join(run_dir, "run_metrics.json"), "w") as f:
+        with open(run_metrics_path, "w", encoding="utf-8") as f:
             json.dump(run_metrics, f, indent=2)
-
-        with open(os.path.join(run_dir, "fewshot_indices.json"), "w") as f:
-            json.dump(
-                {
-                    "dataset": args.dataset,
-                    "way": support_info["way"],
-                    "shot": shot_name,
-                    "run_id": run_id,
-                    "seed": run_seed,
-                    "selected_class_ids": support_info["selected_class_ids"],
-                    "selected_indices": support_info["selected_indices"],
-                    "selected_by_class": support_info["selected_by_class"],
-                    "k_eff_per_class": support_info["k_eff_per_class"],
-                    "class_train_counts": support_info["class_train_counts"],
-                    "classes_with_shortage": support_info["classes_with_shortage"],
-                },
-                f,
-                indent=2,
-            )
 
         with open(os.path.join(run_dir, "test_predictions.json"), "w") as f:
             json.dump(
@@ -869,7 +948,7 @@ def run_single_experiment(
 
 
 def main():
-    args = parse_args()
+    args = normalize_protocol_args(parse_args())
     args = enforce_strict_fewshot_protocol(args)
     local_rank, world_size, rank = setup_distributed()
 
@@ -1016,6 +1095,17 @@ def main():
                 save_path=os.path.join(save_root, "fewshot_summary.csv"),
                 shot_summaries=shot_summaries,
             )
+
+            if args.protocol == "full" and shot_summaries:
+                final_results = {
+                    "dataset": args.dataset,
+                    "protocol": args.protocol,
+                    "test_loss": shot_summaries[0]["loss_mean"],
+                    "test_accuracy": shot_summaries[0]["accuracy_mean"],
+                    "epochs_trained": args.epochs,
+                }
+                with open(os.path.join(save_root, "final_results.json"), "w", encoding="utf-8") as f:
+                    json.dump(final_results, f, indent=2)
 
             print("=" * 80)
             print(f"Done. Results saved to: {save_root}")
