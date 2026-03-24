@@ -54,6 +54,13 @@ sys.path.insert(0, str(project_root / "src"))
 
 from opentslm.model.llm.OpenTSLM import OpenTSLM
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
+from opentslm.model.class_token_rows import (
+    get_class_token_trainable_parameters,
+    load_class_token_rows_from_checkpoint,
+    register_class_token_row_training,
+    sanitize_class_token_optimizer_state,
+    save_class_token_rows_to_checkpoint,
+)
 from opentslm.model_config import ENCODER_OUTPUT_DIM, PATCH_SIZE
 from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
@@ -914,14 +921,13 @@ def add_class_tokens_to_model(model, num_classes: int, rank: int = 0):
             if rank == 0:
                 print(f"   Initialized {num_added} class tokens with mean + random perturbation")
 
-    embedding.weight.requires_grad = True
-    lm_head.weight.requires_grad = True
-
     class_token_ids = [model.tokenizer.convert_tokens_to_ids(t) for t in class_tokens]
+    register_class_token_row_training(model, class_token_ids)
     if rank == 0:
         preview = class_token_ids[:5]
         suffix = "..." if len(class_token_ids) > 5 else ""
         print(f"   Class token IDs: {preview}{suffix}")
+        print("   Restricted embedding/lm_head updates to class-token rows only")
 
     return class_tokens, class_token_ids
 
@@ -991,13 +997,16 @@ def build_optimizer_scheduler(
             param_groups.append({"params": lora_params, "lr": args.lr_lora})
 
     class_token_params = unique_params(
-        [
-            underlying_model.llm.get_input_embeddings().weight,
-            underlying_model.llm.lm_head.weight,
-        ]
+        list(get_class_token_trainable_parameters(underlying_model))
     )
     if class_token_params:
-        param_groups.append({"params": class_token_params, "lr": args.lr_lora * 2})
+        param_groups.append(
+            {
+                "params": class_token_params,
+                "lr": args.lr_lora * 2,
+                "weight_decay": 0.0,
+            }
+        )
 
     if not param_groups:
         raise RuntimeError("No trainable parameters found for optimizer.")
@@ -1145,6 +1154,8 @@ def save_checkpoint(
         return
 
     underlying_model = get_model(model)
+    if optimizer is not None:
+        sanitize_class_token_optimizer_state(optimizer, underlying_model)
     checkpoint = {
         "model_config": underlying_model.get_checkpoint_metadata(),
         "encoder_state": underlying_model.encoder.state_dict(),
@@ -1155,13 +1166,11 @@ def save_checkpoint(
         "train_loss": train_loss,
         "phase": phase,
         "args": vars(args),
-        "embedding_weight": underlying_model.llm.get_input_embeddings().weight.detach().cpu(),
-        "lm_head_weight": underlying_model.llm.lm_head.weight.detach().cpu(),
-        "tokenizer_vocab_size": len(underlying_model.tokenizer),
     }
     if extra_state:
         checkpoint.update(extra_state)
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
+    save_class_token_rows_to_checkpoint(underlying_model, checkpoint)
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(checkpoint, save_path)
@@ -1180,16 +1189,11 @@ def load_checkpoint(
     underlying_model.encoder.load_state_dict(checkpoint["encoder_state"])
     underlying_model.projector.load_state_dict(checkpoint["projector_state"])
     underlying_model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
-
-    if "embedding_weight" in checkpoint:
-        with torch.no_grad():
-            underlying_model.llm.get_input_embeddings().weight.copy_(
-                checkpoint["embedding_weight"].to(device)
-            )
-            underlying_model.llm.lm_head.weight.copy_(checkpoint["lm_head_weight"].to(device))
+    load_class_token_rows_from_checkpoint(underlying_model, checkpoint, device=device)
 
     if optimizer is not None and checkpoint.get("optimizer_state") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
+        sanitize_class_token_optimizer_state(optimizer, underlying_model)
     if scheduler is not None and checkpoint.get("scheduler_state") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
