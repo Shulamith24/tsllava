@@ -256,8 +256,13 @@ def parse_args(argv=None):
     )
 
     # System and logging
-    parser.add_argument("--save_dir", type=str, default="results/m2_ucr_pretrained_fewshot")
+    parser.add_argument("--save_dir", type=str, default="results/ucr_pretrained_fewshot")
     parser.add_argument("--resume", action="store_true", help="从已有 run_dir checkpoint 断点续训")
+    parser.add_argument(
+        "--cleanup_checkpoints",
+        action="store_true",
+        help="每个 few-shot run 结束并写出结果后删除 phase checkpoint 以节省磁盘空间",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -1191,6 +1196,21 @@ def load_checkpoint(
     return checkpoint
 
 
+def cleanup_checkpoint_files(paths: List[str], rank: int = 0):
+    """删除不再需要的 checkpoint 文件；失败时仅告警，不中断训练。"""
+    if rank != 0:
+        return
+
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            os.remove(path)
+            print(f"🧹 Removed checkpoint: {path}")
+        except OSError as exc:
+            print(f"⚠️ Failed to remove checkpoint {path}: {exc}")
+
+
 def resolve_phase_resume_state(
     checkpoint: Dict[str, Any],
     *,
@@ -1422,7 +1442,10 @@ def run_single_experiment(
         dist.barrier()
 
     completed_run_exists_rank0 = (
-        args.resume and rank == 0 and os.path.exists(run_metrics_path) and os.path.exists(phase2_ckpt_path)
+        args.resume
+        and rank == 0
+        and os.path.exists(run_metrics_path)
+        and (args.cleanup_checkpoints or os.path.exists(phase2_ckpt_path))
     )
     completed_run_exists = broadcast_object_from_rank0(
         completed_run_exists_rank0 if rank == 0 else None,
@@ -1651,6 +1674,12 @@ def run_single_experiment(
                 },
                 f,
                 indent=2,
+            )
+
+        if args.cleanup_checkpoints:
+            cleanup_checkpoint_files(
+                [phase1_ckpt_path, phase2_ckpt_path],
+                rank=rank,
             )
 
         print(

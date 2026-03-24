@@ -34,7 +34,13 @@ OOM_PATTERNS = (
 
 
 def parse_args(argv: Sequence[str] | None = None):
-    parser = argparse.ArgumentParser(description="Run UCR batch experiments with resume-aware bookkeeping.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run UCR batch experiments with resume-aware bookkeeping. "
+            "Unknown extra args are forwarded to the underlying training script, "
+            "for example --cleanup_checkpoints."
+        )
+    )
     parser.add_argument("--experiment", required=True, choices=list_experiments())
     parser.add_argument("--protocol", required=True, choices=["full", "fewshot"])
     parser.add_argument("--job-name", default="default")

@@ -204,8 +204,13 @@ def parse_args(argv=None):
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪")
     parser.add_argument("--warmup_ratio", type=float, default=0.03, help="预热比例")
 
-    parser.add_argument("--save_dir", type=str, default="results/m2_ucr_pretrained", help="结果保存目录")
+    parser.add_argument("--save_dir", type=str, default="results/ucr_pretrained", help="结果保存目录")
     parser.add_argument("--resume", action="store_true", help="从 save_dir/dataset/last_checkpoint.pt 断点续训")
+    parser.add_argument(
+        "--cleanup_checkpoints",
+        action="store_true",
+        help="训练完成并写出结果后删除 best_model.pt / last_checkpoint.pt 以节省磁盘空间",
+    )
 
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
 
@@ -264,6 +269,21 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def cleanup_checkpoint_files(paths: List[str], rank: int = 0):
+    """删除不再需要的 checkpoint 文件；失败时仅告警，不中断训练。"""
+    if rank != 0:
+        return
+
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            os.remove(path)
+            print(f"🧹 Removed checkpoint: {path}")
+        except OSError as exc:
+            print(f"⚠️ Failed to remove checkpoint {path}: {exc}")
 
 
 def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
@@ -1474,6 +1494,12 @@ def main():
                     "predictions": test_results["predictions"],
                     "labels": test_results["labels"],
                 }, f, indent=2)
+
+            if args.cleanup_checkpoints:
+                cleanup_checkpoint_files(
+                    [best_checkpoint_path, last_checkpoint_path],
+                    rank=rank,
+                )
             
             print("=" * 60)
             print(f"结果保存到: {save_dir}")
