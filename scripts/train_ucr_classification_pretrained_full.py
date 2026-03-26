@@ -210,6 +210,13 @@ def parse_args(argv=None):
     parser.add_argument("--weight_decay", type=float, default=1e-2, help="权重衰减")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪")
     parser.add_argument("--warmup_ratio", type=float, default=0.03, help="预热比例")
+    parser.add_argument(
+        "--tokenizer_training_mode",
+        type=str,
+        default="class_rows",
+        choices=["class_rows", "full_embedding_head"],
+        help="类别token仅训练新增行，或恢复为旧版整块 embedding/lm_head 训练",
+    )
 
     parser.add_argument("--save_dir", type=str, default="results/ucr_pretrained", help="结果保存目录")
     parser.add_argument("--resume", action="store_true", help="从 save_dir/dataset/last_checkpoint.pt 断点续训")
@@ -259,6 +266,73 @@ def cleanup_distributed():
 def get_model(model):
     """获取底层模型（兼容DDP包装）"""
     return model.module if hasattr(model, "module") else model
+
+
+def use_class_token_row_training(args) -> bool:
+    return getattr(args, "tokenizer_training_mode", "class_rows") == "class_rows"
+
+
+def get_checkpoint_tokenizer_training_mode(checkpoint: Dict[str, Any]) -> str:
+    checkpoint_args = checkpoint.get("args") or {}
+    mode = checkpoint_args.get("tokenizer_training_mode")
+    if mode in {"class_rows", "full_embedding_head"}:
+        return mode
+    if "class_token_embedding_rows" in checkpoint and "class_token_lm_head_rows" in checkpoint:
+        return "class_rows"
+    if "embedding_weight" in checkpoint and "lm_head_weight" in checkpoint:
+        return "full_embedding_head"
+    return "class_rows"
+
+
+def save_tokenizer_training_state(model, checkpoint: Dict[str, Any], tokenizer_training_mode: str):
+    if tokenizer_training_mode == "class_rows":
+        save_class_token_rows_to_checkpoint(model, checkpoint)
+        return
+
+    checkpoint["embedding_weight"] = model.llm.get_input_embeddings().weight.detach().cpu()
+    checkpoint["lm_head_weight"] = model.llm.lm_head.weight.detach().cpu()
+    checkpoint["tokenizer_vocab_size"] = len(model.tokenizer)
+
+
+def load_full_tokenizer_weights_from_checkpoint(model, checkpoint: Dict[str, Any], device: str) -> bool:
+    if "embedding_weight" not in checkpoint or "lm_head_weight" not in checkpoint:
+        return False
+
+    embedding_weight = model.llm.get_input_embeddings().weight
+    lm_head_weight = model.llm.lm_head.weight
+    full_embedding = checkpoint["embedding_weight"].to(
+        device=device,
+        dtype=embedding_weight.dtype,
+    )
+    full_lm_head = checkpoint["lm_head_weight"].to(
+        device=device,
+        dtype=lm_head_weight.dtype,
+    )
+    if full_embedding.shape != embedding_weight.shape or full_lm_head.shape != lm_head_weight.shape:
+        raise ValueError(
+            "Full embedding checkpoint shape mismatch: "
+            f"embedding {full_embedding.shape} vs {embedding_weight.shape}, "
+            f"lm_head {full_lm_head.shape} vs {lm_head_weight.shape}"
+        )
+
+    with torch.no_grad():
+        embedding_weight.copy_(full_embedding)
+        lm_head_weight.copy_(full_lm_head)
+    return True
+
+
+def unique_trainable_params(params):
+    unique = []
+    seen = set()
+    for param in params:
+        if param is None or not param.requires_grad:
+            continue
+        param_id = id(param)
+        if param_id in seen:
+            continue
+        seen.add(param_id)
+        unique.append(param)
+    return unique
 
 
 def broadcast_object_from_rank0(obj, world_size: int, rank: int):
@@ -708,7 +782,13 @@ def calculate_accuracy(predictions: List[str], labels: List[str]) -> float:
     return correct / len(predictions) if predictions else 0.0
 
 
-def add_class_tokens_to_model(model, num_classes: int, device: str, rank: int = 0):
+def add_class_tokens_to_model(
+    model,
+    num_classes: int,
+    device: str,
+    tokenizer_training_mode: str,
+    rank: int = 0,
+):
     """
     添加类别特殊token到tokenizer和embedding层
     
@@ -769,15 +849,23 @@ def add_class_tokens_to_model(model, num_classes: int, device: str, rank: int = 
     
     # 获取token IDs
     class_token_ids = [model.tokenizer.convert_tokens_to_ids(t) for t in class_tokens]
-    register_class_token_row_training(model, class_token_ids)
     if rank == 0:
         print(
             f"   Class token IDs: {class_token_ids[:5]}..."
             if len(class_token_ids) > 5
             else f"   Class token IDs: {class_token_ids}"
         )
-        print("   Restricted embedding/lm_head updates to class-token rows only")
-    
+
+    if tokenizer_training_mode == "class_rows":
+        register_class_token_row_training(model, class_token_ids)
+        if rank == 0:
+            print("   Restricted embedding/lm_head updates to class-token rows only")
+    else:
+        embedding.weight.requires_grad = True
+        lm_head.weight.requires_grad = True
+        if rank == 0:
+            print("   Enabled full embedding/lm_head training (legacy behavior)")
+
     return class_tokens, class_token_ids
 
 
@@ -1110,7 +1198,7 @@ def save_checkpoint(
         return
     
     underlying_model = get_model(model)
-    if optimizer is not None:
+    if optimizer is not None and use_class_token_row_training(args):
         sanitize_class_token_optimizer_state(optimizer, underlying_model)
 
     checkpoint = {
@@ -1130,7 +1218,11 @@ def save_checkpoint(
     # 保存LoRA权重
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
 
-    save_class_token_rows_to_checkpoint(underlying_model, checkpoint)
+    save_tokenizer_training_state(
+        underlying_model,
+        checkpoint,
+        args.tokenizer_training_mode,
+    )
 
     torch.save(checkpoint, save_path)
     print(f"💾 Saved checkpoint to: {save_path}")
@@ -1140,20 +1232,34 @@ def load_checkpoint(
     model,
     checkpoint_path: str,
     device: str,
+    tokenizer_training_mode: str,
     optimizer=None,
     scheduler=None,
 ):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     underlying_model = get_model(model)
+    checkpoint_mode = get_checkpoint_tokenizer_training_mode(checkpoint)
+    if checkpoint_mode != tokenizer_training_mode:
+        raise ValueError(
+            "Checkpoint tokenizer_training_mode mismatch: "
+            f"expected {tokenizer_training_mode}, got {checkpoint_mode}. "
+            "请使用匹配的 --tokenizer_training_mode 继续训练或评估。"
+        )
 
     underlying_model.encoder.load_state_dict(checkpoint["encoder_state"])
     underlying_model.projector.load_state_dict(checkpoint["projector_state"])
     underlying_model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
-    load_class_token_rows_from_checkpoint(underlying_model, checkpoint, device=device)
+    if tokenizer_training_mode == "class_rows":
+        load_class_token_rows_from_checkpoint(underlying_model, checkpoint, device=device)
+    elif not load_full_tokenizer_weights_from_checkpoint(underlying_model, checkpoint, device=device):
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} does not contain full embedding/lm_head weights."
+        )
 
     if optimizer is not None and checkpoint.get("optimizer_state") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
-        sanitize_class_token_optimizer_state(optimizer, underlying_model)
+        if tokenizer_training_mode == "class_rows":
+            sanitize_class_token_optimizer_state(optimizer, underlying_model)
     if scheduler is not None and checkpoint.get("scheduler_state") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
@@ -1226,6 +1332,7 @@ def main():
             print(f"编码器类型: {args.encoder_type}")
             print(f"LLM: {args.llm_id}")
             print(f"LoRA: {args.use_lora}")
+            print(f"tokenizer_training_mode: {args.tokenizer_training_mode}")
             print(f"DDP: world_size={world_size}")
             print(f"梯度累积: {args.gradient_accumulation_steps}")
             print(f"梯度检查点: {args.gradient_checkpointing}")
@@ -1246,7 +1353,13 @@ def main():
 
         if rank == 0:
             print("\n🎯 添加类别token...")
-        add_class_tokens_to_model(get_model(model), num_classes, device, rank)
+        add_class_tokens_to_model(
+            get_model(model),
+            num_classes,
+            device,
+            args.tokenizer_training_mode,
+            rank,
+        )
 
         if world_size > 1:
             model = DDP(model, device_ids=[local_rank])
@@ -1272,14 +1385,23 @@ def main():
             if lora_params:
                 param_groups.append({"params": lora_params, "lr": args.lr_lora})
 
-        class_token_params = get_class_token_trainable_parameters(underlying_model)
-        param_groups.append(
-            {
-                "params": class_token_params,
-                "lr": args.lr_lora * 2,
-                "weight_decay": 0.0,
-            }
-        )
+        if use_class_token_row_training(args):
+            tokenizer_params = get_class_token_trainable_parameters(underlying_model)
+            param_groups.append(
+                {
+                    "params": tokenizer_params,
+                    "lr": args.lr_lora * 2,
+                    "weight_decay": 0.0,
+                }
+            )
+        else:
+            tokenizer_params = unique_trainable_params(
+                [
+                    underlying_model.llm.get_input_embeddings().weight,
+                    underlying_model.llm.lm_head.weight,
+                ]
+            )
+            param_groups.append({"params": tokenizer_params, "lr": args.lr_lora * 2})
         if rank == 0:
             print(f"   Added embedding and lm_head to optimizer (lr={args.lr_lora * 2:.2e})")
 
@@ -1315,6 +1437,7 @@ def main():
                     model,
                     last_checkpoint_path,
                     device=device,
+                    tokenizer_training_mode=args.tokenizer_training_mode,
                     optimizer=optimizer,
                     scheduler=scheduler,
                 )
@@ -1468,7 +1591,12 @@ def main():
             if rank == 0:
                 print("⚠️ 未找到 best_model.pt，回退到 last_checkpoint.pt 进行测试")
 
-        load_checkpoint(model, final_checkpoint_path, device=device)
+        load_checkpoint(
+            model,
+            final_checkpoint_path,
+            device=device,
+            tokenizer_training_mode=args.tokenizer_training_mode,
+        )
 
         if world_size > 1:
             dist.barrier()
@@ -1488,6 +1616,7 @@ def main():
                 "dataset": args.dataset,
                 "pretrained_model": args.pretrained_model,
                 "local_checkpoint": args.local_checkpoint,
+                "tokenizer_training_mode": args.tokenizer_training_mode,
                 "best_val_acc": best_val_acc,
                 "test_loss": test_results["loss"],
                 "test_accuracy": test_results["accuracy"],
