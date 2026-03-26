@@ -19,6 +19,7 @@ class ExperimentEntry:
     supports_inner_resume: bool
     default_shots: str | None = None
     blocked_forward_args: Tuple[str, ...] = tuple(BLOCKED_FORWARD_ARGS)
+    fixed_args: Tuple[str, ...] = tuple()
 
 
 def _entry(
@@ -30,6 +31,7 @@ def _entry(
     add_protocol_flag: bool,
     supports_inner_resume: bool,
     default_shots: str | None = None,
+    fixed_args: Tuple[str, ...] = tuple(),
 ) -> ExperimentEntry:
     return ExperimentEntry(
         experiment=experiment,
@@ -39,6 +41,7 @@ def _entry(
         add_protocol_flag=add_protocol_flag,
         supports_inner_resume=supports_inner_resume,
         default_shots=default_shots,
+        fixed_args=fixed_args,
     )
 
 
@@ -93,6 +96,101 @@ REGISTRY: Dict[Tuple[str, str], ExperimentEntry] = {
         add_protocol_flag=True,
         supports_inner_resume=True,
         default_shots=DEFAULT_FEWSHOT_SHOTS,
+    ),
+    ("tslib_autoformer", "full"): _entry(
+        "tslib_autoformer",
+        "full",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="full",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        fixed_args=("--model", "autoformer"),
+    ),
+    ("tslib_autoformer", "fewshot"): _entry(
+        "tslib_autoformer",
+        "fewshot",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "autoformer"),
+    ),
+    ("tslib_crossformer", "full"): _entry(
+        "tslib_crossformer",
+        "full",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="full",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        fixed_args=("--model", "crossformer"),
+    ),
+    ("tslib_crossformer", "fewshot"): _entry(
+        "tslib_crossformer",
+        "fewshot",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "crossformer"),
+    ),
+    ("tslib_fedformer", "full"): _entry(
+        "tslib_fedformer",
+        "full",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="full",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        fixed_args=("--model", "fedformer"),
+    ),
+    ("tslib_fedformer", "fewshot"): _entry(
+        "tslib_fedformer",
+        "fewshot",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "fedformer"),
+    ),
+    ("tslib_informer", "full"): _entry(
+        "tslib_informer",
+        "full",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="full",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        fixed_args=("--model", "informer"),
+    ),
+    ("tslib_informer", "fewshot"): _entry(
+        "tslib_informer",
+        "fewshot",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "informer"),
+    ),
+    ("tslib_timesnet", "full"): _entry(
+        "tslib_timesnet",
+        "full",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="full",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        fixed_args=("--model", "timesnet"),
+    ),
+    ("tslib_timesnet", "fewshot"): _entry(
+        "tslib_timesnet",
+        "fewshot",
+        "scripts/ablations/train_tslib_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=True,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "timesnet"),
     ),
 }
 

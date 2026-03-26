@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import importlib.util
+import json
 import pickle
 import random
 import sys
@@ -190,6 +191,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--console", action="store_true")
     parser.add_argument("--save_dir", type=str, default=DEFAULT_FEWSHOT_SAVE_DIR)
     parser.add_argument("--resume", action="store_true", help="Resume from existing run checkpoints when available.")
+    parser.add_argument(
+        "--cleanup_checkpoints",
+        action="store_true",
+        help="Remove per-run checkpoints after writing final results to save disk space.",
+    )
 
     args = parser.parse_args(argv)
     args.save_dir_explicit = cli_flag_was_provided(provided_argv, "--save_dir")
@@ -217,6 +223,18 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def cleanup_checkpoint_files(paths: List[Path]) -> None:
+    """Remove no-longer-needed checkpoints without failing the run."""
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            print(f"Removed checkpoint: {path}")
+        except OSError as exc:
+            print(f"Failed to remove checkpoint {path}: {exc}")
 
 
 def infer_dataset_name(args: argparse.Namespace) -> str:
@@ -524,7 +542,12 @@ def run_single_experiment(
     support_info_path = run_dir / "fewshot_indices.json"
     train_history_path = run_dir / "train_loss_history.json"
 
-    if args.resume and run_metrics_path.exists():
+    completed_run_exists = (
+        args.resume
+        and run_metrics_path.exists()
+        and (args.cleanup_checkpoints or checkpoint_path.exists())
+    )
+    if completed_run_exists:
         with open(run_metrics_path, "r", encoding="utf-8") as f:
             cached_metrics = json.load(f)
         print(f"[shot={shot_name} run={run_id:02d}] reuse completed run: {run_metrics_path}")
@@ -693,6 +716,8 @@ def run_single_experiment(
         f"test_acc={test_metrics.get('accuracy', 0.0):.4f} "
         f"test_loss={test_metrics['loss']:.4f}"
     )
+    if args.cleanup_checkpoints:
+        cleanup_checkpoint_files([checkpoint_path])
     return run_metrics
 
 

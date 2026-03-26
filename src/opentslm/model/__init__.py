@@ -7,8 +7,20 @@ from .PatchTSTClassifier import (
     PatchTSTClassifierAdapter,
     prepare_patchtst_classification_batch,
 )
+from .TSLibClassification import (
+    TSLibClassifierAdapter,
+    bootstrap_tslib_packages,
+    normalize_model_name,
+    prepare_tslib_classification_batch,
+    resolve_model_profile,
+)
 
 __all__ = [
     "PatchTSTClassifierAdapter",
+    "TSLibClassifierAdapter",
+    "bootstrap_tslib_packages",
+    "normalize_model_name",
     "prepare_patchtst_classification_batch",
+    "prepare_tslib_classification_batch",
+    "resolve_model_profile",
 ]

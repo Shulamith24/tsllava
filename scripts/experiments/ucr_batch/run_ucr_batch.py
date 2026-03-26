@@ -149,6 +149,7 @@ def build_batch_config(args, entry, resolved_data_path: Path, forward_args: Sequ
         "protocol": args.protocol,
         "script_path": str(entry.script_path.resolve()),
         "data_path": str(resolved_data_path),
+        "fixed_args": list(entry.fixed_args),
         "forward_args": list(forward_args),
         "supports_inner_resume": entry.supports_inner_resume,
         "summary_kind": entry.summary_kind,
@@ -192,6 +193,7 @@ def build_command(entry, *, protocol: str, dataset: str, data_path: str, save_di
         command.extend(["--protocol", protocol])
     if entry.supports_inner_resume:
         command.append("--resume")
+    command.extend(entry.fixed_args)
     command.extend(["--dataset", dataset, "--data_path", data_path, "--save_dir", save_dir])
     command.extend(forward_args)
     return command

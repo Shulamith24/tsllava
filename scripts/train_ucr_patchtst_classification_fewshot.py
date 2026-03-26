@@ -116,6 +116,11 @@ def parse_args(argv=None):
 
     parser.add_argument("--save_dir", type=str, default=DEFAULT_FEWSHOT_SAVE_DIR)
     parser.add_argument("--resume", action="store_true", help="Resume from existing run checkpoints when available.")
+    parser.add_argument(
+        "--cleanup_checkpoints",
+        action="store_true",
+        help="Remove per-run phase checkpoints after writing final results to save disk space.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -140,6 +145,21 @@ def setup_distributed() -> Tuple[int, int, int]:
 def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def cleanup_checkpoint_files(paths: List[str], rank: int = 0):
+    """Remove no-longer-needed checkpoints without failing the run."""
+    if rank != 0:
+        return
+
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            os.remove(path)
+            print(f"Removed checkpoint: {path}")
+        except OSError as exc:
+            print(f"Failed to remove checkpoint {path}: {exc}")
 
 
 def get_model(model):
@@ -703,13 +723,20 @@ def run_single_experiment(
     run_dir = os.path.join(base_save_dir, f"shot_{shot_name}", f"run_{run_id:02d}")
     run_metrics_path = os.path.join(run_dir, "run_metrics.json")
     support_info_path = os.path.join(run_dir, "fewshot_indices.json")
+    phase1_ckpt_path = os.path.join(run_dir, "phase1_warmup.pt")
+    phase2_ckpt_path = os.path.join(run_dir, "phase2_last.pt")
 
     if rank == 0:
         os.makedirs(run_dir, exist_ok=True)
     if world_size > 1:
         dist.barrier()
 
-    completed_run_exists_rank0 = args.resume and rank == 0 and os.path.exists(run_metrics_path)
+    completed_run_exists_rank0 = (
+        args.resume
+        and rank == 0
+        and os.path.exists(run_metrics_path)
+        and (args.cleanup_checkpoints or os.path.exists(phase2_ckpt_path))
+    )
     completed_run_exists = broadcast_object_from_rank0(
         completed_run_exists_rank0 if rank == 0 else None,
         world_size,
@@ -878,7 +905,7 @@ def run_single_experiment(
     if rank == 0:
         underlying = get_model(model)
         underlying.load_checkpoint(
-            checkpoint_path=os.path.join(run_dir, "phase2_last.pt"),
+            checkpoint_path=phase2_ckpt_path,
             device=device,
         )
         test_results = evaluate(
@@ -930,6 +957,12 @@ def run_single_experiment(
                 },
                 f,
                 indent=2,
+            )
+
+        if args.cleanup_checkpoints:
+            cleanup_checkpoint_files(
+                [phase1_ckpt_path, phase2_ckpt_path],
+                rank=rank,
             )
 
         print(
