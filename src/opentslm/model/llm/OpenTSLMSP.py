@@ -597,6 +597,7 @@ class OpenTSLMSP(TimeSeriesLLM):
             "vit_mix_layers": None,
             "vit_patch_size": 16,
             "vit_stride": 0.5,
+            "vision_2d_mode": "legacy_unfold",
             "vit_truncate_to_feature_layer": True,
             "vit_num_hidden_layers": None,
             "projector_type": "mlp",

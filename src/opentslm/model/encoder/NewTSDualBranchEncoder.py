@@ -48,6 +48,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         vit_mix_layers: Optional[Sequence[int]] = None,
         vit_patch_size: int = 16,
         vit_stride: float = 0.5,
+        vision_2d_mode: str = "legacy_unfold",
         vit_truncate_to_feature_layer: bool = True,
         vit_num_hidden_layers: Optional[int] = None,
         projector_type: str = "mlp",
@@ -151,6 +152,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
                 mix_layers=vit_mix_layers,
                 ts_patch_size=vit_patch_size,
                 ts_stride=vit_stride,
+                vision_2d_mode=vision_2d_mode,
                 truncate_to_feature_layer=vit_truncate_to_feature_layer,
                 num_hidden_layers=vit_num_hidden_layers,
                 device=device,
@@ -304,6 +306,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
                     "vit_mix_layers": list(self.vision_encoder.mix_layers),
                     "vit_patch_size": self.vision_encoder.ts_patch_size,
                     "vit_stride": self.vision_encoder.ts_stride,
+                    "vision_2d_mode": self.vision_encoder.vision_2d_mode,
                     "vit_truncate_to_feature_layer": self.vision_encoder.truncate_to_feature_layer,
                     "vit_num_hidden_layers": self.vision_encoder.requested_num_hidden_layers,
                 }

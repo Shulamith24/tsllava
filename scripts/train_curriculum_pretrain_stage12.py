@@ -20,14 +20,15 @@ Compared with `train_curriculum_pretrain.py`, this version:
 - exports a slim `model_checkpoint.pt` after the final stage by default
 
 Example:
-    uv run torchrun --nrpoc_per_node=2 scripts/train_curriculum_pretrain_stage12.py \
+    uv run torchrun --nproc_per_node=2 scripts/train_curriculum_pretrain_stage12.py \
     --encoder_type newts_dual_branch \
     --branch_mode both \
     --batch_size 4 --eval_batch_size 4 --gradient_accumulation_steps 8 \
     --gradient_checkpointing \
     --run_name second \
     --vit_layer_idx 4   --vit_num_hidden_layers 4 \
-    --stages stage1_mcq,stage2_captioning
+    --stages stage1_mcq,stage2_captioning \
+    --resume
 
 """
 import argparse

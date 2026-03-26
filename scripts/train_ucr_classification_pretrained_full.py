@@ -154,6 +154,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--vit_patch_size", type=int, default=16)
     parser.add_argument("--vit_stride", type=float, default=0.5)
+    parser.add_argument(
+        "--vision_2d_mode",
+        type=str,
+        default="reshape_serpentine",
+        choices=["reshape_serpentine", "adaptive_unfold", "legacy_unfold"],
+        help="NewTS图像分支的1D->2D图形化模式",
+    )
     parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
     parser.add_argument(
         "--vit_truncate_to_feature_layer",
@@ -240,6 +247,7 @@ def parse_args(argv=None):
     args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
     args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
     args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
+    args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
     return args
 
 
@@ -396,6 +404,7 @@ def hydrate_args_from_model_config(args, model_config: Dict[str, Any]):
             "vit_mix_layers",
             "vit_patch_size",
             "vit_stride",
+            "vision_2d_mode",
             "vit_truncate_to_feature_layer",
             "vit_num_hidden_layers",
             "projector_type",
@@ -596,6 +605,7 @@ def build_newts_dual_branch_config(args) -> Dict[str, Any]:
         "vit_mix_layers": list(args.vit_mix_layers) if args.vit_mix_layers else None,
         "vit_patch_size": args.vit_patch_size,
         "vit_stride": args.vit_stride,
+        "vision_2d_mode": args.vision_2d_mode,
         "vit_truncate_to_feature_layer": args.vit_truncate_to_feature_layer,
         "vit_num_hidden_layers": args.vit_num_hidden_layers,
         "projector_type": args.projector_type,
@@ -651,6 +661,8 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         merged_config["ts_positional_encoding"] = "sinusoidal"
         merged_config["freeze_ts_backbone"] = args.freeze_ts_backbone
         merged_config["freeze_vision_backbone"] = args.freeze_vision_backbone
+        if getattr(args, "vision_2d_mode_explicit", False):
+            merged_config["vision_2d_mode"] = args.vision_2d_mode
         merged_config["output_dim"] = ENCODER_OUTPUT_DIM
         init_kwargs["newts_dual_branch_config"] = merged_config
 
@@ -695,6 +707,12 @@ def build_model(args, device: str, rank: int):
             enable_lora=use_lora,
             checkpoint_path=getattr(args, "pretrained_model_checkpoint", None),
         )
+        if (
+            getattr(args, "vision_2d_mode_explicit", False)
+            and getattr(model, "encoder_type", None) == "newts_dual_branch"
+            and getattr(model.encoder, "vision_encoder", None) is not None
+        ):
+            model.encoder.vision_encoder.vision_2d_mode = args.vision_2d_mode
 
         if use_lora and (args.lora_r != 16 or args.lora_alpha != 32):
             model.disable_lora()
