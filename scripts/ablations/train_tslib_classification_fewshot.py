@@ -4,7 +4,19 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Unified few-shot UCR evaluation entrypoint for selected TSLib classifiers."""
+"""Unified few-shot UCR evaluation entrypoint for selected TSLib classifiers.
+example usage:
+uv run python scripts/experiments/ucr_batch/run_ucr_batch.py \
+  --experiment tslib_autoformer \
+  --protocol fewshot \
+  --job-name shots_1_2_5_10_runs3 \
+  --data-path data \
+  --shots 1,2,5,10 \
+  --num_runs 3 \
+  --cleanup_checkpoints \
+  --train_epochs 60 \
+"autoformer", "crossformer", "fedformer", "informer", "timesnet"
+"""
 
 from __future__ import annotations
 
