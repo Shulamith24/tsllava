@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
-from .common import ModelSpec, sort_shots
+from .common import ReportItemSpec, RunRef, sort_shots
 
 
 @dataclass(frozen=True)
@@ -21,9 +21,49 @@ class CoverageIssue:
     details: str
 
 
-def _read_ledger_rows(model: ModelSpec) -> list[dict[str, object]]:
+@dataclass(frozen=True)
+class ResultBundle:
+    spec: ReportItemSpec
+    run_ref: RunRef
+    frame: pd.DataFrame
+    available_datasets: tuple[str, ...]
+    available_shots: tuple[str, ...]
+
+
+def _load_batch_config(path: Path | None) -> dict[str, object] | None:
+    if path is None or not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"batch config must be a JSON object: {path}")
+    return payload
+
+
+def _build_run_ref(item: ReportItemSpec) -> RunRef:
+    batch_config = _load_batch_config(item.batch_config_path)
+    experiment = None
+    protocol = None
+    summary_kind = None
+    if batch_config:
+        experiment = str(batch_config.get("experiment", "")).strip() or None
+        protocol = str(batch_config.get("protocol", "")).strip() or None
+        summary_kind = str(batch_config.get("summary_kind", "")).strip() or None
+    return RunRef(
+        key=item.key,
+        results_txt=item.results_txt,
+        job_dir=item.job_dir,
+        batch_config_path=item.batch_config_path if item.batch_config_path and item.batch_config_path.exists() else None,
+        batch_config=batch_config,
+        experiment=experiment,
+        protocol=protocol,
+        summary_kind=summary_kind,
+    )
+
+
+def _read_ledger_rows(item: ReportItemSpec, run_ref: RunRef) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    with open(model.results_txt, "r", encoding="utf-8", newline="") as f:
+    with open(item.results_txt, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             dataset = str(row.get("dataset", "")).strip()
@@ -33,33 +73,92 @@ def _read_ledger_rows(model: ModelSpec) -> list[dict[str, object]]:
                 continue
             rows.append(
                 {
-                    "model_key": model.key,
-                    "model_label": model.label,
-                    "results_txt": str(model.results_txt),
-                    "primary": model.primary,
-                    "color": model.color or "",
-                    "marker": model.marker or "",
+                    "model_key": item.key,
+                    "model_label": item.label,
+                    "results_txt": str(item.results_txt),
+                    "job_dir": str(item.job_dir) if item.job_dir else "",
+                    "batch_config_path": str(run_ref.batch_config_path) if run_ref.batch_config_path else "",
+                    "experiment": run_ref.experiment or "",
+                    "protocol": run_ref.protocol or "",
+                    "summary_kind": run_ref.summary_kind or "",
+                    "primary": item.primary,
+                    "color": item.color or "",
+                    "marker": item.marker or "",
+                    "variant_tags": ",".join(item.variant_tags),
                     "dataset": dataset,
                     "shot": shot,
                     "accuracy": float(row.get("accuracy", "")),
-                    "accuracy_std": float(row.get("accuracy_std", "")) if str(row.get("accuracy_std", "")).strip() else pd.NA,
+                    "accuracy_std": (
+                        float(row.get("accuracy_std", ""))
+                        if str(row.get("accuracy_std", "")).strip()
+                        else pd.NA
+                    ),
                     "num_runs": str(row.get("num_runs", "")).strip(),
                 }
             )
     return rows
 
 
-def load_results_frame(models: tuple[ModelSpec, ...]) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
-    for model in models:
-        if not model.results_txt.exists():
-            raise FileNotFoundError(f"Missing results.txt for model {model.key}: {model.results_txt}")
-        records.extend(_read_ledger_rows(model))
+def load_result_bundles(items: tuple[ReportItemSpec, ...]) -> tuple[ResultBundle, ...]:
+    bundles: list[ResultBundle] = []
+    total_rows = 0
+    for item in items:
+        if not item.results_txt.exists():
+            raise FileNotFoundError(f"Missing results.txt for item {item.key}: {item.results_txt}")
+        run_ref = _build_run_ref(item)
+        rows = _read_ledger_rows(item, run_ref)
+        frame = pd.DataFrame.from_records(rows)
+        if frame.empty:
+            frame = pd.DataFrame(
+                columns=[
+                    "model_key",
+                    "model_label",
+                    "results_txt",
+                    "job_dir",
+                    "batch_config_path",
+                    "experiment",
+                    "protocol",
+                    "summary_kind",
+                    "primary",
+                    "color",
+                    "marker",
+                    "variant_tags",
+                    "dataset",
+                    "shot",
+                    "accuracy",
+                    "accuracy_std",
+                    "num_runs",
+                ]
+            )
+            available_datasets: tuple[str, ...] = tuple()
+            available_shots: tuple[str, ...] = tuple()
+        else:
+            frame["shot"] = frame["shot"].astype(str)
+            frame["dataset"] = frame["dataset"].astype(str)
+            frame["num_runs"] = frame["num_runs"].astype(str)
+            available_datasets = tuple(sorted(frame["dataset"].unique().tolist()))
+            available_shots = tuple(sort_shots(frame["shot"].unique().tolist()))
+            total_rows += len(frame)
 
-    if not records:
+        bundles.append(
+            ResultBundle(
+                spec=item,
+                run_ref=run_ref,
+                frame=frame,
+                available_datasets=available_datasets,
+                available_shots=available_shots,
+            )
+        )
+
+    if total_rows == 0:
         raise ValueError("No successful few-shot records were found in the configured results files")
+    return tuple(bundles)
 
-    frame = pd.DataFrame.from_records(records)
+
+def load_results_frame(items: tuple[ReportItemSpec, ...]) -> pd.DataFrame:
+    bundles = load_result_bundles(items)
+    frames = [bundle.frame for bundle in bundles if not bundle.frame.empty]
+    frame = pd.concat(frames, ignore_index=True)
     frame["shot"] = frame["shot"].astype(str)
     frame["dataset"] = frame["dataset"].astype(str)
     frame["num_runs"] = frame["num_runs"].astype(str)
@@ -71,19 +170,19 @@ def infer_shots(frame: pd.DataFrame) -> list[str]:
     for model_key, model_df in frame.groupby("model_key"):
         numeric_shots = {shot for shot in model_df["shot"].unique().tolist() if shot.isdigit()}
         if not numeric_shots:
-            raise ValueError(f"Unable to infer numeric few-shot set for model {model_key}")
+            raise ValueError(f"Unable to infer numeric few-shot set for item {model_key}")
         per_model.append(numeric_shots)
 
     shared = set.intersection(*per_model)
     if not shared:
-        raise ValueError("Unable to infer a shared numeric shot set across the configured models")
+        raise ValueError("Unable to infer a shared numeric shot set across the configured items")
     return sort_shots(list(shared))
 
 
 def analyze_coverage(
     *,
     frame: pd.DataFrame,
-    models: tuple[ModelSpec, ...],
+    items: tuple[ReportItemSpec, ...],
     expected_datasets: list[str],
     shots: list[str],
     coverage_mode: str,
@@ -91,16 +190,16 @@ def analyze_coverage(
     issues: list[CoverageIssue] = []
     duplicate_groups = frame.groupby(["model_key", "dataset", "shot"]).size().reset_index(name="count")
     duplicate_groups = duplicate_groups[duplicate_groups["count"] > 1]
-    model_by_key = {model.key: model for model in models}
+    item_by_key = {item.key: item for item in items}
 
     for row in duplicate_groups.itertuples(index=False):
-        model = model_by_key[row.model_key]
+        item = item_by_key[row.model_key]
         issues.append(
             CoverageIssue(
                 severity="error",
                 issue_type="duplicate_success",
-                model_key=model.key,
-                model_label=model.label,
+                model_key=item.key,
+                model_label=item.label,
                 dataset=row.dataset,
                 shot=row.shot,
                 details=f"{row.count} success rows share the same dataset/shot key",
@@ -113,13 +212,13 @@ def analyze_coverage(
     expected_dataset_set = set(expected_datasets)
     unexpected = deduped.loc[~deduped["dataset"].isin(expected_dataset_set), ["model_key", "dataset"]].drop_duplicates()
     for row in unexpected.itertuples(index=False):
-        model = model_by_key[row.model_key]
+        item = item_by_key[row.model_key]
         issues.append(
             CoverageIssue(
                 severity="warning",
                 issue_type="unexpected_dataset",
-                model_key=model.key,
-                model_label=model.label,
+                model_key=item.key,
+                model_label=item.label,
                 dataset=row.dataset,
                 shot="",
                 details="dataset is present in results.txt but not in dataset_source",
@@ -128,10 +227,10 @@ def analyze_coverage(
 
     deduped = deduped[deduped["dataset"].isin(expected_dataset_set)].copy()
 
-    for model in models:
-        model_df = deduped[deduped["model_key"] == model.key]
+    for item in items:
+        item_df = deduped[deduped["model_key"] == item.key]
         num_runs_sets = (
-            model_df.groupby("shot")["num_runs"]
+            item_df.groupby("shot")["num_runs"]
             .apply(lambda series: sorted({value for value in series.tolist() if value}))
             .to_dict()
         )
@@ -142,8 +241,8 @@ def analyze_coverage(
                     CoverageIssue(
                         severity="warning",
                         issue_type="mixed_num_runs",
-                        model_key=model.key,
-                        model_label=model.label,
+                        model_key=item.key,
+                        model_label=item.label,
                         dataset="",
                         shot=shot,
                         details="num_runs varies across datasets: " + ",".join(values),
@@ -151,14 +250,14 @@ def analyze_coverage(
                 )
 
     complete_by_model: dict[str, set[str]] = {}
-    for model in models:
+    for item in items:
         complete_datasets: set[str] = set()
-        model_df = deduped[deduped["model_key"] == model.key]
-        for dataset, dataset_df in model_df.groupby("dataset"):
+        item_df = deduped[deduped["model_key"] == item.key]
+        for dataset, dataset_df in item_df.groupby("dataset"):
             dataset_shots = set(dataset_df["shot"].tolist())
             if all(shot in dataset_shots for shot in shots):
                 complete_datasets.add(dataset)
-        complete_by_model[model.key] = complete_datasets
+        complete_by_model[item.key] = complete_datasets
 
     if coverage_mode == "strict":
         selected_datasets = list(expected_datasets)
@@ -170,10 +269,10 @@ def analyze_coverage(
 
     fatal_issues = bool(not duplicate_groups.empty)
     if coverage_mode == "strict":
-        for model in models:
+        for item in items:
             available_keys = {
                 (row.dataset, row.shot)
-                for row in deduped.loc[deduped["model_key"] == model.key, ["dataset", "shot"]].itertuples(index=False)
+                for row in deduped.loc[deduped["model_key"] == item.key, ["dataset", "shot"]].itertuples(index=False)
             }
             for dataset in expected_datasets:
                 for shot in shots:
@@ -182,8 +281,8 @@ def analyze_coverage(
                             CoverageIssue(
                                 severity="error",
                                 issue_type="missing_result",
-                                model_key=model.key,
-                                model_label=model.label,
+                                model_key=item.key,
+                                model_label=item.label,
                                 dataset=dataset,
                                 shot=shot,
                                 details="missing success record required by strict coverage",
@@ -191,20 +290,31 @@ def analyze_coverage(
                         )
                         fatal_issues = True
     else:
-        for model in models:
+        for item in items:
             for dataset in expected_datasets:
-                if dataset not in complete_by_model[model.key]:
-                    missing_shots = [shot for shot in shots if ((deduped["model_key"] == model.key) & (deduped["dataset"] == dataset) & (deduped["shot"] == shot)).sum() == 0]
+                if dataset not in complete_by_model[item.key]:
+                    missing_shots = [
+                        shot
+                        for shot in shots
+                        if (
+                            (
+                                (deduped["model_key"] == item.key)
+                                & (deduped["dataset"] == dataset)
+                                & (deduped["shot"] == shot)
+                            ).sum()
+                            == 0
+                        )
+                    ]
                     if missing_shots:
                         issues.append(
                             CoverageIssue(
                                 severity="warning",
                                 issue_type="excluded_from_intersection",
-                                model_key=model.key,
-                                model_label=model.label,
+                                model_key=item.key,
+                                model_label=item.label,
                                 dataset=dataset,
                                 shot=",".join(missing_shots),
-                                details="dataset excluded because not all shots are present for this model",
+                                details="dataset excluded because not all shots are present for this item",
                             )
                         )
 
@@ -283,3 +393,114 @@ def build_rank_summary(selected_frame: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return summary
+
+
+def build_ablation_summary(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    shots: list[str],
+    reference_key: str,
+) -> pd.DataFrame:
+    shot_means = (
+        selected_frame.groupby(["model_key", "shot"], observed=True)["accuracy"]
+        .mean()
+        .mul(100.0)
+        .reset_index(name="accuracy_mean_pct")
+    )
+    overall_means = (
+        selected_frame.groupby(["model_key"], observed=True)["accuracy"]
+        .mean()
+        .mul(100.0)
+        .reset_index(name="avg_accuracy_pct")
+    )
+
+    reference_frame = selected_frame[selected_frame["model_key"] == reference_key][["dataset", "shot", "accuracy"]].rename(
+        columns={"accuracy": "reference_accuracy"}
+    )
+    compared = selected_frame.merge(reference_frame, on=["dataset", "shot"], how="left")
+    compared["delta_vs_reference_pct"] = (compared["accuracy"] - compared["reference_accuracy"]) * 100.0
+
+    shot_lookup = {
+        (row.model_key, str(row.shot)): float(row.accuracy_mean_pct) for row in shot_means.itertuples(index=False)
+    }
+    overall_lookup = {row.model_key: float(row.avg_accuracy_pct) for row in overall_means.itertuples(index=False)}
+
+    rows: list[dict[str, object]] = []
+    for item in items:
+        row: dict[str, object] = {
+            "model_key": item.key,
+            "model_label": item.label,
+            "primary": item.primary,
+            "color": item.color or "",
+            "marker": item.marker or "",
+            "is_reference": item.key == reference_key,
+            "avg_accuracy_pct": overall_lookup[item.key],
+            "delta_vs_reference_pct": pd.NA,
+            "wins": pd.NA,
+            "ties": pd.NA,
+            "losses": pd.NA,
+            "win_tie_loss": "--",
+            "num_cells": int((selected_frame["model_key"] == item.key).sum()),
+            "num_datasets": int(
+                selected_frame.loc[selected_frame["model_key"] == item.key, "dataset"].astype(str).nunique()
+            ),
+        }
+        for shot in shots:
+            row[f"shot_{shot}_accuracy_pct"] = shot_lookup[(item.key, shot)]
+
+        if item.key != reference_key:
+            item_compared = compared[compared["model_key"] == item.key].copy()
+            deltas = item_compared["delta_vs_reference_pct"]
+            wins = int((deltas > 1e-12).sum())
+            ties = int((deltas.abs() <= 1e-12).sum())
+            losses = int((deltas < -1e-12).sum())
+            row["delta_vs_reference_pct"] = float(deltas.mean())
+            row["wins"] = wins
+            row["ties"] = ties
+            row["losses"] = losses
+            row["win_tie_loss"] = f"{wins}/{ties}/{losses}"
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_ablation_cell_deltas(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    reference_key: str,
+    datasets: list[str],
+    shots: list[str],
+) -> pd.DataFrame:
+    reference_label = next(item.label for item in items if item.key == reference_key)
+    pivot = selected_frame.pivot(index=["dataset", "shot"], columns="model_key", values="accuracy")
+
+    rows: list[dict[str, object]] = []
+    for dataset in datasets:
+        for shot in shots:
+            row_key = (dataset, shot)
+            if row_key not in pivot.index:
+                continue
+            row: dict[str, object] = {
+                "dataset": dataset,
+                "shot": shot,
+                "reference_key": reference_key,
+                "reference_label": reference_label,
+                "reference_accuracy_pct": float(pivot.loc[row_key, reference_key]) * 100.0,
+            }
+            reference_accuracy_pct = row["reference_accuracy_pct"]
+            for item in items:
+                accuracy_pct = float(pivot.loc[row_key, item.key]) * 100.0
+                row[f"{item.key}_accuracy_pct"] = accuracy_pct
+                if item.key != reference_key:
+                    row[f"{item.key}_delta_vs_reference_pct"] = accuracy_pct - reference_accuracy_pct
+            rows.append(row)
+
+    cells = pd.DataFrame(rows)
+    if cells.empty:
+        return cells
+    cells["shot"] = pd.Categorical(cells["shot"], categories=shots, ordered=True)
+    cells["dataset"] = pd.Categorical(cells["dataset"], categories=datasets, ordered=True)
+    return cells.sort_values(["dataset", "shot"]).reset_index(drop=True)

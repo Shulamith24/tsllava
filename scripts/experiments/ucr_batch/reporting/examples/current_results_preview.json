@@ -1,5 +1,7 @@
 {
   "report_name": "ucr_fewshot_preview_all_models",
+  "report_kind": "leaderboard",
+  "report_stage": "preview",
   "dataset_source": "data/UCRArchive_2018",
   "coverage_mode": "intersection",
   "shots": [
@@ -8,11 +10,11 @@
     "5",
     "10"
   ],
-  "models": [
+  "items": [
     {
       "key": "m2_pretrained",
       "label": "Ours",
-      "results_txt": "results/ucr_batches/m2_pretrained/fewshot/fewshot_second/results.txt",
+      "job_dir": "results/ucr_batches/m2_pretrained/fewshot/fewshot_second",
       "primary": true,
       "color": "#C44E52",
       "marker": "o"
@@ -20,35 +22,35 @@
     {
       "key": "tslib_autoformer",
       "label": "Autoformer",
-      "results_txt": "results/ucr_batches/tslib_autoformer/fewshot/shots_1_2_5_10_runs3/results.txt",
+      "job_dir": "results/ucr_batches/tslib_autoformer/fewshot/shots_1_2_5_10_runs3",
       "color": "#4C72B0",
       "marker": "s"
     },
     {
       "key": "tslib_crossformer",
       "label": "Crossformer",
-      "results_txt": "results/ucr_batches/tslib_crossformer/fewshot/shots_1_2_5_10_runs3/results.txt",
+      "job_dir": "results/ucr_batches/tslib_crossformer/fewshot/shots_1_2_5_10_runs3",
       "color": "#55A868",
       "marker": "^"
     },
     {
       "key": "tslib_informer",
       "label": "Informer",
-      "results_txt": "results/ucr_batches/tslib_informer/fewshot/shots_1_2_5_10_runs3/results.txt",
+      "job_dir": "results/ucr_batches/tslib_informer/fewshot/shots_1_2_5_10_runs3",
       "color": "#8172B2",
       "marker": "D"
     },
     {
       "key": "tslib_timesnet",
       "label": "TimesNet",
-      "results_txt": "results/ucr_batches/tslib_timesnet/fewshot/shots_1_2_5_10_runs3/results.txt",
+      "job_dir": "results/ucr_batches/tslib_timesnet/fewshot/shots_1_2_5_10_runs3",
       "color": "#CCB974",
       "marker": "P"
     },
     {
       "key": "onefitsall",
       "label": "OneFitsAll",
-      "results_txt": "results/ucr_batches/onefitsall/fewshot/first/results.txt",
+      "job_dir": "results/ucr_batches/onefitsall/fewshot/first",
       "color": "#64B5CD",
       "marker": "X"
     }

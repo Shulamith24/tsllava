@@ -32,7 +32,6 @@ def _format_metric(
     value: float,
     best: set[str],
     second: set[str],
-    higher_is_better: bool,
 ) -> str:
     rendered = f"{value:.2f}"
     if model_key in best:
@@ -40,6 +39,12 @@ def _format_metric(
     if model_key in second:
         return rf"\underline{{{rendered}}}"
     return rendered
+
+
+def _format_signed(value: float | object) -> str:
+    if pd.isna(value):
+        return "--"
+    return f"{float(value):+.2f}"
 
 
 def render_main_table(
@@ -77,7 +82,6 @@ def render_main_table(
                     value=float(pivot.loc[key, shot]),
                     best=best,
                     second=second,
-                    higher_is_better=True,
                 )
             )
         values.append(
@@ -86,7 +90,6 @@ def render_main_table(
                 value=float(avg_scores.loc[key]),
                 best=avg_highlights[0],
                 second=avg_highlights[1],
-                higher_is_better=True,
             )
         )
         values.append(
@@ -95,7 +98,6 @@ def render_main_table(
                 value=float(rank_lookup[key]),
                 best=rank_highlights[0],
                 second=rank_highlights[1],
-                higher_is_better=False,
             )
         )
         body_rows.append(" & ".join(values) + r" \\")
@@ -146,7 +148,6 @@ def render_appendix_table(
                     value=row_values[key],
                     best=best,
                     second=second,
-                    higher_is_better=True,
                 )
             )
         body_rows.append(" & ".join(rendered) + r" \\")
@@ -173,6 +174,163 @@ def render_appendix_table(
         r"\midrule",
         r"\endhead",
         rf"\midrule \multicolumn{{{len(model_order) + 1}}}{{r}}{{Continued on next page}} \\",
+        r"\endfoot",
+        r"\bottomrule",
+        r"\endlastfoot",
+        *body_rows,
+        r"\end{longtable}",
+        r"\endgroup",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_ablation_main_table(
+    *,
+    report_name: str,
+    family_label: str,
+    model_order: list[dict[str, str]],
+    ablation_summary: pd.DataFrame,
+    shots: list[str],
+    reference_key: str,
+    report_stage: str,
+    dataset_count: int,
+) -> str:
+    summary = ablation_summary.set_index("model_key")
+    shot_highlights = {
+        shot: _highlight_groups(
+            {key: float(summary.loc[key, f"shot_{shot}_accuracy_pct"]) for key in summary.index},
+            higher_is_better=True,
+        )
+        for shot in shots
+    }
+    avg_highlights = _highlight_groups(
+        {key: float(summary.loc[key, "avg_accuracy_pct"]) for key in summary.index},
+        higher_is_better=True,
+    )
+
+    columns = [f"{shot}-shot" for shot in shots] + ["Avg", "Delta vs Ref", "W/T/L"]
+    body_rows: list[str] = []
+    for model in model_order:
+        key = model["key"]
+        rendered = [latex_escape(model["label"])]
+        for shot in shots:
+            best, second = shot_highlights[shot]
+            rendered.append(
+                _format_metric(
+                    model_key=key,
+                    value=float(summary.loc[key, f"shot_{shot}_accuracy_pct"]),
+                    best=best,
+                    second=second,
+                )
+            )
+        rendered.append(
+            _format_metric(
+                model_key=key,
+                value=float(summary.loc[key, "avg_accuracy_pct"]),
+                best=avg_highlights[0],
+                second=avg_highlights[1],
+            )
+        )
+        if key == reference_key:
+            rendered.extend(["--", "--"])
+        else:
+            rendered.append(_format_signed(summary.loc[key, "delta_vs_reference_pct"]))
+            rendered.append(str(summary.loc[key, "win_tie_loss"]))
+        body_rows.append(" & ".join(rendered) + r" \\")
+
+    stage_note = ""
+    if report_stage == "preview":
+        stage_note = f" Preview uses the {dataset_count} shared datasets currently available."
+    label = slugify(report_name)
+    lines = [
+        "% Requires \\usepackage{booktabs}",
+        r"\begin{table*}[t]",
+        r"\centering",
+        rf"\caption{{Ablation results for {latex_escape(family_label)} on UCR few-shot classification (\%). Positive delta means improvement over the reference.{stage_note}}}",
+        rf"\label{{tab:{label}-ablation-main}}",
+        rf"\begin{{tabular}}{{l{'r' * len(columns)}}}",
+        r"\toprule",
+        "Variant & " + " & ".join(columns) + r" \\",
+        r"\midrule",
+        *body_rows,
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table*}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_ablation_appendix_table(
+    *,
+    report_name: str,
+    family_label: str,
+    shot: str,
+    datasets: list[str],
+    model_order: list[dict[str, str]],
+    reference_key: str,
+    cell_deltas: pd.DataFrame,
+) -> str:
+    reference_label = next(model["label"] for model in model_order if model["key"] == reference_key)
+    variant_models = [model for model in model_order if model["key"] != reference_key]
+    shot_df = cell_deltas[cell_deltas["shot"].astype(str) == shot].copy()
+    shot_df = shot_df.set_index("dataset").loc[datasets].reset_index()
+
+    body_rows: list[str] = []
+    for dataset in datasets:
+        dataset_row = shot_df[shot_df["dataset"].astype(str) == dataset].iloc[0]
+        accuracy_values = {
+            reference_key: float(dataset_row["reference_accuracy_pct"]),
+            **{
+                model["key"]: float(dataset_row[f"{model['key']}_accuracy_pct"])
+                for model in variant_models
+            },
+        }
+        best, second = _highlight_groups(accuracy_values, higher_is_better=True)
+        rendered = [
+            latex_escape(dataset),
+            _format_metric(
+                model_key=reference_key,
+                value=float(dataset_row["reference_accuracy_pct"]),
+                best=best,
+                second=second,
+            ),
+        ]
+        for model in variant_models:
+            key = model["key"]
+            rendered.append(
+                _format_metric(
+                    model_key=key,
+                    value=float(dataset_row[f"{key}_accuracy_pct"]),
+                    best=best,
+                    second=second,
+                )
+            )
+            rendered.append(_format_signed(dataset_row[f"{key}_delta_vs_reference_pct"]))
+        body_rows.append(" & ".join(rendered) + r" \\")
+
+    columns = ["Dataset", reference_label]
+    for model in variant_models:
+        columns.extend([model["label"], f"Delta vs {reference_label}"])
+
+    label = slugify(report_name)
+    caption = latex_escape(family_label)
+    lines = [
+        "% Requires \\usepackage{booktabs,longtable}",
+        r"\begingroup",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\small",
+        rf"\begin{{longtable}}{{l{'r' * (len(columns) - 1)}}}",
+        rf"\caption{{Per-dataset {shot}-shot ablation results (\%) for {caption}, with signed deltas against {latex_escape(reference_label)}.}}\label{{tab:{label}-ablation-shot-{shot}}}\\",
+        r"\toprule",
+        " & ".join(latex_escape(column) for column in columns) + r" \\",
+        r"\midrule",
+        r"\endfirsthead",
+        rf"\caption[]{{Per-dataset {shot}-shot ablation results (\%) for {caption} (continued).}}\\",
+        r"\toprule",
+        " & ".join(latex_escape(column) for column in columns) + r" \\",
+        r"\midrule",
+        r"\endhead",
+        rf"\midrule \multicolumn{{{len(columns)}}}{{r}}{{Continued on next page}} \\",
         r"\endfoot",
         r"\bottomrule",
         r"\endlastfoot",

@@ -673,6 +673,130 @@ def save_json(path: str, payload: Dict[str, Any]):
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+def effective_config_snapshot(args, world_size: int) -> Dict[str, Any]:
+    snapshot = dict(vars(args))
+    snapshot["effective_pad_mode"] = resolve_effective_pad_mode(args)
+    snapshot["world_size"] = int(world_size)
+    snapshot["effective_global_batch_size"] = (
+        int(world_size) * int(args.batch_size) * int(args.gradient_accumulation_steps)
+    )
+    return snapshot
+
+
+def save_launch_configs(run_dir: str, args, world_size: int):
+    latest_config = dict(vars(args))
+    effective_config = effective_config_snapshot(args, world_size)
+    save_json(os.path.join(run_dir, "config.json"), latest_config)
+    save_json(os.path.join(run_dir, "effective_config.json"), effective_config)
+
+    launch_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    launch_dir = os.path.join(run_dir, "launch_history")
+    save_json(os.path.join(launch_dir, f"{launch_stamp}.json"), effective_config)
+
+
+def _normalize_comparable_arg_value(value):
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def collect_checkpoint_arg_mismatches(saved_args: Optional[Dict[str, Any]], current_args) -> List[Tuple[str, Any, Any]]:
+    if not saved_args:
+        return []
+
+    current = vars(current_args)
+    keys_to_compare = [
+        "stages",
+        "resume",
+        "llm_id",
+        "encoder_type",
+        "encoder_pretrained",
+        "random_init_llm",
+        "gradient_checkpointing",
+        "freeze_encoder",
+        "use_lora",
+        "lora_r",
+        "lora_alpha",
+        "lr_lora",
+        "tslanet_patch_size",
+        "branch_mode",
+        "patch_length",
+        "stride",
+        "d_model",
+        "num_attention_heads",
+        "num_hidden_layers",
+        "ffn_dim",
+        "dropout",
+        "vit_model_name",
+        "vit_feature_mode",
+        "vit_layer_idx",
+        "vit_mix_layers",
+        "vit_patch_size",
+        "vit_stride",
+        "vit_truncate_to_feature_layer",
+        "vit_num_hidden_layers",
+        "projector_type",
+        "projector_dropout",
+        "use_pma",
+        "aggregator_layers",
+        "aggregator_hidden_size",
+        "aggregator_num_heads",
+        "aggregator_ffn_dim",
+        "aggregator_num_queries",
+        "aggregator_query_mode",
+        "aggregator_fusion_mode",
+        "aggregator_gate_type",
+        "aggregator_fuse_layers",
+        "freeze_ts_backbone",
+        "freeze_vision_backbone",
+        "stage1_epochs",
+        "stage2_epochs",
+        "stage1_lr_encoder",
+        "stage1_lr_projector",
+        "stage2_lr_encoder",
+        "stage2_lr_projector",
+        "batch_size",
+        "eval_batch_size",
+        "gradient_accumulation_steps",
+        "weight_decay",
+        "grad_clip",
+        "warmup_ratio",
+        "early_stop",
+        "pad_mode",
+        "pad_mode_explicit",
+        "max_new_tokens",
+        "seed",
+    ]
+    mismatches: List[Tuple[str, Any, Any]] = []
+    for key in keys_to_compare:
+        saved_value = _normalize_comparable_arg_value(saved_args.get(key))
+        current_value = _normalize_comparable_arg_value(current.get(key))
+        if saved_value != current_value:
+            mismatches.append((key, saved_value, current_value))
+    return mismatches
+
+
+def warn_on_checkpoint_arg_mismatch(
+    *,
+    checkpoint_args: Optional[Dict[str, Any]],
+    current_args,
+    context: str,
+    rank: int,
+):
+    if rank != 0:
+        return
+
+    mismatches = collect_checkpoint_arg_mismatches(checkpoint_args, current_args)
+    if not mismatches:
+        return
+
+    print(f"⚠️ Checkpoint args mismatch while {context}")
+    for key, saved_value, current_value in mismatches[:12]:
+        print(f"   {key}: checkpoint={saved_value!r}, current={current_value!r}")
+    if len(mismatches) > 12:
+        print(f"   ... and {len(mismatches) - 12} more differences")
+
+
 def save_checkpoint(
     model,
     optimizer,
@@ -844,6 +968,7 @@ def load_previous_stage_if_needed(
     device: str,
     rank: int,
     already_completed: set[str],
+    current_args,
 ):
     stage_index = STAGE_ORDER.index(stage_name)
     if stage_index == 0:
@@ -862,6 +987,13 @@ def load_previous_stage_if_needed(
     checkpoint = load_checkpoint(model, checkpoint_path, device=device)
     if checkpoint is None:
         raise RuntimeError(f"Failed to load previous stage checkpoint: {checkpoint_path}")
+
+    warn_on_checkpoint_arg_mismatch(
+        checkpoint_args=checkpoint.get("args"),
+        current_args=current_args,
+        context=f"loading previous stage '{previous_stage}' for '{stage_name}'",
+        rank=rank,
+    )
 
     if rank == 0:
         print(f"📂 Loaded previous stage checkpoint from {checkpoint_path}")
@@ -983,6 +1115,12 @@ def train_stage(
             scheduler=scheduler,
         )
         if checkpoint is not None:
+            warn_on_checkpoint_arg_mismatch(
+                checkpoint_args=checkpoint.get("args"),
+                current_args=args,
+                context=f"resuming stage '{stage_name}'",
+                rank=rank,
+            )
             start_epoch = int(checkpoint.get("epoch", 0)) + 1
             best_val_loss = float(checkpoint.get("val_loss", float("inf")))
             if rank == 0:
@@ -1131,7 +1269,7 @@ def main():
             print("=" * 72)
 
             os.makedirs(run_dir, exist_ok=True)
-            save_json(os.path.join(run_dir, "config.json"), vars(args))
+            save_launch_configs(run_dir, args, world_size)
 
         if dist.is_initialized():
             dist.barrier()
@@ -1153,6 +1291,7 @@ def main():
                 device=device,
                 rank=rank,
                 already_completed=completed_stages,
+                current_args=args,
             )
             stage_results = train_stage(
                 stage_name=stage_name,
