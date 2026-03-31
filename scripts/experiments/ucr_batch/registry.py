@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_FEWSHOT_SHOTS = "1,2,5,10,full"
+DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS = "1,2,5,10"
 BLOCKED_FORWARD_ARGS = ["--dataset", "--data_dir", "--data_path", "--save_dir", "--protocol"]
 
 
@@ -200,6 +201,46 @@ REGISTRY: Dict[Tuple[str, str], ExperimentEntry] = {
         add_protocol_flag=False,
         supports_inner_resume=True,
         default_shots=DEFAULT_FEWSHOT_SHOTS,
+    ),
+    ("1nn_ed", "fewshot"): _entry(
+        "1nn_ed",
+        "fewshot",
+        "scripts/ablations/train_ucr_distance_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--metric", "ed"),
+    ),
+    ("1nn_dtw", "fewshot"): _entry(
+        "1nn_dtw",
+        "fewshot",
+        "scripts/ablations/train_ucr_distance_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--metric", "dtw"),
+    ),
+    ("resnet", "fewshot"): _entry(
+        "resnet",
+        "fewshot",
+        "scripts/ablations/train_ucr_simple_backbone_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "resnet"),
+    ),
+    ("tapnet", "fewshot"): _entry(
+        "tapnet",
+        "fewshot",
+        "scripts/ablations/train_ucr_simple_backbone_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "tapnet"),
     ),
 }
 

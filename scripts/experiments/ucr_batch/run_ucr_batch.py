@@ -11,6 +11,28 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+"""
+#onefitsall fewshot example:
+python scripts/experiments/ucr_batch/run_ucr_batch.py \
+    --experiment onefitsall \
+    --protocol fewshot \
+    --job-name my_onefitsall_fewshot \
+    --shots "1,2,5,10" \
+    --num_runs 5 \
+    --epochs 60 \
+    --cleanup_checkpoints
+tslib_former example:
+export CUDA_VISIBLE_DEVICES=0 uv run python scripts/experiments/ucr_batch/run_ucr_batch.py \
+    --experiment tslib_crossformer \
+    --protocol fewshot \
+    --job-name my_timesnet_fewshot \
+    --shots "1,2,5,10" \
+    --num_runs 5
+
+
+"""
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 

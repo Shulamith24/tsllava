@@ -3,7 +3,7 @@
 #   --protocol fewshot \
 #   --shots 1,2,5,10 \
 #   --num_runs 5 \
-#   --epochs 100 \
+#   --epochs 60 \
 #   --lr 1e-4 \
 #   --gpu 0 \
 #   --job-name fewshot

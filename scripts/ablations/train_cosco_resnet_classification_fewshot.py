@@ -21,6 +21,7 @@ import argparse
 import datetime
 import importlib.util
 import json
+import os
 import random
 import sys
 from collections import defaultdict
@@ -33,7 +34,6 @@ from torch.utils.data import DataLoader, Dataset
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
-COSCO_ROOT = PROJECT_ROOT / "temp" / "COSCO-main"
 DEFAULT_DATA_PATH = str(PROJECT_ROOT / "data")
 DEFAULT_FEWSHOT_SAVE_DIR = "results/ablations/cosco_resnet_fewshot"
 
@@ -62,25 +62,96 @@ def _load_python_module(module_name: str, file_path: Path):
     return module
 
 
-_COSCO_RESNET_MODULE = _load_python_module(
-    "cosco_resnet_module",
-    COSCO_ROOT / "Baselines" / "ResNet.py",
-)
-_COSCO_PROTO_MODULE = _load_python_module(
-    "cosco_proto_module",
-    COSCO_ROOT / "Prototypical_Loss.py",
-)
-_COSCO_SAM_MODULE = _load_python_module(
-    "cosco_sam_module",
-    COSCO_ROOT / "SAM.py",
-)
+COSCO_ROOT: Optional[Path] = None
+ResNet = None
+enable_running_stats = None
+disable_running_stats = None
+PrototypicalLoss = None
+prototypical_testing = None
+SAM = None
 
-ResNet = _COSCO_RESNET_MODULE.ResNet
-enable_running_stats = _COSCO_RESNET_MODULE.enable_running_stats
-disable_running_stats = _COSCO_RESNET_MODULE.disable_running_stats
-PrototypicalLoss = _COSCO_PROTO_MODULE.PrototypicalLoss
-prototypical_testing = _COSCO_PROTO_MODULE.prototypical_testing
-SAM = _COSCO_SAM_MODULE.SAM
+
+def _is_valid_cosco_root(path: Path) -> bool:
+    required_files = (
+        path / "Baselines" / "ResNet.py",
+        path / "Prototypical_Loss.py",
+        path / "SAM.py",
+    )
+    return all(file_path.is_file() for file_path in required_files)
+
+
+def resolve_cosco_root(explicit_root: Optional[str] = None) -> Path:
+    candidates: List[Path] = []
+    if explicit_root:
+        candidates.append(Path(explicit_root))
+
+    env_root = os.environ.get("TSLLAVA_COSCO_ROOT")
+    if env_root:
+        candidates.append(Path(env_root))
+
+    candidates.extend(
+        [
+            PROJECT_ROOT / "temp" / "COSCO-main",
+            PROJECT_ROOT / "temp" / "COSCO",
+            PROJECT_ROOT / "temp" / "cosco",
+        ]
+    )
+
+    temp_root = PROJECT_ROOT / "temp"
+    if temp_root.is_dir():
+        for candidate in sorted(temp_root.iterdir()):
+            if candidate.is_dir():
+                candidates.append(candidate)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if _is_valid_cosco_root(resolved):
+            return resolved
+
+    searched = ", ".join(str(path) for path in seen) if seen else "<none>"
+    raise FileNotFoundError(
+        "Unable to locate a COSCO checkout relative to the repo. "
+        "Pass --cosco_root or set TSLLAVA_COSCO_ROOT. "
+        f"Searched: {searched}"
+    )
+
+
+def ensure_cosco_components_loaded(cosco_root: Path) -> None:
+    global COSCO_ROOT
+    global ResNet
+    global enable_running_stats
+    global disable_running_stats
+    global PrototypicalLoss
+    global prototypical_testing
+    global SAM
+
+    if ResNet is not None and COSCO_ROOT == cosco_root:
+        return
+
+    resnet_module = _load_python_module(
+        f"cosco_resnet_module_{abs(hash(str(cosco_root)))}",
+        cosco_root / "Baselines" / "ResNet.py",
+    )
+    proto_module = _load_python_module(
+        f"cosco_proto_module_{abs(hash(str(cosco_root)))}",
+        cosco_root / "Prototypical_Loss.py",
+    )
+    sam_module = _load_python_module(
+        f"cosco_sam_module_{abs(hash(str(cosco_root)))}",
+        cosco_root / "SAM.py",
+    )
+
+    COSCO_ROOT = cosco_root
+    ResNet = resnet_module.ResNet
+    enable_running_stats = resnet_module.enable_running_stats
+    disable_running_stats = resnet_module.disable_running_stats
+    PrototypicalLoss = proto_module.PrototypicalLoss
+    prototypical_testing = proto_module.prototypical_testing
+    SAM = sam_module.SAM
 
 
 def cli_flag_was_provided(argv: Optional[Sequence[str]], flag_name: str) -> bool:
@@ -106,6 +177,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=str,
         default=DEFAULT_DATA_PATH,
         help="Base path containing UCRArchive_2018. Defaults to the repo's ./data directory.",
+    )
+    parser.add_argument(
+        "--cosco_root",
+        type=str,
+        default=None,
+        help="Optional path to the COSCO checkout. Defaults to auto-discovery under ./temp.",
     )
     parser.add_argument(
         "--normalize",
@@ -626,6 +703,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     shots = parse_shots(args.shots)
     num_runs = max(1, args.num_runs)
 
+    cosco_root = resolve_cosco_root(args.cosco_root)
+    ensure_cosco_components_loaded(cosco_root)
+
     set_seed(args.seed)
     device = resolve_device(args.device)
 
@@ -658,7 +738,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "series_length": data_bundle["series_length"],
             "label_to_index": {str(label): index for label, index in data_bundle["label_to_index"].items()},
             "index_to_label": {str(index): label for index, label in index_to_label.items()},
-            "temp_source": str(COSCO_ROOT),
+            "temp_source": str(cosco_root),
         },
     )
 
@@ -668,6 +748,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print(f"time: {datetime.datetime.now()}")
     print(f"dataset: {args.dataset}")
     print(f"data_source: {Path(args.data_path).resolve()}")
+    print(f"cosco_source: {cosco_root}")
     print(f"protocol: {args.protocol}")
     print(f"shots: {[shot_to_name(shot) for shot in shots]}")
     print(f"way: {args.way if args.way is not None else 'all'}")
