@@ -134,12 +134,136 @@ class SimpleTapNetClassifier(nn.Module):
         return logits, embedding
 
 
+class InceptionModule(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_channels: int,
+        nb_filters: int,
+        kernel_size: int,
+        use_bottleneck: bool,
+        bottleneck_size: int = 32,
+    ):
+        super().__init__()
+        self.use_bottleneck = use_bottleneck and input_channels > 1
+
+        if self.use_bottleneck:
+            self.bottleneck = nn.Conv1d(input_channels, bottleneck_size, kernel_size=1, bias=False)
+            conv_input_channels = bottleneck_size
+        else:
+            self.bottleneck = nn.Identity()
+            conv_input_channels = input_channels
+
+        reduced_kernel_size = max(1, int(kernel_size) - 1)
+        kernel_sizes = [max(1, reduced_kernel_size // (2**i)) for i in range(3)]
+        self.conv_branches = nn.ModuleList(
+            [
+                nn.Conv1d(
+                    conv_input_channels,
+                    nb_filters,
+                    kernel_size=branch_kernel_size,
+                    padding="same",
+                    bias=False,
+                )
+                for branch_kernel_size in kernel_sizes
+            ]
+        )
+        self.max_pool_branch = nn.Sequential(
+            nn.MaxPool1d(kernel_size=3, stride=1, padding=1),
+            nn.Conv1d(input_channels, nb_filters, kernel_size=1, bias=False),
+        )
+        self.norm = nn.BatchNorm1d(nb_filters * 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        inception_input = self.bottleneck(x)
+        branches = [conv(inception_input) for conv in self.conv_branches]
+        branches.append(self.max_pool_branch(x))
+        merged = torch.cat(branches, dim=1)
+        return F.relu(self.norm(merged))
+
+
+class InceptionResidualShortcut(nn.Module):
+    def __init__(self, input_channels: int, output_channels: int):
+        super().__init__()
+        self.proj = nn.Conv1d(input_channels, output_channels, kernel_size=1, bias=False)
+        self.norm = nn.BatchNorm1d(output_channels)
+
+    def forward(self, residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        projected = self.norm(self.proj(residual))
+        return F.relu(projected + x)
+
+
+class InceptionTimeClassifier(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_channels: int,
+        num_classes: int,
+        nb_filters: int = 32,
+        depth: int = 6,
+        kernel_size: int = 41,
+        use_residual: bool = True,
+        use_bottleneck: bool = True,
+        bottleneck_size: int = 32,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.use_residual = use_residual
+
+        modules = []
+        shortcuts = []
+        current_channels = input_channels
+        output_channels = nb_filters * 4
+
+        for depth_idx in range(depth):
+            modules.append(
+                InceptionModule(
+                    input_channels=current_channels,
+                    nb_filters=nb_filters,
+                    kernel_size=kernel_size,
+                    use_bottleneck=use_bottleneck,
+                    bottleneck_size=bottleneck_size,
+                )
+            )
+            current_channels = output_channels
+            if self.use_residual and depth_idx % 3 == 2:
+                shortcut_in_channels = input_channels if depth_idx == 2 else output_channels
+                shortcuts.append(InceptionResidualShortcut(shortcut_in_channels, output_channels))
+
+        self.inception_blocks = nn.ModuleList(modules)
+        self.shortcuts = nn.ModuleList(shortcuts)
+        self.head_dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(output_channels, num_classes)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        residual_input = x
+        shortcut_idx = 0
+
+        for depth_idx, block in enumerate(self.inception_blocks):
+            x = block(x)
+            if self.use_residual and depth_idx % 3 == 2:
+                x = self.shortcuts[shortcut_idx](residual_input, x)
+                residual_input = x
+                shortcut_idx += 1
+
+        embedding = F.adaptive_avg_pool1d(x, output_size=1).squeeze(-1)
+        embedding = self.head_dropout(embedding)
+        logits = self.classifier(embedding)
+        return logits, embedding
+
+
 def build_simple_backbone(model_name: str, *, input_channels: int, num_classes: int, dropout: float) -> nn.Module:
     normalized = model_name.strip().lower()
     if normalized == "resnet":
         return SimpleResNetClassifier(input_channels=input_channels, num_classes=num_classes)
     if normalized == "tapnet":
         return SimpleTapNetClassifier(
+            input_channels=input_channels,
+            num_classes=num_classes,
+            dropout=dropout,
+        )
+    if normalized in {"inceptiontime", "inception_time", "inception"}:
+        return InceptionTimeClassifier(
             input_channels=input_channels,
             num_classes=num_classes,
             dropout=dropout,

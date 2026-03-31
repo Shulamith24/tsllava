@@ -90,7 +90,7 @@ class UCRBatchBaselineTest(unittest.TestCase):
 
     def test_registry_contains_new_fewshot_baselines(self) -> None:
         experiments = list_experiments()
-        for experiment in ("1nn_ed", "1nn_dtw", "resnet", "tapnet"):
+        for experiment in ("1nn_ed", "1nn_dtw", "resnet", "tapnet", "inceptiontime"):
             self.assertIn(experiment, experiments)
 
         entry_ed = get_entry("1nn_ed", "fewshot")
@@ -107,6 +107,10 @@ class UCRBatchBaselineTest(unittest.TestCase):
 
         entry_tapnet = get_entry("tapnet", "fewshot")
         self.assertEqual(entry_tapnet.fixed_args, ("--model", "tapnet"))
+
+        entry_inceptiontime = get_entry("inceptiontime", "fewshot")
+        self.assertEqual(entry_inceptiontime.fixed_args, ("--model", "inceptiontime"))
+        self.assertTrue(entry_inceptiontime.supports_inner_resume)
 
     def test_smoke_runs_write_fewshot_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +166,22 @@ class UCRBatchBaselineTest(unittest.TestCase):
                         "4",
                         "--dropout",
                         "0.0",
+                    ],
+                ),
+                (
+                    "inceptiontime",
+                    neural_main,
+                    [
+                        "--model",
+                        "inceptiontime",
+                        "--device",
+                        "cpu",
+                        "--epochs",
+                        "1",
+                        "--batch_size",
+                        "2",
+                        "--eval_batch_size",
+                        "4",
                     ],
                 ),
             ]

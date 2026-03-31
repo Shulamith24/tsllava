@@ -26,6 +26,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_FEWSHOT_SAVE_DIRS = {
     "resnet": "results/ablations/ucr_resnet_fewshot",
     "tapnet": "results/ablations/ucr_tapnet_fewshot",
+    "inceptiontime": "results/ablations/ucr_inceptiontime_fewshot",
 }
 
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -66,6 +67,7 @@ class ModelDefaults:
 MODEL_DEFAULTS: Dict[str, ModelDefaults] = {
     "resnet": ModelDefaults(epochs=100, batch_size=64, lr=1e-3, weight_decay=4e-3, dropout=0.0),
     "tapnet": ModelDefaults(epochs=100, batch_size=16, lr=1e-3, weight_decay=1e-4, dropout=0.5),
+    "inceptiontime": ModelDefaults(epochs=100, batch_size=16, lr=1e-3, weight_decay=0.0, dropout=0.0),
 }
 
 
@@ -80,11 +82,27 @@ class ResolvedHParams:
     grad_clip: float
 
 
+def normalize_model_name(model_name: str) -> str:
+    normalized = model_name.strip().lower().replace("_", "")
+    alias_to_name = {
+        "resnet": "resnet",
+        "tapnet": "tapnet",
+        "inception": "inceptiontime",
+        "inceptiontime": "inceptiontime",
+    }
+    if normalized not in alias_to_name:
+        raise ValueError(
+            "Unsupported model. Expected one of: resnet, tapnet, inceptiontime "
+            f"(got {model_name!r})."
+        )
+    return alias_to_name[normalized]
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(description="Few-shot UCR classification with local PyTorch baselines")
 
-    parser.add_argument("--model", type=str, required=True, choices=["resnet", "tapnet"])
+    parser.add_argument("--model", type=str, required=True, help="Backbone name: resnet, tapnet, inceptiontime")
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot"], help=argparse.SUPPRESS)
     parser.add_argument("--shots", type=str, default="1,2,5,10,full")
     parser.add_argument("--way", type=int, default=None)
@@ -120,6 +138,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+    args.model = normalize_model_name(args.model)
     args.save_dir_explicit = cli_flag_was_provided(provided_argv, "--save_dir")
     if args.save_dir is None:
         args.save_dir = DEFAULT_FEWSHOT_SAVE_DIRS[args.model]

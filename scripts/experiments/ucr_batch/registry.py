@@ -242,6 +242,16 @@ REGISTRY: Dict[Tuple[str, str], ExperimentEntry] = {
         default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
         fixed_args=("--model", "tapnet"),
     ),
+    ("inceptiontime", "fewshot"): _entry(
+        "inceptiontime",
+        "fewshot",
+        "scripts/ablations/train_ucr_simple_backbone_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--model", "inceptiontime"),
+    ),
 }
 
 

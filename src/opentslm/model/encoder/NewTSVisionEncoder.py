@@ -76,137 +76,35 @@ def load_vision_backbone(
     return processor, vit, hidden_dim, num_patches, image_size, num_layers
 
 
-class NewTSVisionEncoder(nn.Module):
+class NewTSPseudoImageTransform:
     """
-    TiViT-style time-series-to-image encoder with optional feature-layer truncation.
+    Standalone 1D->2D time-series image transform used by the NewTS vision branch.
 
-    Feature layers follow the original 1-based indexing used in ``temp/newts``:
-    ``layer_idx=4`` means the output after encoder block 4.
+    This helper is intentionally lightweight so visualization scripts can reuse
+    the exact same pseudo-image construction without loading a vision backbone.
     """
 
     def __init__(
         self,
-        model_name: str = "facebook/dinov2-base",
-        layer_idx: int = 4,
-        feature_mode: str = "single",
-        mix_layers: Optional[Sequence[int]] = None,
+        *,
         ts_patch_size: int = 16,
         ts_stride: float = 0.5,
         vision_2d_mode: str = "legacy_unfold",
-        image_size: Optional[int] = None,
-        return_cls_token: bool = False,
-        truncate_to_feature_layer: bool = True,
-        num_hidden_layers: Optional[int] = None,
-        device: str = "cuda",
+        image_size: int = 224,
     ):
-        super().__init__()
-
-        self.model_name = model_name
-        self.layer_idx = int(layer_idx)
-        self.feature_mode = feature_mode
-        self.mix_layers = tuple(int(layer) for layer in mix_layers) if mix_layers else tuple()
         self.ts_patch_size = int(ts_patch_size)
         self.ts_stride = float(ts_stride)
         self.vision_2d_mode = vision_2d_mode
-        self.return_cls_token = return_cls_token
-        self.truncate_to_feature_layer = bool(truncate_to_feature_layer)
-        self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(
-            num_hidden_layers=num_hidden_layers
-        )
-        self.device = device
+        self.image_size = int(image_size)
 
+        if self.ts_patch_size <= 0:
+            raise ValueError("ts_patch_size must be positive")
+        if not (0.0 < self.ts_stride <= 1.0):
+            raise ValueError(f"ts_stride must be in (0, 1], got {self.ts_stride}")
+        if self.image_size <= 0:
+            raise ValueError("image_size must be positive")
         if self.vision_2d_mode not in {"legacy_unfold", "adaptive_unfold", "reshape_serpentine"}:
             raise ValueError(f"Unsupported vision_2d_mode: {self.vision_2d_mode}")
-
-        (
-            self.processor,
-            self.vit,
-            self.hidden_dim,
-            self.num_vit_patches,
-            backbone_image_size,
-            self.num_hidden_layers,
-        ) = load_vision_backbone(
-            model_name,
-            num_hidden_layers=self.requested_num_hidden_layers,
-        )
-
-        self.image_size = int(image_size or backbone_image_size)
-        self.mix_logits: Optional[nn.Parameter] = None
-        self._validate_feature_config()
-
-    def _resolve_requested_num_hidden_layers(
-        self,
-        *,
-        num_hidden_layers: Optional[int],
-    ) -> Optional[int]:
-        if num_hidden_layers is not None and num_hidden_layers <= 0:
-            raise ValueError("num_hidden_layers must be positive when provided")
-
-        if self.feature_mode == "single":
-            if self.layer_idx <= 0:
-                raise ValueError("single feature_mode requires a positive 1-based layer_idx")
-            target_depth = self.layer_idx
-        elif self.feature_mode == "scalar_mix":
-            layers = self.mix_layers or (4, 8, 12)
-            target_depth = max(int(layer) for layer in layers)
-        elif self.feature_mode == "last":
-            target_depth = None
-        else:
-            raise ValueError(
-                f"feature_mode must be one of ['last', 'single', 'scalar_mix'], got {self.feature_mode}"
-            )
-
-        if num_hidden_layers is not None and target_depth is not None and num_hidden_layers < target_depth:
-            raise ValueError(
-                "num_hidden_layers must be greater than or equal to the requested feature layer depth"
-            )
-
-        if num_hidden_layers is not None:
-            return int(num_hidden_layers)
-
-        if not self.truncate_to_feature_layer:
-            return None
-
-        return target_depth
-
-    def _validate_layer_index(self, layer: int) -> int:
-        if layer < 1:
-            raise ValueError(f"Layer index must be a positive 1-based integer, got {layer}")
-        if layer > self.num_hidden_layers:
-            raise ValueError(
-                f"Layer index {layer} exceeds loaded backbone depth {self.num_hidden_layers}"
-            )
-        return layer
-
-    def _validate_feature_config(self):
-        if self.feature_mode == "single":
-            self.layer_idx = self._validate_layer_index(self.layer_idx)
-            self.mix_layers = tuple()
-            self.mix_logits = None
-            return
-
-        if self.feature_mode == "scalar_mix":
-            layers = self.mix_layers or (4, 8, 12)
-            deduped_layers = []
-            for layer in layers:
-                layer_idx = self._validate_layer_index(int(layer))
-                if layer_idx not in deduped_layers:
-                    deduped_layers.append(layer_idx)
-            self.mix_layers = tuple(deduped_layers)
-            self.mix_logits = nn.Parameter(torch.zeros(len(self.mix_layers), dtype=torch.float32))
-            self.layer_idx = -1
-            return
-
-        self.layer_idx = -1
-        self.mix_layers = tuple()
-        self.mix_logits = None
-
-    @staticmethod
-    def _to_pil_image(image: torch.Tensor) -> Image.Image:
-        image = image.detach().cpu().clamp(0.0, 1.0)
-        image = (image * 255.0).round().to(torch.uint8)
-        image_np = image.permute(1, 2, 0).numpy()
-        return Image.fromarray(image_np)
 
     @staticmethod
     def _normalize_time_series(x: torch.Tensor) -> torch.Tensor:
@@ -356,7 +254,7 @@ class NewTSVisionEncoder(nn.Module):
 
         return best_patch
 
-    def ts2image(
+    def ts2grid(
         self,
         x: torch.Tensor,
         *,
@@ -381,9 +279,207 @@ class NewTSVisionEncoder(nn.Module):
         else:
             x_2d = self._build_unfold_grid(x, patch_size=patch_size, stride=stride)
 
-        x_2d = self._normalize_image_grid(x_2d)
-        x_resized = self._resize_square_grid(x_2d)
+        return self._normalize_image_grid(x_2d)
+
+    def ts2grayscale_image(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> torch.Tensor:
+        x_grid = self.ts2grid(x, patch_size=patch_size, stride=stride)
+        return self._resize_square_grid(x_grid)
+
+    def ts2image(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> torch.Tensor:
+        x_resized = self.ts2grayscale_image(x, patch_size=patch_size, stride=stride)
         return einops.repeat(x_resized, "b 1 h w -> b c h w", c=3)
+
+
+class NewTSVisionEncoder(nn.Module):
+    """
+    TiViT-style time-series-to-image encoder with optional feature-layer truncation.
+
+    Feature layers follow the original 1-based indexing used in ``temp/newts``:
+    ``layer_idx=4`` means the output after encoder block 4.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "facebook/dinov2-base",
+        layer_idx: int = 4,
+        feature_mode: str = "single",
+        mix_layers: Optional[Sequence[int]] = None,
+        ts_patch_size: int = 16,
+        ts_stride: float = 0.5,
+        vision_2d_mode: str = "legacy_unfold",
+        image_size: Optional[int] = None,
+        return_cls_token: bool = False,
+        truncate_to_feature_layer: bool = True,
+        num_hidden_layers: Optional[int] = None,
+        device: str = "cuda",
+    ):
+        super().__init__()
+
+        self.model_name = model_name
+        self.layer_idx = int(layer_idx)
+        self.feature_mode = feature_mode
+        self.mix_layers = tuple(int(layer) for layer in mix_layers) if mix_layers else tuple()
+        self.ts_patch_size = int(ts_patch_size)
+        self.ts_stride = float(ts_stride)
+        self.vision_2d_mode = vision_2d_mode
+        self.return_cls_token = return_cls_token
+        self.truncate_to_feature_layer = bool(truncate_to_feature_layer)
+        self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(
+            num_hidden_layers=num_hidden_layers
+        )
+        self.device = device
+
+        if self.vision_2d_mode not in {"legacy_unfold", "adaptive_unfold", "reshape_serpentine"}:
+            raise ValueError(f"Unsupported vision_2d_mode: {self.vision_2d_mode}")
+
+        (
+            self.processor,
+            self.vit,
+            self.hidden_dim,
+            self.num_vit_patches,
+            backbone_image_size,
+            self.num_hidden_layers,
+        ) = load_vision_backbone(
+            model_name,
+            num_hidden_layers=self.requested_num_hidden_layers,
+        )
+
+        self.image_size = int(image_size or backbone_image_size)
+        self.mix_logits: Optional[nn.Parameter] = None
+        self._validate_feature_config()
+
+    def _resolve_requested_num_hidden_layers(
+        self,
+        *,
+        num_hidden_layers: Optional[int],
+    ) -> Optional[int]:
+        if num_hidden_layers is not None and num_hidden_layers <= 0:
+            raise ValueError("num_hidden_layers must be positive when provided")
+
+        if self.feature_mode == "single":
+            if self.layer_idx <= 0:
+                raise ValueError("single feature_mode requires a positive 1-based layer_idx")
+            target_depth = self.layer_idx
+        elif self.feature_mode == "scalar_mix":
+            layers = self.mix_layers or (4, 8, 12)
+            target_depth = max(int(layer) for layer in layers)
+        elif self.feature_mode == "last":
+            target_depth = None
+        else:
+            raise ValueError(
+                f"feature_mode must be one of ['last', 'single', 'scalar_mix'], got {self.feature_mode}"
+            )
+
+        if num_hidden_layers is not None and target_depth is not None and num_hidden_layers < target_depth:
+            raise ValueError(
+                "num_hidden_layers must be greater than or equal to the requested feature layer depth"
+            )
+
+        if num_hidden_layers is not None:
+            return int(num_hidden_layers)
+
+        if not self.truncate_to_feature_layer:
+            return None
+
+        return target_depth
+
+    def _validate_layer_index(self, layer: int) -> int:
+        if layer < 1:
+            raise ValueError(f"Layer index must be a positive 1-based integer, got {layer}")
+        if layer > self.num_hidden_layers:
+            raise ValueError(
+                f"Layer index {layer} exceeds loaded backbone depth {self.num_hidden_layers}"
+            )
+        return layer
+
+    def _validate_feature_config(self):
+        if self.feature_mode == "single":
+            self.layer_idx = self._validate_layer_index(self.layer_idx)
+            self.mix_layers = tuple()
+            self.mix_logits = None
+            return
+
+        if self.feature_mode == "scalar_mix":
+            layers = self.mix_layers or (4, 8, 12)
+            deduped_layers = []
+            for layer in layers:
+                layer_idx = self._validate_layer_index(int(layer))
+                if layer_idx not in deduped_layers:
+                    deduped_layers.append(layer_idx)
+            self.mix_layers = tuple(deduped_layers)
+            self.mix_logits = nn.Parameter(torch.zeros(len(self.mix_layers), dtype=torch.float32))
+            self.layer_idx = -1
+            return
+
+        self.layer_idx = -1
+        self.mix_layers = tuple()
+        self.mix_logits = None
+
+    @staticmethod
+    def _to_pil_image(image: torch.Tensor) -> Image.Image:
+        image = image.detach().cpu().clamp(0.0, 1.0)
+        image = (image * 255.0).round().to(torch.uint8)
+        image_np = image.permute(1, 2, 0).numpy()
+        return Image.fromarray(image_np)
+
+    def _make_image_transform(self) -> NewTSPseudoImageTransform:
+        return NewTSPseudoImageTransform(
+            ts_patch_size=self.ts_patch_size,
+            ts_stride=self.ts_stride,
+            vision_2d_mode=self.vision_2d_mode,
+            image_size=self.image_size,
+        )
+
+    def ts2grid(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> torch.Tensor:
+        return self._make_image_transform().ts2grid(
+            x,
+            patch_size=patch_size,
+            stride=stride,
+        )
+
+    def ts2grayscale_image(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> torch.Tensor:
+        return self._make_image_transform().ts2grayscale_image(
+            x,
+            patch_size=patch_size,
+            stride=stride,
+        )
+
+    def ts2image(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> torch.Tensor:
+        return self._make_image_transform().ts2image(
+            x,
+            patch_size=patch_size,
+            stride=stride,
+        )
 
     def _prepare_pixel_values(self, images: torch.Tensor) -> torch.Tensor:
         image_list = [self._to_pil_image(image) for image in images]

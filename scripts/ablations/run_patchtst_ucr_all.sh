@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+"""
+uv run scripts/ablations/run_patchtst_ucr_all.sh \
+  --protocol fewshot \
+  --job-name fewshot_patchtst \
+  --shots 1,2,5,10 \
+  --num_runs 5 \
+  --epochs 60 \
+  --device cuda \
+  --cleanup_checkpoints
+"""
+
+
 
 set -euo pipefail
 
