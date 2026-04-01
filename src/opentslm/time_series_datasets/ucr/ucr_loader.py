@@ -31,19 +31,23 @@ UCR_DIR    = os.path.join(RAW_DATA_PATH, "UCRArchive_2018")
 # ---------------------------
 
 def ensure_ucr_data(
-    zip_path: str = UCR_ZIP,
+    zip_path: Optional[str] = None,
     extract_to: str = RAW_DATA_PATH,
-    url: str      = UCR_URL
+    url: str = UCR_URL,
 ):
     """
     1) Download the UCRArchive_2018.zip if missing.
     2) Extract it to `extract_to/UCRArchive_2018`.
     """
+    if zip_path is None:
+        zip_path = os.path.join(extract_to, "UCRArchive_2018.zip")
+    ucr_dir = os.path.join(extract_to, "UCRArchive_2018")
+
     # Create data directory
     os.makedirs(extract_to, exist_ok=True)
 
     # If already extracted, skip
-    if os.path.isdir(UCR_DIR):
+    if os.path.isdir(ucr_dir):
         return
 
     # 1) Download ZIP if needed
@@ -65,6 +69,13 @@ def ensure_ucr_data(
 # Core loader
 # ---------------------------
 
+def resolve_ucr_paths(raw_data_path: str) -> tuple[str, str]:
+    normalized = os.path.abspath(os.path.expanduser(raw_data_path))
+    if os.path.basename(os.path.normpath(normalized)) == "UCRArchive_2018":
+        return os.path.dirname(normalized), normalized
+    return normalized, os.path.join(normalized, "UCRArchive_2018")
+
+
 def load_ucr_dataset(
     dataset_name: str,
     raw_data_path: str = RAW_DATA_PATH
@@ -79,9 +90,10 @@ def load_ucr_dataset(
     Returns:
         train_df, test_df: DataFrames with columns ["label", "t1", "t2", …].
     """
-    ensure_ucr_data()
+    extract_to, archive_dir = resolve_ucr_paths(raw_data_path)
+    ensure_ucr_data(extract_to=extract_to)
 
-    base = os.path.join(raw_data_path, "UCRArchive_2018", dataset_name)
+    base = os.path.join(archive_dir, dataset_name)
     train_path = os.path.join(base, f"{dataset_name}_TRAIN.tsv")
     test_path  = os.path.join(base, f"{dataset_name}_TEST.tsv")
 

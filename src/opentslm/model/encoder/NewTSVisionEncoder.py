@@ -13,6 +13,57 @@ import torch.nn.functional as F
 from PIL import Image
 
 
+LEGACY_VISION_2D_MODE = "legacy_unfold"
+TIVIT_SQRT_OVERLAP_VISION_2D_MODE = "tivit_sqrt_overlap"
+SUPPORTED_VISION_2D_MODES = (
+    LEGACY_VISION_2D_MODE,
+    TIVIT_SQRT_OVERLAP_VISION_2D_MODE,
+)
+LEGACY_DEFAULT_VIT_STRIDE = 0.5
+TIVIT_DEFAULT_VIT_STRIDE = 0.1
+DEPRECATED_VISION_2D_MODE_HINTS = {
+    "adaptive_unfold": "Use 'tivit_sqrt_overlap' instead.",
+    "reshape_serpentine": "Choose 'legacy_unfold' or 'tivit_sqrt_overlap' explicitly.",
+}
+
+
+def validate_vision_2d_mode(vision_2d_mode: str) -> str:
+    if vision_2d_mode in SUPPORTED_VISION_2D_MODES:
+        return vision_2d_mode
+    if vision_2d_mode in DEPRECATED_VISION_2D_MODE_HINTS:
+        hint = DEPRECATED_VISION_2D_MODE_HINTS[vision_2d_mode]
+        raise ValueError(f"vision_2d_mode '{vision_2d_mode}' has been removed. {hint}")
+    raise ValueError(
+        f"Unsupported vision_2d_mode: {vision_2d_mode}. "
+        f"Valid modes: {list(SUPPORTED_VISION_2D_MODES)}"
+    )
+
+
+def resolve_effective_vision_stride(
+    vision_2d_mode: str,
+    ts_stride: float,
+    *,
+    stride_explicit: bool,
+) -> float:
+    resolved_mode = validate_vision_2d_mode(vision_2d_mode)
+    if stride_explicit:
+        return float(ts_stride)
+    if resolved_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
+        return TIVIT_DEFAULT_VIT_STRIDE
+    return LEGACY_DEFAULT_VIT_STRIDE
+
+
+def resolve_effective_vit_patch_policy(vision_2d_mode: str) -> str:
+    resolved_mode = validate_vision_2d_mode(vision_2d_mode)
+    if resolved_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
+        return "sqrt_time_length"
+    return "fixed"
+
+
+def vision_mode_ignores_patch_size(vision_2d_mode: str) -> bool:
+    return validate_vision_2d_mode(vision_2d_mode) == TIVIT_SQRT_OVERLAP_VISION_2D_MODE
+
+
 def load_vision_backbone(
     model_name: str,
     *,
@@ -89,12 +140,12 @@ class NewTSPseudoImageTransform:
         *,
         ts_patch_size: int = 16,
         ts_stride: float = 0.5,
-        vision_2d_mode: str = "legacy_unfold",
+        vision_2d_mode: str = LEGACY_VISION_2D_MODE,
         image_size: int = 224,
     ):
         self.ts_patch_size = int(ts_patch_size)
         self.ts_stride = float(ts_stride)
-        self.vision_2d_mode = vision_2d_mode
+        self.vision_2d_mode = validate_vision_2d_mode(vision_2d_mode)
         self.image_size = int(image_size)
 
         if self.ts_patch_size <= 0:
@@ -103,8 +154,6 @@ class NewTSPseudoImageTransform:
             raise ValueError(f"ts_stride must be in (0, 1], got {self.ts_stride}")
         if self.image_size <= 0:
             raise ValueError("image_size must be positive")
-        if self.vision_2d_mode not in {"legacy_unfold", "adaptive_unfold", "reshape_serpentine"}:
-            raise ValueError(f"Unsupported vision_2d_mode: {self.vision_2d_mode}")
 
     @staticmethod
     def _normalize_time_series(x: torch.Tensor) -> torch.Tensor:
@@ -127,6 +176,13 @@ class NewTSPseudoImageTransform:
             return x
         last_value = x[:, -1:].expand(-1, pad_right)
         return torch.cat([x, last_value], dim=1)
+
+    @staticmethod
+    def _replicate_pad_left(x: torch.Tensor, pad_left: int) -> torch.Tensor:
+        if pad_left <= 0:
+            return x
+        first_value = x[:, :1].expand(-1, pad_left)
+        return torch.cat([first_value, x], dim=1)
 
     @staticmethod
     def _square_pad(x_2d: torch.Tensor) -> torch.Tensor:
@@ -160,42 +216,6 @@ class NewTSPseudoImageTransform:
         )
 
     @staticmethod
-    def _candidate_search_bounds(time_length: int) -> tuple[int, int]:
-        min_allowed = 1 if time_length < 4 else 4
-        base = max(1, int(round(math.sqrt(time_length))))
-        lower = max(min_allowed, base - 4)
-        upper = min(time_length, base + 4)
-        if lower > upper:
-            lower = upper = min(time_length, max(1, base))
-        return lower, upper
-
-    def _select_serpentine_layout(self, time_length: int) -> tuple[int, int]:
-        lower, upper = self._candidate_search_bounds(time_length)
-        best_width = lower
-        best_height = math.ceil(time_length / lower)
-        best_score = (abs(best_height - lower), best_height * lower - time_length, -lower)
-
-        for width in range(lower, upper + 1):
-            height = math.ceil(time_length / width)
-            score = (abs(height - width), height * width - time_length, -width)
-            if score < best_score:
-                best_width = width
-                best_height = height
-                best_score = score
-
-        return best_height, best_width
-
-    def _build_serpentine_grid(self, x: torch.Tensor) -> torch.Tensor:
-        time_length = x.size(1)
-        height, width = self._select_serpentine_layout(time_length)
-        total_cells = height * width
-        x = self._replicate_pad_right(x, total_cells - time_length)
-        x_2d = x.reshape(x.size(0), 1, height, width)
-        if height > 1:
-            x_2d[:, :, 1::2, :] = torch.flip(x_2d[:, :, 1::2, :], dims=(-1,))
-        return x_2d
-
-    @staticmethod
     def _compute_unfold_pad_right(
         time_length: int,
         patch_size: int,
@@ -223,36 +243,84 @@ class NewTSPseudoImageTransform:
         x_2d = x.unfold(dimension=1, size=patch_size, step=stride_length)
         return einops.rearrange(x_2d, "n h w -> n 1 h w")
 
-    def _select_adaptive_patch_size(
-        self,
+    @staticmethod
+    def _compute_tivit_pad_left(
         time_length: int,
-        *,
-        stride: float,
+        patch_size: int,
+        stride_length: int,
     ) -> int:
-        stride_scale = stride if stride < 1.0 else 1.0
-        target_patch = max(1, int(round(math.sqrt(time_length / stride_scale))))
-        min_allowed = 1 if time_length < 4 else 4
-        lower = max(min_allowed, target_patch - 4)
-        upper = min(time_length, target_patch + 4)
-        if lower > upper:
-            lower = upper = min(time_length, max(1, target_patch))
+        if stride_length == patch_size:
+            return (patch_size - time_length % patch_size) % patch_size
+        if time_length < patch_size:
+            return patch_size - time_length
+        remainder = (time_length - patch_size) % stride_length
+        return stride_length - remainder if remainder != 0 else 0
 
-        best_patch = lower
-        stride_length = lower if stride == 1.0 else max(1, int(round(lower * stride)))
-        pad_right = self._compute_unfold_pad_right(time_length, lower, stride_length)
-        num_rows = ((time_length + pad_right - lower) // stride_length) + 1
-        best_score = (abs(num_rows - lower), pad_right, -lower)
+    def _build_tivit_grid(
+        self,
+        x: torch.Tensor,
+        *,
+        patch_size: int,
+        stride: float,
+    ) -> torch.Tensor:
+        stride_length = patch_size if stride == 1.0 else max(1, int(patch_size * stride))
+        pad_left = self._compute_tivit_pad_left(x.size(1), patch_size, stride_length)
+        x = self._replicate_pad_left(x, pad_left)
+        if stride_length == patch_size:
+            return einops.rearrange(x, "n (p f) -> n 1 f p", f=patch_size)
 
-        for patch_size in range(lower, upper + 1):
-            stride_length = patch_size if stride == 1.0 else max(1, int(round(patch_size * stride)))
-            pad_right = self._compute_unfold_pad_right(time_length, patch_size, stride_length)
-            num_rows = ((time_length + pad_right - patch_size) // stride_length) + 1
-            score = (abs(num_rows - patch_size), pad_right, -patch_size)
-            if score < best_score:
-                best_patch = patch_size
-                best_score = score
+        x_2d = x.unfold(dimension=1, size=patch_size, step=stride_length)
+        return einops.rearrange(x_2d, "n h w -> n 1 h w")
 
-        return best_patch
+    def _resize_tivit_grid(self, x_2d: torch.Tensor) -> torch.Tensor:
+        current_height = x_2d.size(-2)
+        current_width = x_2d.size(-1)
+        if current_height == self.image_size and current_width == self.image_size:
+            return x_2d
+        return F.interpolate(
+            x_2d,
+            size=(self.image_size, self.image_size),
+            mode="nearest",
+        )
+
+    def get_runtime_transform_config(
+        self,
+        *,
+        time_length: int,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        requested_patch_size = int(patch_size or self.ts_patch_size)
+        requested_stride = float(stride or self.ts_stride)
+        if requested_patch_size <= 0:
+            raise ValueError("patch_size must be positive")
+        if not (0.0 < requested_stride <= 1.0):
+            raise ValueError(f"stride must be in (0, 1], got {requested_stride}")
+
+        if self.vision_2d_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
+            effective_patch_size = max(1, int(math.sqrt(time_length)))
+            effective_stride_length = (
+                effective_patch_size
+                if requested_stride == 1.0
+                else max(1, int(effective_patch_size * requested_stride))
+            )
+        else:
+            effective_patch_size = requested_patch_size
+            effective_stride_length = (
+                effective_patch_size
+                if requested_stride == 1.0
+                else max(1, int(round(effective_patch_size * requested_stride)))
+            )
+
+        return {
+            "vision_2d_mode": self.vision_2d_mode,
+            "requested_patch_size": requested_patch_size,
+            "requested_stride_ratio": requested_stride,
+            "effective_patch_size": effective_patch_size,
+            "effective_stride_ratio": requested_stride,
+            "effective_stride_length": effective_stride_length,
+            "effective_vit_patch_policy": resolve_effective_vit_patch_policy(self.vision_2d_mode),
+        }
 
     def ts2grid(
         self,
@@ -261,23 +329,27 @@ class NewTSPseudoImageTransform:
         patch_size: Optional[int] = None,
         stride: Optional[float] = None,
     ) -> torch.Tensor:
-        patch_size = int(patch_size or self.ts_patch_size)
-        stride = float(stride or self.ts_stride)
-        if patch_size <= 0:
-            raise ValueError("patch_size must be positive")
-        if not (0.0 < stride <= 1.0):
-            raise ValueError(f"stride must be in (0, 1], got {stride}")
         x = self._normalize_time_series(x)
         x = einops.rearrange(x, "b t d -> (b d) t")
         time_length = x.shape[-1]
+        runtime_config = self.get_runtime_transform_config(
+            time_length=time_length,
+            patch_size=patch_size,
+            stride=stride,
+        )
 
-        if self.vision_2d_mode == "reshape_serpentine":
-            x_2d = self._build_serpentine_grid(x)
-        elif self.vision_2d_mode == "adaptive_unfold":
-            adaptive_patch_size = self._select_adaptive_patch_size(time_length, stride=stride)
-            x_2d = self._build_unfold_grid(x, patch_size=adaptive_patch_size, stride=stride)
+        if self.vision_2d_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
+            x_2d = self._build_tivit_grid(
+                x,
+                patch_size=runtime_config["effective_patch_size"],
+                stride=runtime_config["effective_stride_ratio"],
+            )
         else:
-            x_2d = self._build_unfold_grid(x, patch_size=patch_size, stride=stride)
+            x_2d = self._build_unfold_grid(
+                x,
+                patch_size=runtime_config["effective_patch_size"],
+                stride=runtime_config["effective_stride_ratio"],
+            )
 
         return self._normalize_image_grid(x_2d)
 
@@ -289,6 +361,8 @@ class NewTSPseudoImageTransform:
         stride: Optional[float] = None,
     ) -> torch.Tensor:
         x_grid = self.ts2grid(x, patch_size=patch_size, stride=stride)
+        if self.vision_2d_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
+            return self._resize_tivit_grid(x_grid)
         return self._resize_square_grid(x_grid)
 
     def ts2image(
@@ -318,7 +392,7 @@ class NewTSVisionEncoder(nn.Module):
         mix_layers: Optional[Sequence[int]] = None,
         ts_patch_size: int = 16,
         ts_stride: float = 0.5,
-        vision_2d_mode: str = "legacy_unfold",
+        vision_2d_mode: str = LEGACY_VISION_2D_MODE,
         image_size: Optional[int] = None,
         return_cls_token: bool = False,
         truncate_to_feature_layer: bool = True,
@@ -333,16 +407,13 @@ class NewTSVisionEncoder(nn.Module):
         self.mix_layers = tuple(int(layer) for layer in mix_layers) if mix_layers else tuple()
         self.ts_patch_size = int(ts_patch_size)
         self.ts_stride = float(ts_stride)
-        self.vision_2d_mode = vision_2d_mode
+        self.vision_2d_mode = validate_vision_2d_mode(vision_2d_mode)
         self.return_cls_token = return_cls_token
         self.truncate_to_feature_layer = bool(truncate_to_feature_layer)
         self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(
             num_hidden_layers=num_hidden_layers
         )
         self.device = device
-
-        if self.vision_2d_mode not in {"legacy_unfold", "adaptive_unfold", "reshape_serpentine"}:
-            raise ValueError(f"Unsupported vision_2d_mode: {self.vision_2d_mode}")
 
         (
             self.processor,
@@ -477,6 +548,19 @@ class NewTSVisionEncoder(nn.Module):
     ) -> torch.Tensor:
         return self._make_image_transform().ts2image(
             x,
+            patch_size=patch_size,
+            stride=stride,
+        )
+
+    def get_runtime_transform_config(
+        self,
+        *,
+        time_length: int,
+        patch_size: Optional[int] = None,
+        stride: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self._make_image_transform().get_runtime_transform_config(
+            time_length=time_length,
             patch_size=patch_size,
             stride=stride,
         )

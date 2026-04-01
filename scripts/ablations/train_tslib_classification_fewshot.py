@@ -15,7 +15,7 @@ uv run python scripts/experiments/ucr_batch/run_ucr_batch.py \
   --num_runs 3 \
   --cleanup_checkpoints \
   --train_epochs 60 \
-"autoformer", "crossformer", "fedformer", "informer", "timesnet"
+Supported models: autoformer, crossformer, dlinear, fedformer, informer, timesnet
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ from fewshot_utils import (  # noqa: E402
 
 DEFAULT_FEWSHOT_SAVE_DIR = "results/ablations/tslib_ucr_fewshot"
 DEFAULT_FULL_SAVE_DIR = "results/ablations/tslib_ucr_full"
-AVAILABLE_MODEL_ALIASES = ("autoformer", "crossformer", "fedformer", "informer", "timesnet")
+AVAILABLE_MODEL_ALIASES = ("autoformer", "crossformer", "dlinear", "fedformer", "informer", "timesnet")
 
 
 def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
@@ -103,7 +103,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--models",
         type=str,
         default=None,
-        help="Comma-separated model aliases, e.g. autoformer,timesnet",
+        help="Comma-separated model aliases, e.g. autoformer,dlinear",
     )
 
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot", "full"])

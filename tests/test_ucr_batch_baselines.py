@@ -13,6 +13,7 @@ from scripts.ablations.train_ucr_distance_classification_fewshot import (
     predict_1nn,
 )
 from scripts.ablations.train_ucr_distance_classification_fewshot import main as distance_main
+from scripts.ablations.train_tslib_classification_fewshot import main as tslib_main
 from scripts.ablations.train_ucr_simple_backbone_classification_fewshot import main as neural_main
 from scripts.experiments.ucr_batch.registry import get_entry, list_experiments
 
@@ -90,7 +91,7 @@ class UCRBatchBaselineTest(unittest.TestCase):
 
     def test_registry_contains_new_fewshot_baselines(self) -> None:
         experiments = list_experiments()
-        for experiment in ("1nn_ed", "1nn_dtw", "resnet", "tapnet", "inceptiontime"):
+        for experiment in ("1nn_ed", "1nn_dtw", "resnet", "tapnet", "inceptiontime", "tslib_dlinear"):
             self.assertIn(experiment, experiments)
 
         entry_ed = get_entry("1nn_ed", "fewshot")
@@ -111,6 +112,11 @@ class UCRBatchBaselineTest(unittest.TestCase):
         entry_inceptiontime = get_entry("inceptiontime", "fewshot")
         self.assertEqual(entry_inceptiontime.fixed_args, ("--model", "inceptiontime"))
         self.assertTrue(entry_inceptiontime.supports_inner_resume)
+
+        entry_tslib_dlinear = get_entry("tslib_dlinear", "fewshot")
+        self.assertEqual(entry_tslib_dlinear.fixed_args, ("--model", "dlinear"))
+        self.assertEqual(entry_tslib_dlinear.default_shots, "1,2,5,10,full")
+        self.assertTrue(entry_tslib_dlinear.supports_inner_resume)
 
     def test_smoke_runs_write_fewshot_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,6 +188,24 @@ class UCRBatchBaselineTest(unittest.TestCase):
                         "2",
                         "--eval_batch_size",
                         "4",
+                    ],
+                ),
+                (
+                    "tslib_dlinear",
+                    tslib_main,
+                    [
+                        "--model",
+                        "dlinear",
+                        "--device",
+                        "cpu",
+                        "--train_epochs",
+                        "1",
+                        "--batch_size",
+                        "2",
+                        "--eval_batch_size",
+                        "4",
+                        "--moving_avg",
+                        "3",
                     ],
                 ),
             ]

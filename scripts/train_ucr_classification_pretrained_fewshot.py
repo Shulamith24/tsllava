@@ -52,6 +52,12 @@ from transformers import (
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+from opentslm.model.encoder.NewTSVisionEncoder import (
+    LEGACY_VISION_2D_MODE,
+    SUPPORTED_VISION_2D_MODES,
+    resolve_effective_vision_stride,
+    validate_vision_2d_mode,
+)
 from opentslm.model.llm.OpenTSLM import OpenTSLM
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
 from opentslm.model.class_token_rows import (
@@ -185,8 +191,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--vision_2d_mode",
         type=str,
-        default="reshape_serpentine",
-        choices=["reshape_serpentine", "adaptive_unfold", "legacy_unfold"],
+        default=LEGACY_VISION_2D_MODE,
+        choices=list(SUPPORTED_VISION_2D_MODES),
         help="1D->2D image construction for the NewTS vision branch",
     )
     parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
@@ -295,6 +301,8 @@ def parse_args(argv=None):
     args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
     args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
     args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
+    args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
+    args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
     args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
     return args
 
@@ -520,6 +528,18 @@ def resolve_effective_pad_mode(args) -> str:
     return args.pad_mode
 
 
+def resolve_effective_newts_vision_config(args) -> Dict[str, Any]:
+    vision_2d_mode = validate_vision_2d_mode(args.vision_2d_mode)
+    return {
+        "vision_2d_mode": vision_2d_mode,
+        "effective_vit_stride": resolve_effective_vision_stride(
+            vision_2d_mode,
+            args.vit_stride,
+            stride_explicit=getattr(args, "vit_stride_explicit", False),
+        ),
+    }
+
+
 def warn_deprecated_newts_context_length(args, rank: int):
     if rank != 0:
         return
@@ -707,6 +727,7 @@ def validate_args(args):
         raise ValueError("--stride must be positive")
     if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
+    validate_vision_2d_mode(args.vision_2d_mode)
 
     target_layer = None
     if args.vit_feature_mode == "single":
@@ -764,6 +785,7 @@ def build_tslanet_config(args) -> Dict[str, Any]:
 
 
 def build_newts_dual_branch_config(args) -> Dict[str, Any]:
+    resolved_vision_config = resolve_effective_newts_vision_config(args)
     return {
         "output_dim": ENCODER_OUTPUT_DIM,
         "dynamic_length": True,
@@ -781,8 +803,8 @@ def build_newts_dual_branch_config(args) -> Dict[str, Any]:
         "vit_layer_idx": args.vit_layer_idx,
         "vit_mix_layers": list(args.vit_mix_layers) if args.vit_mix_layers else None,
         "vit_patch_size": args.vit_patch_size,
-        "vit_stride": args.vit_stride,
-        "vision_2d_mode": args.vision_2d_mode,
+        "vit_stride": resolved_vision_config["effective_vit_stride"],
+        "vision_2d_mode": resolved_vision_config["vision_2d_mode"],
         "vit_truncate_to_feature_layer": args.vit_truncate_to_feature_layer,
         "vit_num_hidden_layers": args.vit_num_hidden_layers,
         "projector_type": args.projector_type,
@@ -839,7 +861,11 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         merged_config["freeze_ts_backbone"] = args.freeze_ts_backbone
         merged_config["freeze_vision_backbone"] = args.freeze_vision_backbone
         if getattr(args, "vision_2d_mode_explicit", False):
-            merged_config["vision_2d_mode"] = args.vision_2d_mode
+            resolved_vision_config = resolve_effective_newts_vision_config(args)
+            merged_config["vision_2d_mode"] = resolved_vision_config["vision_2d_mode"]
+            merged_config["vit_stride"] = resolved_vision_config["effective_vit_stride"]
+        elif getattr(args, "vit_stride_explicit", False):
+            merged_config["vit_stride"] = args.vit_stride
         merged_config["output_dim"] = ENCODER_OUTPUT_DIM
         init_kwargs["newts_dual_branch_config"] = merged_config
 
@@ -883,11 +909,14 @@ def build_model(args, device: str, rank: int):
             checkpoint_path=getattr(args, "pretrained_model_checkpoint", None),
         )
         if (
-            getattr(args, "vision_2d_mode_explicit", False)
+            (getattr(args, "vision_2d_mode_explicit", False) or getattr(args, "vit_stride_explicit", False))
             and getattr(model, "encoder_type", None) == "newts_dual_branch"
             and getattr(model.encoder, "vision_encoder", None) is not None
         ):
-            model.encoder.vision_encoder.vision_2d_mode = args.vision_2d_mode
+            resolved_vision_config = resolve_effective_newts_vision_config(args)
+            if getattr(args, "vision_2d_mode_explicit", False):
+                model.encoder.vision_encoder.vision_2d_mode = resolved_vision_config["vision_2d_mode"]
+            model.encoder.vision_encoder.ts_stride = resolved_vision_config["effective_vit_stride"]
 
         if use_lora and (args.lora_r != 16 or args.lora_alpha != 32):
             model.disable_lora()
@@ -1702,7 +1731,10 @@ def run_single_experiment(
         )
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        # Few-shot training dynamically toggles LoRA participation across phase1/phase2.
+        # DDP therefore needs unused-parameter detection enabled to tolerate parameters
+        # that are intentionally skipped in one phase and re-enabled in the next.
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     phase1_epochs, phase2_epochs = resolve_phase_epochs(
         total_epochs=args.epochs,

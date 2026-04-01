@@ -55,6 +55,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedul
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+from opentslm.model.encoder.NewTSVisionEncoder import (
+    SUPPORTED_VISION_2D_MODES,
+    TIVIT_SQRT_OVERLAP_VISION_2D_MODE,
+    resolve_effective_vit_patch_policy,
+    resolve_effective_vision_stride,
+    validate_vision_2d_mode,
+    vision_mode_ignores_patch_size,
+)
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
 from opentslm.model_config import BATCH_SIZE, EARLY_STOP_PAT, ENCODER_OUTPUT_DIM, PATCH_SIZE
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
@@ -190,6 +198,12 @@ def parse_args(argv=None):
     parser.add_argument("--vit_mix_layers", type=str, default=None)
     parser.add_argument("--vit_patch_size", type=int, default=16)
     parser.add_argument("--vit_stride", type=float, default=0.5)
+    parser.add_argument(
+        "--vision_2d_mode",
+        type=str,
+        default=TIVIT_SQRT_OVERLAP_VISION_2D_MODE,
+        choices=list(SUPPORTED_VISION_2D_MODES),
+    )
     parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
     parser.add_argument(
         "--vit_truncate_to_feature_layer",
@@ -256,6 +270,9 @@ def parse_args(argv=None):
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
     args.context_length_explicit = cli_flag_was_provided(provided_argv, "--context_length")
     args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
+    args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
+    args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
+    args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
     validate_args(args)
     return args
 
@@ -279,6 +296,7 @@ def validate_args(args):
         raise ValueError("--stride must be positive")
     if args.vit_num_hidden_layers is not None and args.vit_num_hidden_layers <= 0:
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
+    validate_vision_2d_mode(args.vision_2d_mode)
 
     target_layer = None
     if args.vit_feature_mode == "single":
@@ -363,6 +381,7 @@ def build_tslanet_config(args) -> Dict[str, Any]:
 
 
 def build_newts_dual_branch_config(args) -> Dict[str, Any]:
+    resolved_vision_config = resolve_effective_newts_vision_config(args)
     return {
         "output_dim": ENCODER_OUTPUT_DIM,
         "dynamic_length": True,
@@ -380,7 +399,8 @@ def build_newts_dual_branch_config(args) -> Dict[str, Any]:
         "vit_layer_idx": args.vit_layer_idx,
         "vit_mix_layers": list(args.vit_mix_layers) if args.vit_mix_layers else None,
         "vit_patch_size": args.vit_patch_size,
-        "vit_stride": args.vit_stride,
+        "vit_stride": resolved_vision_config["effective_vit_stride"],
+        "vision_2d_mode": resolved_vision_config["vision_2d_mode"],
         "vit_truncate_to_feature_layer": args.vit_truncate_to_feature_layer,
         "vit_num_hidden_layers": args.vit_num_hidden_layers,
         "projector_type": args.projector_type,
@@ -429,6 +449,19 @@ def resolve_effective_pad_mode(args) -> str:
     return args.pad_mode
 
 
+def resolve_effective_newts_vision_config(args) -> Dict[str, Any]:
+    vision_2d_mode = validate_vision_2d_mode(args.vision_2d_mode)
+    return {
+        "vision_2d_mode": vision_2d_mode,
+        "effective_vit_stride": resolve_effective_vision_stride(
+            vision_2d_mode,
+            args.vit_stride,
+            stride_explicit=getattr(args, "vit_stride_explicit", False),
+        ),
+        "effective_vit_patch_policy": resolve_effective_vit_patch_policy(vision_2d_mode),
+    }
+
+
 def resolve_base_eos_token(llm_id: str) -> str:
     tokenizer = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
     if tokenizer.pad_token is None:
@@ -445,6 +478,28 @@ def warn_deprecated_newts_context_length(args, rank: int):
         return
     if getattr(args, "context_length_explicit", False):
         print("⚠️ --context_length is deprecated for newts_dual_branch and is ignored in dynamic-length mode")
+
+
+def warn_newts_vision_runtime_config(args, rank: int):
+    if rank != 0:
+        return
+    if args.encoder_type != "newts_dual_branch":
+        return
+
+    resolved = resolve_effective_newts_vision_config(args)
+    if (
+        resolved["vision_2d_mode"] == TIVIT_SQRT_OVERLAP_VISION_2D_MODE
+        and not getattr(args, "vit_stride_explicit", False)
+    ):
+        print(
+            "ℹ️ --vit_stride not provided for tivit_sqrt_overlap; "
+            f"using TiViT default overlap ratio {resolved['effective_vit_stride']:.1f}"
+        )
+    if vision_mode_ignores_patch_size(resolved["vision_2d_mode"]) and getattr(args, "vit_patch_size_explicit", False):
+        print(
+            "⚠️ --vit_patch_size is ignored when --vision_2d_mode=tivit_sqrt_overlap; "
+            "patch_size is resolved dynamically as int(sqrt(T))"
+        )
 
 
 class LengthBucketBatchSampler(Sampler[List[int]]):
@@ -680,6 +735,11 @@ def effective_config_snapshot(args, world_size: int) -> Dict[str, Any]:
     snapshot["effective_global_batch_size"] = (
         int(world_size) * int(args.batch_size) * int(args.gradient_accumulation_steps)
     )
+    if args.encoder_type == "newts_dual_branch":
+        resolved_vision_config = resolve_effective_newts_vision_config(args)
+        snapshot["vision_2d_mode"] = resolved_vision_config["vision_2d_mode"]
+        snapshot["effective_vit_stride"] = resolved_vision_config["effective_vit_stride"]
+        snapshot["effective_vit_patch_policy"] = resolved_vision_config["effective_vit_patch_policy"]
     return snapshot
 
 
@@ -733,6 +793,7 @@ def collect_checkpoint_arg_mismatches(saved_args: Optional[Dict[str, Any]], curr
         "vit_mix_layers",
         "vit_patch_size",
         "vit_stride",
+        "vision_2d_mode",
         "vit_truncate_to_feature_layer",
         "vit_num_hidden_layers",
         "projector_type",
@@ -1018,6 +1079,7 @@ def train_stage(
     collate_patch_size = resolve_collate_patch_size(args)
     pad_mode = resolve_effective_pad_mode(args)
     use_length_bucket = args.encoder_type == "newts_dual_branch"
+    resolved_vision_config = resolve_effective_newts_vision_config(args) if use_length_bucket else None
 
     if rank == 0:
         print("\n" + "=" * 72)
@@ -1031,6 +1093,9 @@ def train_stage(
         print(f"   pad_mode={pad_mode}")
         if use_length_bucket:
             print("   length_bucket_batching=True")
+            print(f"   vision_2d_mode={resolved_vision_config['vision_2d_mode']}")
+            print(f"   effective_vit_stride={resolved_vision_config['effective_vit_stride']}")
+            print(f"   effective_vit_patch_policy={resolved_vision_config['effective_vit_patch_policy']}")
         print("=" * 72)
 
     eos_token = get_model(model).get_eos_token()
@@ -1247,6 +1312,7 @@ def main():
 
         set_seed(args.seed + rank)
         warn_deprecated_newts_context_length(args, rank)
+        warn_newts_vision_runtime_config(args, rank)
 
         run_name = args.run_name or default_run_name(args)
         run_dir = os.path.join(args.save_dir, sanitize_llm_id(args.llm_id), run_name)
@@ -1264,8 +1330,12 @@ def main():
             print(f"Resume: {args.resume}")
             print(f"LoRA: {args.use_lora}")
             if args.encoder_type == "newts_dual_branch":
+                resolved_vision_config = resolve_effective_newts_vision_config(args)
                 print("Dynamic length: enabled")
                 print(f"Pad mode: {resolve_effective_pad_mode(args)}")
+                print(f"Vision 2D mode: {resolved_vision_config['vision_2d_mode']}")
+                print(f"Effective ViT stride: {resolved_vision_config['effective_vit_stride']}")
+                print(f"Effective ViT patch policy: {resolved_vision_config['effective_vit_patch_policy']}")
             print("=" * 72)
 
             os.makedirs(run_dir, exist_ok=True)

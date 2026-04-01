@@ -25,6 +25,7 @@ TSLIB_PACKAGE_NAMES = ("layers", "models", "utils")
 MODEL_NAME_MAP = {
     "autoformer": "Autoformer",
     "crossformer": "Crossformer",
+    "dlinear": "DLinear",
     "fedformer": "FEDformer",
     "informer": "Informer",
     "timesnet": "TimesNet",
@@ -68,6 +69,12 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "d_layers": 1,
         "dropout": 0.1,
         "factor": 1,
+        "moving_avg": 25,
+    },
+    "DLinear": {
+        "train_epochs": 100,
+        "batch_size": 16,
+        "learning_rate": 1e-3,
         "moving_avg": 25,
     },
     "Informer": {

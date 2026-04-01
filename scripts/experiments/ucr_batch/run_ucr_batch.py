@@ -71,8 +71,26 @@ def parse_args(argv: Sequence[str] | None = None):
     parser.add_argument("--datasets", default=None, help="Comma-separated dataset allowlist.")
     parser.add_argument("--exclude-datasets", default=None, help="Comma-separated dataset blocklist.")
     parser.add_argument("--start-from", default=None, help="Start execution from this dataset name.")
+    parser.add_argument(
+        "--torchrun",
+        action="store_true",
+        help=(
+            "Launch each dataset training job via torch.distributed.run instead of a plain "
+            "single-process Python subprocess."
+        ),
+    )
+    parser.add_argument(
+        "--torchrun-args",
+        default="",
+        help=(
+            "Extra arguments forwarded to torch.distributed.run. Example: "
+            '\'--standalone --nproc_per_node=4\'.'
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args, forward_args = parser.parse_known_args(argv)
+    if args.torchrun_args and not args.torchrun:
+        raise ValueError("--torchrun-args requires --torchrun.")
     if forward_args and forward_args[0] == "--":
         forward_args = forward_args[1:]
     return args, forward_args
@@ -153,6 +171,8 @@ def build_batch_config(args, entry, resolved_data_path: Path, forward_args: Sequ
         "protocol": args.protocol,
         "script_path": str(entry.script_path.resolve()),
         "data_path": str(resolved_data_path),
+        "launcher": "torchrun" if args.torchrun else "python",
+        "torchrun_args": list(parse_torchrun_args(args.torchrun_args)),
         "fixed_args": list(entry.fixed_args),
         "forward_args": list(forward_args),
         "supports_inner_resume": entry.supports_inner_resume,
@@ -191,8 +211,30 @@ def backfill_existing_results(ledger, *, datasets: Sequence[str], logs_dir: Path
             remove_row(ledger, dataset, "__dataset__")
 
 
-def build_command(entry, *, protocol: str, dataset: str, data_path: str, save_dir: str, forward_args: Sequence[str]) -> List[str]:
-    command = [sys.executable, str(entry.script_path)]
+def parse_torchrun_args(raw_value: str) -> List[str]:
+    if not raw_value.strip():
+        return []
+    try:
+        return shlex.split(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid --torchrun-args: {exc}") from exc
+
+
+def build_command(
+    entry,
+    *,
+    protocol: str,
+    dataset: str,
+    data_path: str,
+    save_dir: str,
+    forward_args: Sequence[str],
+    use_torchrun: bool,
+    torchrun_args: Sequence[str],
+) -> List[str]:
+    if use_torchrun:
+        command = [sys.executable, "-m", "torch.distributed.run", *torchrun_args, str(entry.script_path)]
+    else:
+        command = [sys.executable, str(entry.script_path)]
     if entry.add_protocol_flag:
         command.extend(["--protocol", protocol])
     if entry.supports_inner_resume:
@@ -233,6 +275,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, forward_args = parse_args(argv)
     entry = get_entry(args.experiment, args.protocol)
     validate_forward_args(forward_args, entry.blocked_forward_args)
+    torchrun_args = parse_torchrun_args(args.torchrun_args)
 
     ucr_archive_dir = resolve_ucr_archive(args.data_path)
     discovered = discover_datasets(ucr_archive_dir)
@@ -283,6 +326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_path=args.data_path,
             save_dir=str(datasets_dir),
             forward_args=forward_args,
+            use_torchrun=args.torchrun,
+            torchrun_args=torchrun_args,
         )
 
         if args.dry_run:

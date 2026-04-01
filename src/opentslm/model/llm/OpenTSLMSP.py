@@ -91,8 +91,17 @@ class OpenTSLMSP(TimeSeriesLLM):
         the backward pass instead of storing them.
         """
         if hasattr(self.llm, "gradient_checkpointing_enable"):
-            self.llm.gradient_checkpointing_enable()
-            print("✅ Gradient checkpointing enabled for LLM")
+            # Non-reentrant checkpointing is more robust with DDP + LoRA training.
+            # The default reentrant mode can mark LoRA parameters ready twice during
+            # backward when torchrun is used, which breaks phase2 joint training.
+            try:
+                self.llm.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                print("✅ Gradient checkpointing enabled for LLM (use_reentrant=False)")
+            except TypeError:
+                self.llm.gradient_checkpointing_enable()
+                print("✅ Gradient checkpointing enabled for LLM")
         else:
             print("⚠️ LLM does not support gradient_checkpointing_enable()")
         if hasattr(self.encoder, "enable_gradient_checkpointing"):

@@ -29,7 +29,14 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from opentslm.model.encoder.NewTSVisionEncoder import NewTSPseudoImageTransform
+from opentslm.model.encoder.NewTSVisionEncoder import (
+    LEGACY_VISION_2D_MODE,
+    SUPPORTED_VISION_2D_MODES,
+    NewTSPseudoImageTransform,
+    resolve_effective_vit_patch_policy,
+    resolve_effective_vision_stride,
+    validate_vision_2d_mode,
+)
 from opentslm.time_series_datasets.ucr.ucr_loader import UCRDataset, load_ucr_dataset
 
 
@@ -61,8 +68,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--vision_2d_mode",
         type=str,
-        default="reshape_serpentine",
-        choices=["reshape_serpentine", "adaptive_unfold", "legacy_unfold"],
+        default=LEGACY_VISION_2D_MODE,
+        choices=list(SUPPORTED_VISION_2D_MODES),
         help="1D->2D pseudo-image construction mode",
     )
     parser.add_argument(
@@ -104,6 +111,7 @@ def load_newts_config_from_checkpoint(checkpoint_path: str) -> dict[str, Any]:
 
 def resolve_visual_config(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_metadata = None
+    checkpoint_provided_stride = False
     if args.local_checkpoint:
         checkpoint_metadata = load_newts_config_from_checkpoint(args.local_checkpoint)
         encoder_config = checkpoint_metadata["encoder_config"]
@@ -112,13 +120,22 @@ def resolve_visual_config(args: argparse.Namespace) -> dict[str, Any]:
             args.vit_patch_size = int(encoder_config["vit_patch_size"])
         if not args.vit_stride_explicit and "vit_stride" in encoder_config:
             args.vit_stride = float(encoder_config["vit_stride"])
+            checkpoint_provided_stride = True
         if not args.vision_2d_mode_explicit and "vision_2d_mode" in encoder_config:
             args.vision_2d_mode = str(encoder_config["vision_2d_mode"])
 
+    vision_2d_mode = validate_vision_2d_mode(args.vision_2d_mode)
+    effective_vit_stride = resolve_effective_vision_stride(
+        vision_2d_mode,
+        args.vit_stride,
+        stride_explicit=(args.vit_stride_explicit or checkpoint_provided_stride),
+    )
     return {
         "vit_patch_size": int(args.vit_patch_size),
         "vit_stride": float(args.vit_stride),
-        "vision_2d_mode": args.vision_2d_mode,
+        "effective_vit_stride": float(effective_vit_stride),
+        "vision_2d_mode": vision_2d_mode,
+        "effective_vit_patch_policy": resolve_effective_vit_patch_policy(vision_2d_mode),
         "image_size": int(args.image_size),
         "checkpoint_metadata": checkpoint_metadata,
     }
@@ -181,12 +198,13 @@ def export_newts_pseudo_image(args: argparse.Namespace) -> dict[str, Any]:
 
     transform = NewTSPseudoImageTransform(
         ts_patch_size=resolved["vit_patch_size"],
-        ts_stride=resolved["vit_stride"],
+        ts_stride=resolved["effective_vit_stride"],
         vision_2d_mode=resolved["vision_2d_mode"],
         image_size=resolved["image_size"],
     )
 
     ts_batch = time_series.view(1, -1, 1)
+    runtime_config = transform.get_runtime_transform_config(time_length=int(ts_batch.shape[1]))
     raw_grid = transform.ts2grid(ts_batch)[0, 0].detach().cpu().numpy()
     resized_grid = transform.ts2grayscale_image(ts_batch)[0, 0].detach().cpu().numpy()
 
@@ -217,9 +235,12 @@ def export_newts_pseudo_image(args: argparse.Namespace) -> dict[str, Any]:
         "transform_config": {
             "vit_patch_size": resolved["vit_patch_size"],
             "vit_stride": resolved["vit_stride"],
+            "effective_vit_stride": resolved["effective_vit_stride"],
             "vision_2d_mode": resolved["vision_2d_mode"],
+            "effective_vit_patch_policy": resolved["effective_vit_patch_policy"],
             "image_size": resolved["image_size"],
         },
+        "runtime_transform_config": runtime_config,
         "raw_grid_shape": list(raw_grid.shape),
         "resized_grid_shape": list(resized_grid.shape),
         "saved_render_size": {

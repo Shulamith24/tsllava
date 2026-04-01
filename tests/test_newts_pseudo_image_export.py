@@ -37,26 +37,45 @@ def _write_ucr_dataset(root: Path, dataset_name: str) -> Path:
 
 
 class NewTSPseudoImageExportTest(unittest.TestCase):
-    def test_transform_exposes_grayscale_and_rgb_views(self) -> None:
+    def test_tivit_transform_uses_sqrt_patch_and_rgb_views(self) -> None:
         transform = NewTSPseudoImageTransform(
-            ts_patch_size=4,
-            ts_stride=0.5,
-            vision_2d_mode="reshape_serpentine",
+            ts_patch_size=99,
+            ts_stride=0.1,
+            vision_2d_mode="tivit_sqrt_overlap",
             image_size=8,
         )
         time_series = torch.arange(10, dtype=torch.float32).view(1, 10, 1)
 
+        runtime_config = transform.get_runtime_transform_config(time_length=10)
         grid = transform.ts2grid(time_series)
         gray = transform.ts2grayscale_image(time_series)
         rgb = transform.ts2image(time_series)
 
-        self.assertEqual(tuple(grid.shape), (1, 1, 3, 4))
-        self.assertGreater(float(grid[0, 0, 1, 0]), float(grid[0, 0, 1, -1]))
+        self.assertEqual(runtime_config["effective_patch_size"], 3)
+        self.assertEqual(runtime_config["effective_stride_length"], 1)
+        self.assertEqual(runtime_config["effective_vit_patch_policy"], "sqrt_time_length")
+        self.assertEqual(tuple(grid.shape), (1, 1, 8, 3))
         self.assertEqual(tuple(gray.shape), (1, 1, 8, 8))
         self.assertEqual(tuple(rgb.shape), (1, 3, 8, 8))
         self.assertTrue(torch.allclose(rgb[:, 0], gray[:, 0]))
         self.assertTrue(torch.allclose(rgb[:, 1], gray[:, 0]))
         self.assertTrue(torch.allclose(rgb[:, 2], gray[:, 0]))
+
+    def test_tivit_stride_one_uses_no_overlap_branch(self) -> None:
+        transform = NewTSPseudoImageTransform(
+            ts_patch_size=99,
+            ts_stride=1.0,
+            vision_2d_mode="tivit_sqrt_overlap",
+            image_size=8,
+        )
+        time_series = torch.arange(10, dtype=torch.float32).view(1, 10, 1)
+
+        runtime_config = transform.get_runtime_transform_config(time_length=10)
+        grid = transform.ts2grid(time_series)
+
+        self.assertEqual(runtime_config["effective_patch_size"], 3)
+        self.assertEqual(runtime_config["effective_stride_length"], 3)
+        self.assertEqual(tuple(grid.shape), (1, 1, 3, 4))
 
     def test_script_exports_expected_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,7 +107,8 @@ class NewTSPseudoImageExportTest(unittest.TestCase):
             self.assertTrue(grid_path.exists())
             self.assertTrue(resized_path.exists())
             self.assertTrue(metadata_path.exists())
-            self.assertEqual(metadata["transform_config"]["vision_2d_mode"], "reshape_serpentine")
+            self.assertEqual(metadata["transform_config"]["vision_2d_mode"], "legacy_unfold")
+            self.assertEqual(metadata["transform_config"]["effective_vit_patch_policy"], "fixed")
             self.assertEqual(metadata["resized_grid_shape"], [32, 32])
 
             with Image.open(grid_path) as image:
@@ -112,7 +132,6 @@ class NewTSPseudoImageExportTest(unittest.TestCase):
                         "encoder_config": {
                             "vit_patch_size": 6,
                             "vit_stride": 1.0,
-                            "vision_2d_mode": "legacy_unfold",
                         },
                     }
                 },
@@ -140,8 +159,18 @@ class NewTSPseudoImageExportTest(unittest.TestCase):
 
             self.assertEqual(metadata["transform_config"]["vit_patch_size"], 6)
             self.assertEqual(metadata["transform_config"]["vit_stride"], 1.0)
+            self.assertEqual(metadata["transform_config"]["effective_vit_stride"], 1.0)
             self.assertEqual(metadata["transform_config"]["vision_2d_mode"], "legacy_unfold")
             self.assertEqual(metadata["checkpoint_metadata"]["llm_id"], "demo-llm")
+
+    def test_removed_modes_raise_migration_hint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "removed"):
+            NewTSPseudoImageTransform(
+                ts_patch_size=4,
+                ts_stride=0.5,
+                vision_2d_mode="adaptive_unfold",
+                image_size=8,
+            )
 
 
 if __name__ == "__main__":

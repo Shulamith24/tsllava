@@ -77,171 +77,62 @@ Casting classification as generation has been widely explored in NLP, most notab
 
 In summary, our method lies at the intersection of these four lines of work: few-shot TSC, LLM-based time-series adaptation, vision-based time-series representation learning, and generative classification with constrained decoding. It differs from prior work by jointly combining dual-view token-level encoding, stage-wise time-series-to-LLM alignment, and episode-wise constrained label-token generation in a unified framework for few-shot TSC.
 
-\section{Method}
 
 \subsection{Problem Setup}
+\subsubsection{Few-shot episode formulation}
+We consider few-shot generative time-series classification under a fixed $N$-way $K$-shot protocol, where $N$ is the total number of classes in a given dataset. 
+Let the dataset-level label space be
+$\mathcal{Y}=\{c_1,\ldots,c_N\}$. 
+Following the support/query evaluation paradigm, each episode is denoted by $\mathcal{E}=(\mathcal{S},\mathcal{Q},\mathcal{Y})$, where
+$\mathcal{S}=\{(x_i^{s},y_i^{s})\}_{i=1}^{NK}$ is the support set and
+$\mathcal{Q}=\{(x_j^{q},y_j^{q})\}_{j=1}^{M}$ is the query set. 
+Each sample is a univariate time series $x\in\mathbb{R}^{L}$ with label $y\in\mathcal{Y}$, where $L$ denotes the sequence length. 
+In each episode, the support set contains $K$ labeled examples for every class in $\mathcal{Y}$, while the query set is drawn from the same fixed label space. 
+Therefore, unlike the meta-learning setting with episode-specific class subsets, our few-shot formulation keeps the class space fixed within each dataset and focuses on learning to generalize from limited support examples to query samples under the same full label set.
 
-We study few-shot time series classification (TSC) under an episodic setting.
-Let $\mathcal{C}$ denote the label space of a dataset.
-In each episode $e$, we sample a class subset $\mathcal{C}^{(e)} \subseteq \mathcal{C}$ and construct a support set
-$\mathcal{S}^{(e)}=\{(x_i,y_i)\}_{i=1}^{N_s}$ and a query set
-$\mathcal{Q}^{(e)}=\{(x_j,y_j)\}_{j=1}^{N_q}$ such that $y_i,y_j \in \mathcal{C}^{(e)}$.
-Each input $x \in \mathbb{R}^{L}$ is a univariate time series of length $L$.
-The goal is to predict the class label of each query example using only the limited labeled support examples in the current episode.
 
-Instead of learning a conventional discriminative classifier, we reformulate few-shot TSC as \emph{constrained label-token generation}.
-For each class $c \in \mathcal{C}$, we introduce a class-specific token $g_c$ into the tokenizer vocabulary.
-Given an input time series and a textual instruction, the model is trained to generate the correct label token $g_y$ followed by an end-of-sequence token.
-During inference, generation is restricted to the candidate label tokens in the current episode.
-This turns few-shot TSC into conditional generation over an episode-specific label space.
+\subsubsection{Generative prediction target}
+Instead of using a dataset-specific discriminative classifier head, we associate each class 
+$c_n\in\mathcal{Y}_{\mathrm{epi}}$ with a dedicated label token $\langle c_n\rangle$ and define the valid label-token set as
+$\mathcal{T}_{\mathrm{epi}}=\{\langle c_1\rangle,\ldots,\langle c_N\rangle\}$. 
+Given a query sequence $x$ and the current episode label set, Duet predicts the correct class by autoregressively generating a token 
+$t\in\mathcal{T}_{\mathrm{epi}}$ conditioned on the instruction prompt and the encoded time-series evidence. 
+Formally, the model estimates $p_{\theta}(t\mid x,\mathcal{Y}_{\mathrm{epi}})$ and outputs the label token with the highest constrained likelihood. 
+Therefore, the decision process is cast as constrained label-token generation rather than a softmax over a fixed classifier head, which keeps the prediction mechanism aligned with the causal LLM objective.
 
-\subsection{Framework Overview}
-
-Our framework consists of four components:
-(1) a dual-view time-series encoder,
-(2) a lightweight projector that maps time-series features into the hidden space of a frozen causal LLM,
-(3) a parameter-efficient adaptation module based on LoRA,
-and (4) a generative decision layer implemented through class-specific token prediction.
-
-Given a time series $x$, we encode it from two complementary views.
-A temporal branch captures local-to-global temporal dependencies directly in sequence space, while a visual branch converts the series into a 2D image and extracts morphology-aware representations.
-Unlike architectures that aggressively compress multimodal evidence into a small number of slots, we preserve the token-level outputs of both branches and directly concatenate them before projection.
-The projected tokens are then injected into an instruction-style input as continuous soft prompts for a frozen causal LLM, which predicts a class token autoregressively.
-
-\subsection{Dual-View Time-Series Encoder}
-
-\paragraph{Temporal branch.}
-We first partition the input series $x$ into overlapping patches of length $P$ with stride $S$,
-yielding $M_t$ temporal patches:
+\subsection{Overview of Duet}
+\subsubsection{Architecture overview}
+As illustrated in Fig.~\ref{fig:overview}, Duet contains three components: a dual-view time-series encoder, an alignment projector, and a constrained generative predictor. 
+For an input time series $x$, the temporal branch extracts sequential patch tokens
+$\mathbf{H}^{\mathrm{ts}}=E_{\mathrm{ts}}(x)$, while the visual branch transforms $x$ into a 2D view and produces morphology-aware tokens
+$\mathbf{H}^{\mathrm{vis}}=E_{\mathrm{vis}}(x)$. 
+The two views are then fused as
 \[
-\mathbf{p}_m = x_{(m-1)S+1:(m-1)S+P}, \qquad m=1,\dots,M_t.
+\mathbf{Z}=\mathrm{Fuse}(\mathbf{H}^{\mathrm{ts}},\mathbf{H}^{\mathrm{vis}}),
 \]
-Each patch is linearly embedded and augmented with positional information, and the resulting patch sequence is fed into a Transformer encoder:
+where $\mathrm{Fuse}(\cdot)$ denotes either direct token concatenation or an optional aggregation module. 
+The fused representation is mapped into the hidden space of the frozen LLM through an alignment projector,
 \[
-\mathbf{H}^{t} = F_t(\mathbf{p}_1,\dots,\mathbf{p}_{M_t}) \in \mathbb{R}^{M_t \times d_{ts}},
+\mathbf{P}=\mathrm{Proj}(\mathbf{Z}).
 \]
-where $F_t$ denotes the temporal encoder and $d_{ts}$ is the time-series feature dimension.
-This branch is designed to model short-range local patterns, long-range dependencies, and temporal evolution dynamics in the original 1D signal space.
-
-\paragraph{Visual branch.}
-In parallel, we transform the same time series into a 2D visual representation:
+The projected tokens are inserted as soft prompts into an instruction-style input, yielding
 \[
-\mathbf{I} = \mathcal{R}(x),
+\mathbf{H}=
+[\mathbf{E}_{\mathrm{pre}};\mathbf{E}_{\mathrm{ts\text{-}text}};\mathbf{P};\mathbf{E}_{\mathrm{post}}],
 \]
-where $\mathcal{R}(\cdot)$ is a deterministic rendering function that converts the 1D signal into an image.
-The rendered image is processed by a visual backbone $F_v$, producing a sequence of visual tokens:
-\[
-\widetilde{\mathbf{H}}^{v} = F_v(\mathbf{I}) \in \mathbb{R}^{M_v \times d_v}.
-\]
-Because the visual backbone and the temporal branch may operate in different feature spaces, we project the visual tokens into the same time-series feature dimension:
-\[
-\mathbf{H}^{v} = \widetilde{\mathbf{H}}^{v}\mathbf{W}_v + \mathbf{b}_v \in \mathbb{R}^{M_v \times d_{ts}}.
-\]
-This branch emphasizes morphology-aware cues such as waveform shape, periodic structure, texture-like patterns, and spatialized anomalies that may be less explicit in a purely sequential representation.
+where $\mathbf{E}_{\mathrm{pre}}$, $\mathbf{E}_{\mathrm{ts\text{-}text}}$, and $\mathbf{E}_{\mathrm{post}}$ denote the embeddings of the textual prompt segments. 
+The frozen causal LLM then generates the target class token under the episode-specific constraint set $\mathcal{T}_{\mathrm{epi}}$.
 
-\paragraph{Token-level fusion.}
-The two views are fused by direct concatenation at the token level:
-\[
-\mathbf{H} = [\mathbf{H}^{t}; \mathbf{H}^{v}] \in \mathbb{R}^{(M_t+M_v)\times d_{ts}}.
-\]
-Importantly, we do not apply slot-based pooling or early aggregation before fusion.
-This preserves fine-grained evidence from both views and allows the downstream LLM to attend jointly to temporal dynamics and morphology-aware structure.
+\subsubsection{Training stages overview}
+The training pipeline consists of two levels. 
+First, we perform alignment pretraining to reduce the representation gap between time-series features and the hidden space of the frozen LLM. 
+At this stage, the dual-view encoder and the projector are optimized while the main LLM backbone remains frozen. 
+Second, we adapt the model to downstream few-shot classification by introducing class-specific label tokens and training the model to generate the correct token for each query sample. 
+This downstream stage is further divided into a warm-up phase and a joint tuning phase. 
+The warm-up phase updates the newly introduced class-token parameters together with the encoder and projector, which stabilizes the initially random class-token embeddings. 
+The joint phase additionally enables lightweight LoRA adapters for the LLM, allowing limited language-side adaptation without fully unfreezing the backbone. 
+This stage-wise design improves optimization stability and preserves consistency between time-series prompting and autoregressive label-token prediction.
 
-\subsection{Time-Series-to-LLM Interface}
-
-The dual-view encoder outputs are not converted into textualized numbers.
-Instead, they are mapped into the hidden space of a causal LLM through a lightweight projector:
-\[
-\mathbf{Z} = \mathbf{H}\mathbf{W}_p + \mathbf{b}_p \in \mathbb{R}^{M \times d_{llm}},
-\]
-where $M=M_t+M_v$ and $d_{llm}$ is the hidden size of the LLM.
-
-We then build an instruction-style input for each sample.
-The textual part contains:
-(1) a task instruction stating that the problem is an $N$-class classification task and that the model should output only a class token,
-(2) a short description specifying the time-series modality and length information,
-and (3) a suffix prompt that asks for the answer.
-Let $\mathbf{E}_{pre}$, $\mathbf{E}_{desc}$, and $\mathbf{E}_{suf}$ denote the corresponding text embeddings produced by the tokenizer and embedding layer of the LLM.
-The final conditioning sequence is assembled as
-\[
-\mathbf{C}(x) = [\mathbf{E}_{pre}; \mathbf{E}_{desc}; \mathbf{Z}; \mathbf{E}_{suf}].
-\]
-Hence, the LLM receives a mixed sequence composed of text tokens and continuous time-series soft prompts.
-
-\subsection{Generative Classification with Class Tokens}
-
-For each class $c$, we add a unique label token $g_c$ to the tokenizer.
-Given an example $(x,y)$, the target answer sequence is
-\[
-\mathbf{a}(y) = [g_y, \texttt{<eos>}].
-\]
-During training, the answer embeddings are appended to the conditioning sequence:
-\[
-\mathbf{X}(x,y) = [\mathbf{C}(x); \mathbf{E}(g_y); \mathbf{E}(\texttt{<eos>})].
-\]
-The model is optimized with an autoregressive language-modeling objective, but the loss is computed only on the answer segment:
-\[
-\mathcal{L}_{gen}
-=
-- \log p_\Theta(g_y \mid \mathbf{C}(x))
-- \log p_\Theta(\texttt{<eos>} \mid \mathbf{C}(x), g_y).
-\]
-Therefore, the textual prompt and the time-series soft prompts serve purely as conditions, while supervision is concentrated on the generated label token and the end token.
-
-In practice, we allow the token embedding matrix and the LM head to be trainable for implementation simplicity.
-However, because supervision is applied only to the answer segment, the optimization pressure is primarily focused on the class-specific tokens and their surrounding decision interface.
-
-\subsection{Constrained Decoding}
-
-At inference time, the target answer is not appended.
-Given the conditioning sequence $\mathbf{C}(x)$, the model generates at most two tokens.
-To reduce irrelevant output freedom, decoding is constrained to the episode-specific candidate set
-\[
-\mathcal{V}^{(e)} = \{ g_c \mid c \in \mathcal{C}^{(e)} \} \cup \{\texttt{<eos>}\}.
-\]
-Because each class is represented by a single token, prediction is equivalent to
-\[
-\hat{y}
-=
-\arg\max_{c \in \mathcal{C}^{(e)}}
-p_\Theta(g_c \mid \mathbf{C}(x)).
-\]
-The model then emits \texttt{<eos>} after the selected class token.
-This constrained decoding strategy preserves consistency with the autoregressive objective while removing irrelevant open-vocabulary alternatives, leading to more stable decisions in low-data regimes.
-
-\subsection{Stage-wise Alignment and Parameter-Efficient Adaptation}
-
-A central challenge in our framework is the representation mismatch between time-series features and the latent space of the frozen LLM.
-To address this issue, we adopt a stage-wise optimization strategy.
-
-\paragraph{Stage 1: alignment warm-up.}
-In the first stage, we optimize the dual-view encoder and the projector while keeping the main LLM backbone frozen and without activating LoRA.
-This stage focuses on learning an LLM-compatible interface for the injected time-series tokens and stabilizes cross-modal alignment before joint adaptation.
-
-\paragraph{Stage 2: joint adaptation.}
-In the second stage, we continue training from the warm-up initialization and activate LoRA modules in the LLM.
-The trainable parameters then include the dual-view encoder, the projector, the LoRA parameters, and the class-token-related embedding/output parameters, while the original LLM backbone remains frozen.
-This design preserves the pretrained generative prior of the LLM while allowing parameter-efficient task adaptation.
-
-When alignment pretraining is used, the same stage-wise schedule is first applied on the pretraining data to initialize the time-series-to-LLM interface, and the resulting weights are then adapted to downstream few-shot episodes.
-When alignment pretraining is disabled, the model is trained directly on the downstream task using the same generative objective.
-
-\subsection{Few-Shot Episodic Adaptation}
-
-For few-shot learning, training is conducted only on the support set of each episode.
-We consider both all-way $K$-shot episodes and $N$-way $K$-shot episodes.
-For the latter, we first sample $N$ classes and then sample up to $K$ support examples per class.
-If a class contains fewer than $K$ training examples, we use all available examples of that class rather than dropping it.
-The query set is formed from test samples belonging to the same episode-specific class subset $\mathcal{C}^{(e)}$.
-
-This protocol makes each run a self-contained episode with its own support set, query set, and decoding label space.
-The final model is evaluated directly on the query set of the same episode, ensuring that both supervision and constrained decoding are matched to the current few-shot task.
-
-\subsection{Full-Supervised Variant}
-
-The same architecture also supports a full-supervised training regime.
-This variant can be obtained by removing episodic sampling, training on the full training split, and performing constrained decoding over the complete dataset label space.
-Therefore, the difference between the few-shot and full-supervised settings lies in the training protocol rather than in the model architecture itself.
 \section{Other Resources}
 See \cite{ref1,ref2,ref3,ref4,ref5} for resources on formatting math into text and additional help in working with \LaTeX .
 
