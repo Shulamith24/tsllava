@@ -63,6 +63,10 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         aggregator_fusion_mode: str = "gated_sum",
         aggregator_gate_type: str = "dynamic",
         aggregator_fuse_layers: int = 1,
+        enable_modality_embeddings: bool = False,
+        branch_dropout: float = 0.0,
+        vision_train_mode: str = "none",
+        vision_topk_blocks: int = 4,
         freeze_ts_backbone: bool = False,
         freeze_vision_backbone: bool = True,
         device: str = "cuda",
@@ -116,6 +120,10 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         self.aggregator_fusion_mode = aggregator_fusion_mode
         self.aggregator_gate_type = aggregator_gate_type
         self.aggregator_fuse_layers = int(aggregator_fuse_layers)
+        self.enable_modality_embeddings = bool(enable_modality_embeddings)
+        self.branch_dropout = float(branch_dropout)
+        self.vision_train_mode = str(vision_train_mode)
+        self.vision_topk_blocks = int(vision_topk_blocks)
         self.freeze_ts_backbone_default = bool(freeze_ts_backbone)
         self.freeze_vision_backbone_default = bool(freeze_vision_backbone)
         self.device = device
@@ -127,6 +135,8 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             raise ValueError("aggregator_ffn_dim must be positive")
         if self.use_pma and self.aggregator_hidden_size % self.aggregator_num_heads != 0:
             raise ValueError("aggregator_hidden_size must be divisible by aggregator_num_heads")
+        if not 0.0 <= self.branch_dropout < 1.0:
+            raise ValueError("branch_dropout must be in [0, 1)")
 
         if branch_mode in {"both", "ts_only"}:
             self.ts_backbone = DynamicPatchTSTBackbone(
@@ -155,6 +165,8 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
                 vision_2d_mode=vision_2d_mode,
                 truncate_to_feature_layer=vit_truncate_to_feature_layer,
                 num_hidden_layers=vit_num_hidden_layers,
+                vision_train_mode=self.vision_train_mode,
+                vision_topk_blocks=self.vision_topk_blocks,
                 device=device,
             )
             self.vision_hidden_dim = self.vision_encoder.get_output_dim()
@@ -187,10 +199,32 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             self.aggregator = None
             self.post_aggregator_projector = None
 
+        if self.enable_modality_embeddings:
+            self.ts_modality_embed = nn.Parameter(torch.zeros(1, 1, self.token_output_dim))
+            self.vision_modality_embed = nn.Parameter(torch.zeros(1, 1, self.token_output_dim))
+            nn.init.normal_(self.ts_modality_embed, mean=0.0, std=0.02)
+            nn.init.normal_(self.vision_modality_embed, mean=0.0, std=0.02)
+        else:
+            self.register_parameter("ts_modality_embed", None)
+            self.register_parameter("vision_modality_embed", None)
+
+        if self.enable_modality_embeddings or self.branch_dropout > 0:
+            self.fused_pool_proj = nn.Sequential(
+                nn.LayerNorm(self.output_dim),
+                nn.Linear(self.output_dim, self.output_dim),
+            )
+        else:
+            self.fused_pool_proj = nn.Identity()
+
         if freeze_ts_backbone and self.ts_backbone is not None:
             self.freeze_ts_backbone()
         if freeze_vision_backbone and self.vision_encoder is not None:
             self.freeze_vision_backbone()
+        elif self.vision_encoder is not None:
+            self.vision_encoder.set_trainable_blocks(
+                mode=self.vision_train_mode,
+                topk=self.vision_topk_blocks,
+            )
 
     def _build_projector(self, input_dim: int, output_dim: int) -> nn.Module:
         if input_dim == output_dim:
@@ -233,7 +267,61 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         if self.vision_encoder is not None:
             self.vision_encoder.enable_gradient_checkpointing()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _mean_pool(tokens: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if tokens is None:
+            return None
+        return tokens.mean(dim=1)
+
+    def _resolve_runtime_branch_mode(self, runtime_branch_mode: str) -> str:
+        runtime_branch_mode = str(runtime_branch_mode).lower()
+        if runtime_branch_mode not in {"both", "ts_only", "vision_only"}:
+            raise ValueError(f"Unsupported runtime_branch_mode: {runtime_branch_mode}")
+
+        if self.branch_mode != "both":
+            return self.branch_mode
+
+        if not self.training or self.branch_dropout <= 0.0 or runtime_branch_mode != "both":
+            return runtime_branch_mode
+
+        draw = torch.rand(1).item()
+        if draw < self.branch_dropout:
+            return "ts_only"
+        if draw < 2 * self.branch_dropout:
+            return "vision_only"
+        return "both"
+
+    def _apply_runtime_branch_mode(
+        self,
+        ts_embeddings: Optional[torch.Tensor],
+        vision_embeddings: Optional[torch.Tensor],
+        runtime_branch_mode: str,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], str]:
+        effective_mode = self._resolve_runtime_branch_mode(runtime_branch_mode)
+        if effective_mode == "ts_only":
+            return ts_embeddings, None, effective_mode
+        if effective_mode == "vision_only":
+            return None, vision_embeddings, effective_mode
+        return ts_embeddings, vision_embeddings, effective_mode
+
+    def _apply_modality_embedding(
+        self,
+        tokens: Optional[torch.Tensor],
+        modality_embed: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if tokens is None:
+            return None
+        if modality_embed is None:
+            return tokens
+        return tokens + modality_embed.to(device=tokens.device, dtype=tokens.dtype)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        runtime_branch_mode: str = "both",
+        return_intermediates: bool = False,
+    ):
         if x.dim() != 2:
             raise ValueError(f"Expected 2D input [B, L], got shape {tuple(x.shape)}")
 
@@ -251,18 +339,46 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         if ts_embeddings is None and vision_embeddings is None:
             raise RuntimeError("No active branch is available in NewTSDualBranchEncoder")
 
+        ts_runtime_tokens, vision_runtime_tokens, effective_mode = self._apply_runtime_branch_mode(
+            ts_embeddings,
+            vision_embeddings,
+            runtime_branch_mode=runtime_branch_mode,
+        )
+        pooled_ts = self._mean_pool(ts_runtime_tokens)
+        pooled_vision = self._mean_pool(vision_runtime_tokens)
+
+        ts_fused_input = self._apply_modality_embedding(ts_runtime_tokens, self.ts_modality_embed)
+        vision_fused_input = self._apply_modality_embedding(vision_runtime_tokens, self.vision_modality_embed)
+
         if self.use_pma:
             agg_outputs = self.aggregator(
-                ts_tokens=ts_embeddings,
-                vision_tokens=vision_embeddings,
+                ts_tokens=ts_fused_input,
+                vision_tokens=vision_fused_input,
             )
-            return self.post_aggregator_projector(agg_outputs["slot_states"])
+            fused_tokens = self.post_aggregator_projector(agg_outputs["slot_states"])
+        elif ts_fused_input is None:
+            fused_tokens = vision_fused_input
+        elif vision_fused_input is None:
+            fused_tokens = ts_fused_input
+        else:
+            fused_tokens = torch.cat([ts_fused_input, vision_fused_input], dim=1)
 
-        if ts_embeddings is None:
-            return vision_embeddings
-        if vision_embeddings is None:
-            return ts_embeddings
-        return torch.cat([ts_embeddings, vision_embeddings], dim=1)
+        if not return_intermediates:
+            return fused_tokens
+
+        pooled_fused = self._mean_pool(fused_tokens)
+        if pooled_fused is not None:
+            pooled_fused = self.fused_pool_proj(pooled_fused)
+
+        return {
+            "ts_tokens": ts_runtime_tokens,
+            "vision_tokens": vision_runtime_tokens,
+            "fused_tokens": fused_tokens,
+            "pooled_ts": pooled_ts,
+            "pooled_vision": pooled_vision,
+            "pooled_fused": pooled_fused,
+            "effective_branch_mode": effective_mode,
+        }
 
     def get_config(self) -> Dict[str, Any]:
         config = {
@@ -285,6 +401,10 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             "aggregator_fusion_mode": self.aggregator_fusion_mode,
             "aggregator_gate_type": self.aggregator_gate_type,
             "aggregator_fuse_layers": self.aggregator_fuse_layers,
+            "enable_modality_embeddings": self.enable_modality_embeddings,
+            "branch_dropout": self.branch_dropout,
+            "vision_train_mode": self.vision_train_mode,
+            "vision_topk_blocks": self.vision_topk_blocks,
             "freeze_ts_backbone": self.freeze_ts_backbone_default,
             "freeze_vision_backbone": self.freeze_vision_backbone_default,
         }

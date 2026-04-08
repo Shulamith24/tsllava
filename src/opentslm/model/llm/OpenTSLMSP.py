@@ -8,6 +8,7 @@ import torch.nn as nn
 from typing import Any, Dict, List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
 
 try:
     from peft import get_peft_model, LoraConfig, TaskType
@@ -82,6 +83,17 @@ class OpenTSLMSP(TimeSeriesLLM):
         # Freeze the LLM backbone for SP model (internally)
         for p in self.llm.parameters():
             p.requires_grad = False
+
+        self.runtime_branch_mode = "both"
+        self.alignment_losses_enabled = False
+        self.loss_w_align = 0.0
+        self.loss_w_consistency = 0.0
+        self.alignment_temperature = 0.07
+        self.alignment_dim = 256
+        self.ts_align_head: Optional[nn.Module] = None
+        self.vision_align_head: Optional[nn.Module] = None
+        self.fused_align_head: Optional[nn.Module] = None
+        self.text_align_head: Optional[nn.Module] = None
 
     def enable_gradient_checkpointing(self):
         """
@@ -233,10 +245,121 @@ class OpenTSLMSP(TimeSeriesLLM):
         self.lora_enabled = False
         print("✅ LoRA disabled, reverted to frozen LLM")
 
+    def set_runtime_branch_mode(self, runtime_branch_mode: str):
+        runtime_branch_mode = str(runtime_branch_mode).lower()
+        if runtime_branch_mode not in {"both", "ts_only", "vision_only"}:
+            raise ValueError(f"Unsupported runtime_branch_mode: {runtime_branch_mode}")
+        self.runtime_branch_mode = runtime_branch_mode
+
+    def enable_alignment_losses(
+        self,
+        *,
+        loss_w_align: float = 0.2,
+        loss_w_consistency: float = 0.1,
+        align_dim: int = 256,
+        temperature: float = 0.07,
+    ):
+        if align_dim <= 0:
+            raise ValueError("align_dim must be positive")
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+
+        self.loss_w_align = float(loss_w_align)
+        self.loss_w_consistency = float(loss_w_consistency)
+        self.alignment_temperature = float(temperature)
+        self.alignment_dim = int(align_dim)
+
+        if self.ts_align_head is None:
+            self.ts_align_head = nn.Sequential(
+                nn.LayerNorm(ENCODER_OUTPUT_DIM),
+                nn.Linear(ENCODER_OUTPUT_DIM, self.alignment_dim),
+            ).to(self.device)
+        if self.vision_align_head is None:
+            self.vision_align_head = nn.Sequential(
+                nn.LayerNorm(ENCODER_OUTPUT_DIM),
+                nn.Linear(ENCODER_OUTPUT_DIM, self.alignment_dim),
+            ).to(self.device)
+        if self.fused_align_head is None:
+            self.fused_align_head = nn.Sequential(
+                nn.LayerNorm(ENCODER_OUTPUT_DIM),
+                nn.Linear(ENCODER_OUTPUT_DIM, self.alignment_dim),
+            ).to(self.device)
+        if self.text_align_head is None:
+            self.text_align_head = nn.Sequential(
+                nn.LayerNorm(self.llm.config.hidden_size),
+                nn.Linear(self.llm.config.hidden_size, self.alignment_dim),
+            ).to(self.device)
+
+        self.alignment_losses_enabled = True
+
+    @staticmethod
+    def _mean_pool_hidden_states(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        denom = attention_mask.sum(dim=1, keepdim=True).clamp_min(1)
+        return (hidden_states * attention_mask.unsqueeze(-1)).sum(dim=1) / denom
+
+    def _encode_alignment_texts(self, texts: List[str]) -> torch.Tensor:
+        if not texts:
+            raise ValueError("Alignment texts must not be empty")
+        if self.text_align_head is None:
+            raise RuntimeError("Alignment losses are not enabled")
+
+        tok = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        )
+        input_ids = tok.input_ids.to(self.device, non_blocking=True)
+        attention_mask = tok.attention_mask.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            outputs = self.llm(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hidden_states = outputs.hidden_states[-1]
+
+        pooled = self._mean_pool_hidden_states(hidden_states, attention_mask)
+        projected = self.text_align_head(pooled.float())
+        return F.normalize(projected, dim=-1)
+
+    def _aggregate_encoder_pooled_outputs(
+        self,
+        pooled_outputs: Dict[str, Optional[torch.Tensor]],
+        ts_counts: List[int],
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        aggregated: Dict[str, Optional[torch.Tensor]] = {}
+        for key, tensor in pooled_outputs.items():
+            if tensor is None:
+                aggregated[key] = None
+                continue
+
+            sample_vectors = []
+            offset = 0
+            for count in ts_counts:
+                if count <= 0:
+                    sample_vectors.append(torch.zeros_like(tensor[0]))
+                    continue
+                sample_vectors.append(tensor[offset : offset + count].mean(dim=0))
+                offset += count
+            aggregated[key] = torch.stack(sample_vectors, dim=0)
+        return aggregated
+
+    def _contrastive_info_nce(self, z_a: torch.Tensor, z_b: torch.Tensor) -> torch.Tensor:
+        logits = torch.matmul(z_a, z_b.transpose(0, 1)) / self.alignment_temperature
+        targets = torch.arange(logits.size(0), device=logits.device)
+        loss_a = F.cross_entropy(logits, targets)
+        loss_b = F.cross_entropy(logits.transpose(0, 1), targets)
+        return 0.5 * (loss_a + loss_b)
+
     def pad_and_apply_batch(
         self,
         batch: List[Dict[str, any]],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        *,
+        runtime_branch_mode: Optional[str] = None,
+        return_encoder_outputs: bool = False,
+    ):
         """
         TL;DR:
             This function is probably the most crucial part of OpenTSLM-SP, and also the hardest to understand.
@@ -308,6 +431,7 @@ class OpenTSLMSP(TimeSeriesLLM):
                     ts = ts.unsqueeze(-1)
                 ts_list.append(ts)
 
+        encoder_outputs = None
         if ts_list:
             ts_padded = pad_sequence(ts_list, batch_first=True).to(
                 device, non_blocking=True
@@ -322,9 +446,18 @@ class OpenTSLMSP(TimeSeriesLLM):
             # ── now ts_padded: [N_ts_total, T_padded, 1]
 
             # ── key fix: squeeze out the feature dim so encoder sees [B, L] ──
-            ts_enc = self.encoder(
-                ts_padded.squeeze(-1)
-            )  # [N_ts_total, N_patches, embed_dim]
+            if self.encoder_type == "newts_dual_branch":
+                ts_enc = self.encoder(
+                    ts_padded.squeeze(-1),
+                    runtime_branch_mode=runtime_branch_mode or self.runtime_branch_mode,
+                    return_intermediates=return_encoder_outputs,
+                )
+            else:
+                ts_enc = self.encoder(ts_padded.squeeze(-1))
+
+            if return_encoder_outputs and self.encoder_type == "newts_dual_branch":
+                encoder_outputs = ts_enc
+                ts_enc = encoder_outputs["fused_tokens"]
             ts_proj = self.projector(ts_enc).to(
                 text_embeds.dtype
             )  # [N_ts_total, N_patches, H]
@@ -371,12 +504,35 @@ class OpenTSLMSP(TimeSeriesLLM):
         inputs_embeds = pad_sequence(all_seq_embeds, batch_first=True)  # [B, L_max, H]
         attention_mask = pad_sequence(all_seq_masks, batch_first=True)  # [B, L_max]
 
-        return inputs_embeds, attention_mask
+        if not return_encoder_outputs:
+            return inputs_embeds, attention_mask
+
+        pooled_outputs = self._aggregate_encoder_pooled_outputs(
+            {
+                "pooled_ts": encoder_outputs.get("pooled_ts") if encoder_outputs is not None else None,
+                "pooled_vision": encoder_outputs.get("pooled_vision") if encoder_outputs is not None else None,
+                "pooled_fused": encoder_outputs.get("pooled_fused") if encoder_outputs is not None else None,
+            },
+            ts_counts=ts_counts,
+        )
+        return inputs_embeds, attention_mask, {
+            **pooled_outputs,
+            "effective_branch_mode": (
+                encoder_outputs.get("effective_branch_mode") if encoder_outputs is not None else None
+            ),
+        }
 
     def generate(
-        self, batch: List[Dict[str, any]], max_new_tokens: int = 50, **generate_kwargs
+        self,
+        batch: List[Dict[str, any]],
+        max_new_tokens: int = 50,
+        runtime_branch_mode: Optional[str] = None,
+        **generate_kwargs,
     ) -> List[str]:
-        inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
+        inputs_embeds, attention_mask = self.pad_and_apply_batch(
+            batch,
+            runtime_branch_mode=runtime_branch_mode,
+        )
         gen_ids = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -385,14 +541,28 @@ class OpenTSLMSP(TimeSeriesLLM):
         )
         return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
 
-    def compute_loss(self, batch: List[Dict[str, any]]) -> torch.Tensor:
+    def compute_losses(
+        self,
+        batch: List[Dict[str, any]],
+        *,
+        runtime_branch_mode: Optional[str] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         batch: same format as generate()
         answers: List[str] of length B
         """
         answers = [b["answer"] for b in batch]
 
-        inputs_embeds, attention_mask = self.pad_and_apply_batch(batch)
+        encoder_outputs = None
+        batch_outputs = self.pad_and_apply_batch(
+            batch,
+            runtime_branch_mode=runtime_branch_mode,
+            return_encoder_outputs=self.alignment_losses_enabled,
+        )
+        if self.alignment_losses_enabled:
+            inputs_embeds, attention_mask, encoder_outputs = batch_outputs
+        else:
+            inputs_embeds, attention_mask = batch_outputs
         B, L, H = inputs_embeds.size()
 
         # tokenize answers,但不添加bos token
@@ -418,7 +588,50 @@ class OpenTSLMSP(TimeSeriesLLM):
             labels=labels,
             return_dict=True,
         )
-        return outputs.loss
+        loss_lm = outputs.loss
+        loss_align = torch.zeros((), device=self.device, dtype=loss_lm.dtype)
+        loss_consistency = torch.zeros((), device=self.device, dtype=loss_lm.dtype)
+        loss_total = loss_lm
+
+        if self.alignment_losses_enabled and encoder_outputs is not None:
+            pooled_fused = encoder_outputs.get("pooled_fused")
+            if pooled_fused is not None and self.fused_align_head is not None:
+                align_indices = [
+                    idx
+                    for idx, sample in enumerate(batch)
+                    if sample.get("alignment_target_text")
+                ]
+                if align_indices:
+                    z_fused = self.fused_align_head(pooled_fused[align_indices].float())
+                    z_fused = F.normalize(z_fused, dim=-1)
+                    z_text = self._encode_alignment_texts(
+                        [batch[idx]["alignment_target_text"] for idx in align_indices]
+                    )
+                    loss_align = self._contrastive_info_nce(z_fused, z_text).to(loss_lm.dtype)
+
+            pooled_ts = encoder_outputs.get("pooled_ts")
+            pooled_vision = encoder_outputs.get("pooled_vision")
+            if (
+                pooled_ts is not None
+                and pooled_vision is not None
+                and self.ts_align_head is not None
+                and self.vision_align_head is not None
+            ):
+                z_ts = F.normalize(self.ts_align_head(pooled_ts.float()), dim=-1)
+                z_vi = F.normalize(self.vision_align_head(pooled_vision.float()), dim=-1)
+                loss_consistency = (1.0 - F.cosine_similarity(z_ts, z_vi, dim=-1)).mean().to(loss_lm.dtype)
+
+            loss_total = loss_total + self.loss_w_align * loss_align + self.loss_w_consistency * loss_consistency
+
+        return {
+            "loss_total": loss_total,
+            "loss_lm": loss_lm,
+            "loss_align": loss_align,
+            "loss_consistency": loss_consistency,
+        }
+
+    def compute_loss(self, batch: List[Dict[str, any]]) -> torch.Tensor:
+        return self.compute_losses(batch)["loss_total"]
 
     def get_eos_token(self) -> str:
         return self.tokenizer.eos_token
@@ -621,6 +834,10 @@ class OpenTSLMSP(TimeSeriesLLM):
             "aggregator_fusion_mode": "gated_sum",
             "aggregator_gate_type": "dynamic",
             "aggregator_fuse_layers": 1,
+            "enable_modality_embeddings": False,
+            "branch_dropout": 0.0,
+            "vision_train_mode": "none",
+            "vision_topk_blocks": 4,
             "freeze_ts_backbone": False,
             "freeze_vision_backbone": True,
         }

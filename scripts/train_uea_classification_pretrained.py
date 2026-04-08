@@ -104,6 +104,13 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
     parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
+    parser.add_argument(
+        "--runtime_branch_mode",
+        type=str,
+        default="both",
+        choices=["both", "ts_only", "vision_only"],
+        help="Dual-branch checkpoint runtime masking mode.",
+    )
     
     # 其他
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
@@ -470,7 +477,12 @@ def main():
             param.requires_grad = False
         if rank == 0:
             print("🧊 编码器参数已冻结")
-    
+
+    if hasattr(model, "set_runtime_branch_mode"):
+        model.set_runtime_branch_mode(args.runtime_branch_mode)
+        if rank == 0:
+            print(f"🌿 runtime_branch_mode: {args.runtime_branch_mode}")
+
     # DDP包装
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])

@@ -103,6 +103,13 @@ def parse_args(argv=None):
 
     parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
     parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
+    parser.add_argument(
+        "--runtime_branch_mode",
+        type=str,
+        default="both",
+        choices=["both", "ts_only", "vision_only"],
+        help="Dual-branch checkpoint runtime masking mode.",
+    )
 
     parser.add_argument("--dataset", type=str, default="CricketZ", help="UCR数据集名称")
     parser.add_argument("--data_path", type=str, default="./data", help="UCR数据根目录")
@@ -798,6 +805,11 @@ def build_model(args, device: str, rank: int):
             param.requires_grad = False
         if rank == 0:
             print("🧊 编码器参数已冻结")
+
+    if hasattr(model, "set_runtime_branch_mode"):
+        model.set_runtime_branch_mode(args.runtime_branch_mode)
+        if rank == 0:
+            print(f"🌿 runtime_branch_mode: {args.runtime_branch_mode}")
 
     return model
 

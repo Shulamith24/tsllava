@@ -129,6 +129,13 @@ def parse_args(argv=None):
     # Must-specify switches / compatibility flags
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing")
     parser.add_argument("--freeze_encoder", action="store_true", help="Freeze encoder parameters")
+    parser.add_argument(
+        "--runtime_branch_mode",
+        type=str,
+        default="both",
+        choices=["both", "ts_only", "vision_only"],
+        help="Runtime branch masking for dual-branch checkpoints.",
+    )
 
     # Data
     parser.add_argument("--dataset", type=str, default="CricketZ", help="UCR dataset name")
@@ -973,6 +980,11 @@ def build_model(args, device: str, rank: int):
             param.requires_grad = False
         if rank == 0:
             print("🧊 Encoder parameters frozen")
+
+    if hasattr(model, "set_runtime_branch_mode"):
+        model.set_runtime_branch_mode(args.runtime_branch_mode)
+        if rank == 0:
+            print(f"🌿 runtime_branch_mode: {args.runtime_branch_mode}")
 
     return model
 

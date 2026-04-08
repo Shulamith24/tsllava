@@ -397,6 +397,8 @@ class NewTSVisionEncoder(nn.Module):
         return_cls_token: bool = False,
         truncate_to_feature_layer: bool = True,
         num_hidden_layers: Optional[int] = None,
+        vision_train_mode: str = "none",
+        vision_topk_blocks: int = 4,
         device: str = "cuda",
     ):
         super().__init__()
@@ -413,6 +415,8 @@ class NewTSVisionEncoder(nn.Module):
         self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(
             num_hidden_layers=num_hidden_layers
         )
+        self.vision_train_mode = str(vision_train_mode)
+        self.vision_topk_blocks = int(vision_topk_blocks)
         self.device = device
 
         (
@@ -623,6 +627,83 @@ class NewTSVisionEncoder(nn.Module):
         for param in self.vit.parameters():
             param.requires_grad = True
 
+    def _get_embeddings_module(self) -> Optional[nn.Module]:
+        if hasattr(self.vit, "embeddings"):
+            return self.vit.embeddings
+        if hasattr(self.vit, "vision_model") and hasattr(self.vit.vision_model, "embeddings"):
+            return self.vit.vision_model.embeddings
+        return None
+
+    def _get_encoder_blocks(self):
+        if hasattr(self.vit, "encoder") and hasattr(self.vit.encoder, "layer"):
+            return list(self.vit.encoder.layer)
+        if hasattr(self.vit, "vision_model") and hasattr(self.vit.vision_model, "encoder"):
+            encoder = self.vit.vision_model.encoder
+            if hasattr(encoder, "layers"):
+                return list(encoder.layers)
+        return []
+
+    def _get_final_norm_modules(self):
+        modules = []
+        for attr_name in ("layernorm", "post_layernorm", "post_layernorm", "norm", "pre_layrnorm"):
+            module = getattr(self.vit, attr_name, None)
+            if isinstance(module, nn.Module):
+                modules.append(module)
+        if hasattr(self.vit, "vision_model"):
+            for attr_name in ("post_layernorm", "pre_layrnorm", "layernorm"):
+                module = getattr(self.vit.vision_model, attr_name, None)
+                if isinstance(module, nn.Module):
+                    modules.append(module)
+        return modules
+
+    @staticmethod
+    def _set_module_requires_grad(module: Optional[nn.Module], requires_grad: bool):
+        if module is None:
+            return
+        for param in module.parameters():
+            param.requires_grad = requires_grad
+
+    def set_trainable_blocks(
+        self,
+        mode: str = "none",
+        topk: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        mode = str(mode).lower()
+        if mode not in {"none", "topk", "all"}:
+            raise ValueError(f"Unsupported vision_train_mode: {mode}")
+
+        if topk is None:
+            topk = self.vision_topk_blocks
+        topk = int(topk)
+        if topk < 0:
+            raise ValueError("vision_topk_blocks must be >= 0")
+
+        self.freeze()
+        blocks = self._get_encoder_blocks()
+        trainable_indices = []
+
+        if mode == "all":
+            self.unfreeze()
+            trainable_indices = list(range(len(blocks)))
+        elif mode == "topk":
+            if blocks:
+                self._set_module_requires_grad(self._get_embeddings_module(), True)
+                for module in self._get_final_norm_modules():
+                    self._set_module_requires_grad(module, True)
+                if topk > 0:
+                    start_idx = max(0, len(blocks) - topk)
+                    trainable_indices = list(range(start_idx, len(blocks)))
+                    for idx in trainable_indices:
+                        self._set_module_requires_grad(blocks[idx], True)
+
+        self.vision_train_mode = mode
+        self.vision_topk_blocks = topk
+        return {
+            "train_mode": self.vision_train_mode,
+            "loaded_layers": len(blocks),
+            "trainable_layers": trainable_indices,
+        }
+
     def enable_gradient_checkpointing(self):
         if hasattr(self.vit, "gradient_checkpointing_enable"):
             self.vit.gradient_checkpointing_enable()
@@ -645,6 +726,8 @@ class NewTSVisionEncoder(nn.Module):
             "truncate_to_feature_layer": self.truncate_to_feature_layer,
             "num_hidden_layers": self.requested_num_hidden_layers,
             "loaded_num_hidden_layers": self.num_hidden_layers,
+            "vision_train_mode": self.vision_train_mode,
+            "vision_topk_blocks": self.vision_topk_blocks,
         }
 
     def get_learned_mix_alpha(self) -> Optional[Dict[str, Any]]:
