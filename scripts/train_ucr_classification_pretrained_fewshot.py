@@ -256,6 +256,13 @@ def parse_args(argv=None):
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument(
+        "--llm_attn_impl",
+        type=str,
+        default="sdpa",
+        choices=["sdpa", "eager", "flash_attention_2"],
+        help="Attention implementation for the LLM backbone.",
+    )
+    parser.add_argument(
         "--tokenizer_training_mode",
         type=str,
         default="class_rows",
@@ -302,7 +309,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--dataloader_num_workers", type=int, default=8)
+    parser.add_argument("--pin_memory", dest="pin_memory", action="store_true")
+    parser.add_argument("--no_pin_memory", dest="pin_memory", action="store_false")
+    parser.add_argument("--persistent_workers", dest="persistent_workers", action="store_true")
+    parser.add_argument("--no_persistent_workers", dest="persistent_workers", action="store_false")
 
+    parser.set_defaults(pin_memory=True, persistent_workers=True)
     args = parser.parse_args(argv)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
     args.encoder_type_explicit = cli_flag_was_provided(provided_argv, "--encoder_type")
@@ -577,6 +590,16 @@ def make_collate_fn(args, is_train: bool):
     return collate_fn
 
 
+def build_dataloader_kwargs(args) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "num_workers": args.dataloader_num_workers,
+        "pin_memory": args.pin_memory,
+    }
+    if args.dataloader_num_workers > 0:
+        kwargs["persistent_workers"] = bool(args.persistent_workers)
+    return kwargs
+
+
 def build_label_to_indices(dataset: Dataset) -> Dict[int, List[int]]:
     label_to_indices: Dict[int, List[int]] = defaultdict(list)
     for idx in range(len(dataset)):
@@ -717,6 +740,8 @@ def validate_args(args):
         raise ValueError("--way must be >= 1 when provided")
     if args.aug_scaling_min > args.aug_scaling_max:
         raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
+    if args.dataloader_num_workers < 0:
+        raise ValueError("--dataloader_num_workers must be >= 0")
 
     if args.pretrained_model and getattr(args, "encoder_type_explicit", False):
         raise ValueError("--pretrained_model and --encoder_type cannot be specified together")
@@ -894,6 +919,7 @@ def build_model(args, device: str, rank: int):
             encoder_type=model_init_kwargs["encoder_type"],
             tslanet_config=model_init_kwargs["tslanet_config"],
             newts_dual_branch_config=model_init_kwargs["newts_dual_branch_config"],
+            llm_attn_impl=args.llm_attn_impl,
         )
 
         model.encoder.load_state_dict(checkpoint["encoder_state"])
@@ -914,6 +940,7 @@ def build_model(args, device: str, rank: int):
             device=device,
             enable_lora=use_lora,
             checkpoint_path=getattr(args, "pretrained_model_checkpoint", None),
+            llm_attn_impl=args.llm_attn_impl,
         )
         if (
             (getattr(args, "vision_2d_mode_explicit", False) or getattr(args, "vit_stride_explicit", False))
@@ -944,6 +971,7 @@ def build_model(args, device: str, rank: int):
             encoder_type=model_init_kwargs["encoder_type"],
             tslanet_config=model_init_kwargs["tslanet_config"],
             newts_dual_branch_config=model_init_kwargs["newts_dual_branch_config"],
+            llm_attn_impl=args.llm_attn_impl,
         )
 
         if use_lora:
@@ -955,11 +983,18 @@ def build_model(args, device: str, rank: int):
         from transformers import AutoModelForCausalLM
 
         llm_config = model.llm.config
-        random_llm = AutoModelForCausalLM.from_config(
-            llm_config,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="eager",
-        ).to(device)
+        try:
+            random_llm = AutoModelForCausalLM.from_config(
+                llm_config,
+                torch_dtype=torch.bfloat16,
+                attn_implementation=args.llm_attn_impl,
+            ).to(device)
+        except Exception:
+            random_llm = AutoModelForCausalLM.from_config(
+                llm_config,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="eager",
+            ).to(device)
         model.llm = random_llm
 
         for p in model.llm.parameters():
@@ -1716,6 +1751,7 @@ def run_single_experiment(
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         collate_fn=make_collate_fn(args, is_train=True),
+        **build_dataloader_kwargs(args),
     )
 
     test_loader = None
@@ -1725,6 +1761,7 @@ def run_single_experiment(
             batch_size=args.eval_batch_size,
             shuffle=False,
             collate_fn=make_collate_fn(args, is_train=False),
+            **build_dataloader_kwargs(args),
         )
 
     model = build_model(args=args, device=device, rank=rank)

@@ -262,6 +262,10 @@ def parse_args(argv=None):
     parser.add_argument("--stage0_epochs", type=int, default=STAGE_SPECS["stage0_dual_view_ssl"]["epochs"])
     parser.add_argument("--stage1_epochs", type=int, default=STAGE_SPECS["stage1_semantic_alignment"]["epochs"])
     parser.add_argument("--stage2_epochs", type=int, default=STAGE_SPECS["stage2_instruction_tuning"]["epochs"])
+    parser.add_argument("--stage1_train_epoch_size", type=int, default=192000)
+    parser.add_argument("--stage2_train_epoch_size", type=int, default=160000)
+    parser.add_argument("--stage1_eval_epoch_size", type=int, default=8000)
+    parser.add_argument("--stage2_eval_epoch_size", type=int, default=8000)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--eval_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
@@ -269,6 +273,8 @@ def parse_args(argv=None):
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--early_stop", type=int, default=5)
+    parser.add_argument("--eval_match_accuracy", action="store_true")
+    parser.add_argument("--eval_match_max_samples", type=int, default=512)
 
     parser.add_argument("--stage0_lr_ts", type=float, default=2e-4)
     parser.add_argument("--stage0_lr_vision", type=float, default=5e-5)
@@ -295,10 +301,38 @@ def parse_args(argv=None):
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_new_tokens", type=int, default=64)
+    parser.add_argument(
+        "--llm_attn_impl",
+        type=str,
+        default="sdpa",
+        choices=["sdpa", "eager", "flash_attention_2"],
+    )
+    parser.add_argument("--dataloader_num_workers", type=int, default=8)
+    parser.add_argument("--pin_memory", dest="pin_memory", action="store_true")
+    parser.add_argument("--no_pin_memory", dest="pin_memory", action="store_false")
+    parser.add_argument("--persistent_workers", dest="persistent_workers", action="store_true")
+    parser.add_argument("--no_persistent_workers", dest="persistent_workers", action="store_false")
     parser.add_argument("--export_model_checkpoint", action="store_true", default=True)
-    parser.set_defaults(enable_modality_embeddings=True, use_alignment_losses=True)
+    parser.set_defaults(
+        enable_modality_embeddings=True,
+        use_alignment_losses=True,
+        pin_memory=True,
+        persistent_workers=True,
+    )
     args = parser.parse_args(argv)
     args.stages = parse_stage_list(args.stages)
+    for field_name in (
+        "stage1_train_epoch_size",
+        "stage2_train_epoch_size",
+        "stage1_eval_epoch_size",
+        "stage2_eval_epoch_size",
+    ):
+        if getattr(args, field_name) <= 0:
+            raise ValueError(f"--{field_name} must be > 0")
+    if args.dataloader_num_workers < 0:
+        raise ValueError("--dataloader_num_workers must be >= 0")
+    if args.eval_match_max_samples < 0:
+        raise ValueError("--eval_match_max_samples must be >= 0")
     return args
 
 
@@ -432,17 +466,27 @@ def create_loader(
     world_size: int,
     rank: int,
     collate_fn,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
 ) -> DataLoader:
     sampler = None
     if world_size > 1:
         sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=shuffle)
         shuffle = False
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "sampler": sampler,
+        "collate_fn": collate_fn,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        collate_fn=collate_fn,
+        **loader_kwargs,
     )
 
 
@@ -480,6 +524,22 @@ def build_stage0_datasets(args) -> Dict[str, Dataset]:
     return {"train": train_dataset, "validation": val_dataset, "test": test_dataset}
 
 
+def resolve_stage12_epoch_size(args, *, split: str, stage_name: str) -> Optional[int]:
+    if split == "train":
+        return (
+            args.stage1_train_epoch_size
+            if stage_name == "stage1_semantic_alignment"
+            else args.stage2_train_epoch_size
+        )
+    if split == "validation":
+        return (
+            args.stage1_eval_epoch_size
+            if stage_name == "stage1_semantic_alignment"
+            else args.stage2_eval_epoch_size
+        )
+    return None
+
+
 def build_stage12_datasets(args, *, split: str, eos_token: str, stage_name: str) -> Dataset:
     aligned = build_stage12_aligned_datasets(split=split, eos_token=eos_token, seed=args.seed)
     if stage_name == "stage1_semantic_alignment":
@@ -490,6 +550,7 @@ def build_stage12_datasets(args, *, split: str, eos_token: str, stage_name: str)
         [aligned["tsqa"], aligned["m4"], aligned["synthetic"]],
         weights,
         seed=args.seed,
+        epoch_size=resolve_stage12_epoch_size(args, split=split, stage_name=stage_name),
     )
 
 
@@ -529,6 +590,7 @@ def build_sp_model(args, device: str, *, stage_name: str, enable_lora: bool) -> 
         device=device,
         encoder_type="newts_dual_branch",
         newts_dual_branch_config=build_newts_config(args, for_stage0=False),
+        llm_attn_impl=args.llm_attn_impl,
     )
     model.set_runtime_branch_mode(args.runtime_branch_mode)
     if args.use_alignment_losses:
@@ -723,6 +785,8 @@ def evaluate_model(
     amp_dtype: Optional[torch.dtype],
     stage_name: str,
     max_new_tokens: int,
+    eval_match_accuracy: bool = False,
+    eval_match_max_samples: int = 0,
 ) -> Dict[str, float]:
     underlying = get_model(model)
     underlying.eval()
@@ -738,7 +802,14 @@ def evaluate_model(
             totals[key] = totals.get(key, 0.0) + float(value.item())
         num_batches += 1
 
-        match_subset = [sample for sample in batch if sample.get("sample_type") == "match_mismatch"]
+        match_subset = []
+        if eval_match_accuracy and match_total < eval_match_max_samples:
+            remaining = eval_match_max_samples - match_total
+            match_subset = [
+                sample
+                for sample in batch
+                if sample.get("sample_type") == "match_mismatch"
+            ][:remaining]
         if match_subset:
             predictions = underlying.generate(match_subset, max_new_tokens=max_new_tokens)
             for pred, sample in zip(predictions, match_subset):
@@ -784,6 +855,9 @@ def train_stage0(
         world_size=world_size,
         rank=rank,
         collate_fn=collate_raw_series_batch,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
     val_loader = create_loader(
         datasets["validation"],
@@ -792,6 +866,9 @@ def train_stage0(
         world_size=1,
         rank=0,
         collate_fn=collate_raw_series_batch,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
     test_loader = create_loader(
         datasets["test"],
@@ -800,6 +877,9 @@ def train_stage0(
         world_size=1,
         rank=0,
         collate_fn=collate_raw_series_batch,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
 
     model = DualViewSSLModel(
@@ -814,7 +894,11 @@ def train_stage0(
         model.encoder.enable_gradient_checkpointing()
     model.to(device)
     if world_size > 1:
-        model = DDP(model, device_ids=[int(device.split(":")[-1])] if device.startswith("cuda:") else None)
+        model = DDP(
+            model,
+            device_ids=[int(device.split(":")[-1])] if device.startswith("cuda:") else None,
+            find_unused_parameters=True,
+        )
 
     optimizer = build_stage0_optimizer(get_model(model), args)
     total_steps = optimizer_step_count(len(train_loader), args.gradient_accumulation_steps) * args.stage0_epochs
@@ -853,14 +937,19 @@ def train_stage0(
             num_epochs=args.stage0_epochs,
             rank=rank,
         )
-        val_metrics = evaluate_model(
-            model=model,
-            data_loader=val_loader,
-            device=device,
-            amp_dtype=amp_dtype,
-            stage_name=stage_name,
-            max_new_tokens=args.max_new_tokens,
-        )
+        val_metrics = None
+        if rank == 0:
+            val_metrics = evaluate_model(
+                model=model,
+                data_loader=val_loader,
+                device=device,
+                amp_dtype=amp_dtype,
+                stage_name=stage_name,
+                max_new_tokens=args.max_new_tokens,
+                eval_match_accuracy=args.eval_match_accuracy,
+                eval_match_max_samples=args.eval_match_max_samples,
+            )
+        val_metrics = broadcast_object_from_rank0(val_metrics, rank)
         val_loss = val_metrics["loss_total"]
         if rank == 0:
             print(f"{stage_name} epoch {epoch}: train_loss={train_loss:.4f} val_loss={val_loss:.4f}")
@@ -884,21 +973,26 @@ def train_stage0(
         best_val = float(state["best_val"])
 
     load_full_checkpoint(model=model, checkpoint_path=checkpoint_path, device=device)
-    test_metrics = evaluate_model(
-        model=model,
-        data_loader=test_loader,
-        device=device,
-        amp_dtype=amp_dtype,
-        stage_name=stage_name,
-        max_new_tokens=args.max_new_tokens,
-    )
+    test_metrics = None
+    if rank == 0:
+        test_metrics = evaluate_model(
+            model=model,
+            data_loader=test_loader,
+            device=device,
+            amp_dtype=amp_dtype,
+            stage_name=stage_name,
+            max_new_tokens=args.max_new_tokens,
+            eval_match_accuracy=args.eval_match_accuracy,
+            eval_match_max_samples=args.eval_match_max_samples,
+        )
+    test_metrics = broadcast_object_from_rank0(test_metrics, rank)
     if rank == 0:
         save_json(os.path.join(stage_dir, "results", "metrics.json"), test_metrics)
         save_json(
             os.path.join(stage_dir, "encoder_config.json"),
             get_model(model).get_checkpoint_metadata(),
         )
-    return broadcast_object_from_rank0(test_metrics, rank)
+    return test_metrics
 
 
 def train_sp_stage(
@@ -946,7 +1040,15 @@ def train_sp_stage(
 
     model.to(device)
     if world_size > 1:
-        model = DDP(model, device_ids=[int(device.split(":")[-1])] if device.startswith("cuda:") else None)
+        # Stage1/2 can legitimately skip subsets of parameters on a given step:
+        # alignment heads are only active for samples with alignment text, and the
+        # dual-branch encoder may drop branches at runtime. DDP therefore needs
+        # unused-parameter detection enabled to avoid reducer mismatches.
+        model = DDP(
+            model,
+            device_ids=[int(device.split(":")[-1])] if device.startswith("cuda:") else None,
+            find_unused_parameters=True,
+        )
 
     optimizer = build_sp_optimizer(get_model(model), args, stage_name)
     num_epochs = args.stage1_epochs if stage_name == "stage1_semantic_alignment" else args.stage2_epochs
@@ -968,6 +1070,9 @@ def train_sp_stage(
         world_size=world_size,
         rank=rank,
         collate_fn=collate,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
     val_loader = create_loader(
         val_dataset,
@@ -976,6 +1081,9 @@ def train_sp_stage(
         world_size=1,
         rank=0,
         collate_fn=collate,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
     test_loader = create_loader(
         test_dataset,
@@ -984,6 +1092,9 @@ def train_sp_stage(
         world_size=1,
         rank=0,
         collate_fn=collate,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
 
     total_steps = optimizer_step_count(len(train_loader), args.gradient_accumulation_steps) * num_epochs
@@ -1026,14 +1137,19 @@ def train_sp_stage(
             num_epochs=num_epochs,
             rank=rank,
         )
-        val_metrics = evaluate_model(
-            model=model,
-            data_loader=val_loader,
-            device=device,
-            amp_dtype=amp_dtype,
-            stage_name=stage_name,
-            max_new_tokens=args.max_new_tokens,
-        )
+        val_metrics = None
+        if rank == 0:
+            val_metrics = evaluate_model(
+                model=model,
+                data_loader=val_loader,
+                device=device,
+                amp_dtype=amp_dtype,
+                stage_name=stage_name,
+                max_new_tokens=args.max_new_tokens,
+                eval_match_accuracy=args.eval_match_accuracy,
+                eval_match_max_samples=args.eval_match_max_samples,
+            )
+        val_metrics = broadcast_object_from_rank0(val_metrics, rank)
         val_loss = val_metrics["loss_total"]
         if rank == 0:
             print(
@@ -1072,17 +1188,22 @@ def train_sp_stage(
             break
 
     load_full_checkpoint(model=model, checkpoint_path=checkpoint_path, device=device)
-    test_metrics = evaluate_model(
-        model=model,
-        data_loader=test_loader,
-        device=device,
-        amp_dtype=amp_dtype,
-        stage_name=stage_name,
-        max_new_tokens=args.max_new_tokens,
-    )
+    test_metrics = None
+    if rank == 0:
+        test_metrics = evaluate_model(
+            model=model,
+            data_loader=test_loader,
+            device=device,
+            amp_dtype=amp_dtype,
+            stage_name=stage_name,
+            max_new_tokens=args.max_new_tokens,
+            eval_match_accuracy=args.eval_match_accuracy,
+            eval_match_max_samples=args.eval_match_max_samples,
+        )
+    test_metrics = broadcast_object_from_rank0(test_metrics, rank)
     if rank == 0:
         save_json(os.path.join(stage_dir, "results", "metrics.json"), test_metrics)
-    return broadcast_object_from_rank0(test_metrics, rank)
+    return test_metrics
 
 
 def export_final_model_checkpoint(model: OpenTSLMSP, export_path: str, rank: int):

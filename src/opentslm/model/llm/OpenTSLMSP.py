@@ -38,9 +38,11 @@ class OpenTSLMSP(TimeSeriesLLM):
         encoder_pretrained_path: Optional[str] = None,
         tslanet_config: Optional[Dict[str, Any]] = None,
         newts_dual_branch_config: Optional[Dict[str, Any]] = None,
+        llm_attn_impl: str = "sdpa",
     ):
         super().__init__(device)
         self.llm_id = llm_id
+        self.requested_llm_attn_impl = llm_attn_impl
 
         # 1) tokenizer (ensure pad_token exists)
         self.tokenizer = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
@@ -48,11 +50,10 @@ class OpenTSLMSP(TimeSeriesLLM):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # 2) load LLM
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_id,
-            torch_dtype=torch.bfloat16,
-            device_map={"": device},
-            attn_implementation="eager",
+        self.llm, self.llm_attn_impl = self._load_llm_with_attn_fallback(
+            llm_id=llm_id,
+            device=device,
+            llm_attn_impl=llm_attn_impl,
         )
         self.llm.resize_token_embeddings(len(self.tokenizer))
 
@@ -94,6 +95,43 @@ class OpenTSLMSP(TimeSeriesLLM):
         self.vision_align_head: Optional[nn.Module] = None
         self.fused_align_head: Optional[nn.Module] = None
         self.text_align_head: Optional[nn.Module] = None
+
+    @staticmethod
+    def _load_llm_with_attn_fallback(
+        *,
+        llm_id: str,
+        device: str,
+        llm_attn_impl: str,
+    ):
+        attn_impl = str(llm_attn_impl).lower()
+        if attn_impl not in {"sdpa", "eager", "flash_attention_2"}:
+            raise ValueError(f"Unsupported llm_attn_impl: {llm_attn_impl}")
+
+        candidates = [attn_impl]
+        if attn_impl != "eager":
+            candidates.append("eager")
+
+        last_error: Optional[Exception] = None
+        for candidate in candidates:
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    llm_id,
+                    torch_dtype=torch.bfloat16,
+                    device_map={"": device},
+                    attn_implementation=candidate,
+                )
+                if candidate != attn_impl:
+                    print(
+                        f"⚠️ Failed to load {llm_id} with attn_implementation={attn_impl}; "
+                        f"falling back to {candidate}."
+                    )
+                return model, candidate
+            except Exception as exc:
+                last_error = exc
+
+        raise RuntimeError(
+            f"Failed to load {llm_id} with attention implementations {candidates}: {last_error}"
+        ) from last_error
 
     def enable_gradient_checkpointing(self):
         """

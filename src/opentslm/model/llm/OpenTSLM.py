@@ -53,6 +53,7 @@ class OpenTSLM:
         cache_dir: Optional[str] = None,
         enable_lora: Optional[bool] = False,
         checkpoint_path: Optional[str] = None,
+        llm_attn_impl: str = "sdpa",
     ) -> Union[OpenTSLMSP, "OpenTSLMFlamingo"]:
         """
         Load a pretrained model from Hugging Face Hub.
@@ -102,6 +103,7 @@ class OpenTSLM:
                 encoder_type=sp_init_kwargs["encoder_type"],
                 tslanet_config=sp_init_kwargs["tslanet_config"],
                 newts_dual_branch_config=sp_init_kwargs["newts_dual_branch_config"],
+                llm_attn_impl=llm_attn_impl,
             )
             if enable_lora:
                 lora_r, lora_alpha = cls._resolve_lora_hparams_from_checkpoint(checkpoint)

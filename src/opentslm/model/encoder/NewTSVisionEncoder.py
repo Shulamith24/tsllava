@@ -706,7 +706,19 @@ class NewTSVisionEncoder(nn.Module):
 
     def enable_gradient_checkpointing(self):
         if hasattr(self.vit, "gradient_checkpointing_enable"):
-            self.vit.gradient_checkpointing_enable()
+            try:
+                self.vit.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                print("✅ Gradient checkpointing enabled for vision backbone (use_reentrant=False)")
+            except TypeError:
+                # The default reentrant checkpointing path can trigger DDP reducer
+                # errors ("parameter marked ready twice") for vision backbones.
+                # Skip enabling it when non-reentrant control is unavailable.
+                print(
+                    "⚠️ Vision backbone does not support non-reentrant gradient checkpointing; "
+                    "leaving vision checkpointing disabled to avoid DDP reducer errors."
+                )
 
     def get_output_dim(self) -> int:
         return self.hidden_dim
