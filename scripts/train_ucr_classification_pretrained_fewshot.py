@@ -258,7 +258,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--llm_attn_impl",
         type=str,
-        default="sdpa",
+        default="flash_attention_2",
         choices=["sdpa", "eager", "flash_attention_2"],
         help="Attention implementation for the LLM backbone.",
     )
@@ -902,6 +902,38 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
         init_kwargs["newts_dual_branch_config"] = merged_config
 
     return init_kwargs
+
+
+def extract_sp_component_states_from_checkpoint(
+    checkpoint: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    encoder_state = checkpoint.get("encoder_state")
+    projector_state = checkpoint.get("projector_state")
+    if encoder_state and projector_state:
+        return encoder_state, projector_state
+
+    model_state = checkpoint.get("model_state") or {}
+    if model_state:
+        encoder_state = {
+            key[len("encoder.") :]: value
+            for key, value in model_state.items()
+            if key.startswith("encoder.")
+        }
+        projector_state = {
+            key[len("projector.") :]: value
+            for key, value in model_state.items()
+            if key.startswith("projector.")
+        }
+        if encoder_state and projector_state:
+            return encoder_state, projector_state
+
+    raise KeyError(
+        "Checkpoint does not contain encoder/projector weights. "
+        "Expected either top-level 'encoder_state'/'projector_state' or "
+        "a full 'model_state' with 'encoder.' and 'projector.' prefixes."
+    )
+
+
 def build_model(args, device: str, rank: int):
     use_lora = args.use_lora
 
@@ -922,8 +954,9 @@ def build_model(args, device: str, rank: int):
             llm_attn_impl=args.llm_attn_impl,
         )
 
-        model.encoder.load_state_dict(checkpoint["encoder_state"])
-        model.projector.load_state_dict(checkpoint["projector_state"])
+        encoder_state, projector_state = extract_sp_component_states_from_checkpoint(checkpoint)
+        model.encoder.load_state_dict(encoder_state)
+        model.projector.load_state_dict(projector_state)
         if rank == 0:
             print("✅ Loaded encoder and projector from local checkpoint")
 
@@ -983,19 +1016,38 @@ def build_model(args, device: str, rank: int):
         from transformers import AutoModelForCausalLM
 
         llm_config = model.llm.config
-        try:
-            random_llm = AutoModelForCausalLM.from_config(
-                llm_config,
-                torch_dtype=torch.bfloat16,
-                attn_implementation=args.llm_attn_impl,
-            ).to(device)
-        except Exception:
-            random_llm = AutoModelForCausalLM.from_config(
-                llm_config,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="eager",
-            ).to(device)
+        attn_candidates = [args.llm_attn_impl]
+        if args.llm_attn_impl == "flash_attention_2":
+            attn_candidates.extend(["sdpa", "eager"])
+        elif args.llm_attn_impl != "eager":
+            attn_candidates.append("eager")
+
+        random_llm = None
+        last_error = None
+        resolved_attn_impl = args.llm_attn_impl
+        for candidate in attn_candidates:
+            try:
+                random_llm = AutoModelForCausalLM.from_config(
+                    llm_config,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation=candidate,
+                ).to(device)
+                resolved_attn_impl = candidate
+                if candidate != args.llm_attn_impl and rank == 0:
+                    print(
+                        f"⚠️ Failed to reinitialize LLM with attn_implementation={args.llm_attn_impl}; "
+                        f"falling back to {candidate}."
+                    )
+                break
+            except Exception as exc:
+                last_error = exc
+
+        if random_llm is None:
+            raise RuntimeError(
+                f"Failed to reinitialize LLM with attention implementations {attn_candidates}: {last_error}"
+            ) from last_error
         model.llm = random_llm
+        model.llm_attn_impl = resolved_attn_impl
 
         for p in model.llm.parameters():
             p.requires_grad = False

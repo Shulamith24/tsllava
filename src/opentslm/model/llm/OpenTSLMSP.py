@@ -108,7 +108,9 @@ class OpenTSLMSP(TimeSeriesLLM):
             raise ValueError(f"Unsupported llm_attn_impl: {llm_attn_impl}")
 
         candidates = [attn_impl]
-        if attn_impl != "eager":
+        if attn_impl == "flash_attention_2":
+            candidates.extend(["sdpa", "eager"])
+        elif attn_impl != "eager":
             candidates.append("eager")
 
         last_error: Optional[Exception] = None

@@ -304,7 +304,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--llm_attn_impl",
         type=str,
-        default="sdpa",
+        default="flash_attention_2",
         choices=["sdpa", "eager", "flash_attention_2"],
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=8)

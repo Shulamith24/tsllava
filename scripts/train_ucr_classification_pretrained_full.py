@@ -702,6 +702,36 @@ def resolve_model_init_kwargs_from_checkpoint(args, checkpoint: Dict[str, Any]) 
     return init_kwargs
 
 
+def extract_sp_component_states_from_checkpoint(
+    checkpoint: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    encoder_state = checkpoint.get("encoder_state")
+    projector_state = checkpoint.get("projector_state")
+    if encoder_state and projector_state:
+        return encoder_state, projector_state
+
+    model_state = checkpoint.get("model_state") or {}
+    if model_state:
+        encoder_state = {
+            key[len("encoder.") :]: value
+            for key, value in model_state.items()
+            if key.startswith("encoder.")
+        }
+        projector_state = {
+            key[len("projector.") :]: value
+            for key, value in model_state.items()
+            if key.startswith("projector.")
+        }
+        if encoder_state and projector_state:
+            return encoder_state, projector_state
+
+    raise KeyError(
+        "Checkpoint does not contain encoder/projector weights. "
+        "Expected either top-level 'encoder_state'/'projector_state' or "
+        "a full 'model_state' with 'encoder.' and 'projector.' prefixes."
+    )
+
+
 def build_model(args, device: str, rank: int):
     use_lora = args.use_lora
 
@@ -721,8 +751,9 @@ def build_model(args, device: str, rank: int):
             newts_dual_branch_config=model_init_kwargs["newts_dual_branch_config"],
         )
 
-        model.encoder.load_state_dict(checkpoint["encoder_state"])
-        model.projector.load_state_dict(checkpoint["projector_state"])
+        encoder_state, projector_state = extract_sp_component_states_from_checkpoint(checkpoint)
+        model.encoder.load_state_dict(encoder_state)
+        model.projector.load_state_dict(projector_state)
         if rank == 0:
             print("✅ 已加载encoder和projector权重")
 
