@@ -21,6 +21,16 @@ DEFAULT_UCR_TRAIN_LIST = (
 )
 
 
+def _read_dataset_name_list(list_path: Path) -> List[str]:
+    dataset_names: List[str] = []
+    for raw_line in list_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        dataset_names.append(line)
+    return dataset_names
+
+
 def _normalize_series(series: Sequence[float]) -> torch.Tensor:
     tensor = torch.as_tensor(series, dtype=torch.float32).flatten()
     tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
@@ -149,11 +159,7 @@ def load_ucr_train_raw_records(
     dataset_list_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     list_path = Path(dataset_list_path or DEFAULT_UCR_TRAIN_LIST)
-    dataset_names = [
-        line.strip()
-        for line in list_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    dataset_names = _read_dataset_name_list(list_path)
     records: List[Dict[str, Any]] = []
     for dataset_name in dataset_names:
         train_df, _ = load_ucr_dataset(dataset_name, raw_data_path=raw_data_path)

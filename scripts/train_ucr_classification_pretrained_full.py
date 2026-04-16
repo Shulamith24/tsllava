@@ -124,7 +124,7 @@ def parse_args(argv=None):
         "--local_checkpoint",
         type=str,
         default=None,
-        help="本地checkpoint路径 (如 results/curriculum_pretrain/.../best_model.pt)",
+        help="本地checkpoint路径 (如 results/curriculum_pretrain/.../best_accuracy.pt)",
     )
     parser.add_argument(
         "--encoder_type",

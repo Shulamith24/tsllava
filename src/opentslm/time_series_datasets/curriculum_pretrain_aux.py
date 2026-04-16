@@ -1,4 +1,5 @@
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,16 @@ DEFAULT_SYNTHETIC_SAMPLE_TYPES = (
 FULL_SYNTHETIC_SAMPLE_TYPES = DEFAULT_SYNTHETIC_SAMPLE_TYPES + ("match_mismatch",)
 
 
+def _read_dataset_name_list(list_path: Path) -> List[str]:
+    dataset_names: List[str] = []
+    for raw_line in list_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        dataset_names.append(line)
+    return dataset_names
+
+
 def _normalize_series(series: Sequence[float]) -> torch.Tensor:
     tensor = torch.as_tensor(series, dtype=torch.float32).flatten()
     tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
@@ -46,6 +57,7 @@ def _build_prompt_sample(
     time_series: torch.Tensor,
     time_series_text: Optional[str] = None,
     eos_token: str = "",
+    alignment_target_text: Optional[str] = None,
     source_name: Optional[str] = None,
     sample_type: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -61,6 +73,8 @@ def _build_prompt_sample(
         "time_series": [time_series.clone()],
         "time_series_text": [prompt_text],
     }
+    if alignment_target_text:
+        sample["alignment_target_text"] = alignment_target_text.strip()
     if source_name:
         sample["source_name"] = source_name
     if sample_type:
@@ -149,11 +163,7 @@ def load_ucr_train_raw_records(
     dataset_list_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     list_path = Path(dataset_list_path or DEFAULT_UCR_TRAIN_LIST)
-    dataset_names = [
-        line.strip()
-        for line in list_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    dataset_names = _read_dataset_name_list(list_path)
     records: List[Dict[str, Any]] = []
     for dataset_name in dataset_names:
         train_df, _ = load_ucr_dataset(dataset_name, raw_data_path=raw_data_path)
@@ -178,6 +188,9 @@ class RawSeriesDataset(Dataset):
     def __len__(self) -> int:
         return len(self.records)
 
+    def get_sample_length(self, idx: int) -> int:
+        return int(self.records[idx]["series"].numel())
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         record = self.records[idx]
         return {
@@ -185,6 +198,40 @@ class RawSeriesDataset(Dataset):
             "series_id": record["series_id"],
             "source_name": record["source_name"],
         }
+
+
+class AlignmentTargetDataset(Dataset):
+    def __init__(
+        self,
+        dataset: Dataset,
+        *,
+        eos_token: str,
+        source_name: str,
+        alignment_from_answer: bool,
+    ):
+        self.dataset = dataset
+        self.eos_token = eos_token
+        self.source_name = source_name
+        self.alignment_from_answer = alignment_from_answer
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def get_sample_length(self, idx: int) -> int:
+        get_sample_length = getattr(self.dataset, "get_sample_length", None)
+        if callable(get_sample_length):
+            return int(get_sample_length(idx))
+        sample = self.dataset[idx]
+        return max(int(torch.as_tensor(ts).numel()) for ts in sample.get("time_series", []))
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = dict(self.dataset[idx])
+        sample["source_name"] = self.source_name
+        if self.alignment_from_answer:
+            sample["alignment_target_text"] = sample["answer"].replace(self.eos_token, "").strip()
+        else:
+            sample["alignment_target_text"] = None
+        return sample
 
 
 @dataclass(frozen=True)
@@ -247,6 +294,10 @@ class SyntheticAttributeDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.records) * len(self.sample_types)
+
+    def get_sample_length(self, idx: int) -> int:
+        base_idx = idx // len(self.sample_types)
+        return int(self.records[base_idx]["series"].numel())
 
     def _compute_attributes(self, series: torch.Tensor) -> SeriesAttributes:
         x = series.float()
@@ -362,6 +413,7 @@ class SyntheticAttributeDataset(Dataset):
                 time_series=series,
                 time_series_text=ts_text,
                 eos_token=self.eos_token,
+                alignment_target_text=caption,
                 source_name="synthetic_attribute",
                 sample_type=sample_variant,
             )
@@ -375,6 +427,7 @@ class SyntheticAttributeDataset(Dataset):
                 time_series=series,
                 time_series_text=ts_text,
                 eos_token=self.eos_token,
+                alignment_target_text=caption,
                 source_name="synthetic_attribute",
                 sample_type=sample_variant,
             )
@@ -388,6 +441,7 @@ class SyntheticAttributeDataset(Dataset):
                 time_series=series,
                 time_series_text=ts_text,
                 eos_token=self.eos_token,
+                alignment_target_text=caption,
                 source_name="synthetic_attribute",
                 sample_type=sample_variant,
             )
@@ -401,6 +455,7 @@ class SyntheticAttributeDataset(Dataset):
                 time_series=series,
                 time_series_text=ts_text,
                 eos_token=self.eos_token,
+                alignment_target_text=caption,
                 source_name="synthetic_attribute",
                 sample_type=sample_variant,
             )
@@ -414,6 +469,7 @@ class SyntheticAttributeDataset(Dataset):
                 time_series=series,
                 time_series_text=ts_text,
                 eos_token=self.eos_token,
+                alignment_target_text=caption,
                 source_name="synthetic_attribute",
                 sample_type=sample_variant,
             )
@@ -441,6 +497,76 @@ class SyntheticAttributeDataset(Dataset):
             time_series=series,
             time_series_text=ts_text,
             eos_token=self.eos_token,
+            alignment_target_text=caption,
             source_name="synthetic_attribute",
             sample_type=sample_variant,
         )
+
+
+class MixedPretrainDataset(Dataset):
+    def __init__(
+        self,
+        datasets: Sequence[Dataset],
+        weights: Sequence[int],
+        *,
+        seed: int = 42,
+        epoch_size: Optional[int] = None,
+    ):
+        if len(datasets) != len(weights):
+            raise ValueError("datasets and weights must have the same length")
+        if not datasets:
+            raise ValueError("At least one dataset is required")
+        if any(weight <= 0 for weight in weights):
+            raise ValueError("weights must all be positive")
+
+        self.datasets = list(datasets)
+        self.weights = [int(weight) for weight in weights]
+        self.seed = int(seed)
+        if epoch_size is None:
+            epoch_units = max(
+                math.ceil(len(dataset) / weight)
+                for dataset, weight in zip(self.datasets, self.weights)
+            )
+            epoch_size = epoch_units * sum(self.weights)
+        self.epoch_size = int(epoch_size)
+        self.schedule: List[tuple[int, int]] = []
+        self.set_epoch(0)
+
+    def set_epoch(self, epoch: int):
+        rng = random.Random(self.seed + int(epoch))
+        shuffled_indices = [list(range(len(dataset))) for dataset in self.datasets]
+        for indices in shuffled_indices:
+            rng.shuffle(indices)
+
+        cursors = [0 for _ in self.datasets]
+        schedule: List[tuple[int, int]] = []
+        while len(schedule) < self.epoch_size:
+            for dataset_idx, weight in enumerate(self.weights):
+                indices = shuffled_indices[dataset_idx]
+                if not indices:
+                    continue
+                for _ in range(weight):
+                    if len(schedule) >= self.epoch_size:
+                        break
+                    if cursors[dataset_idx] >= len(indices):
+                        rng.shuffle(indices)
+                        cursors[dataset_idx] = 0
+                    schedule.append((dataset_idx, indices[cursors[dataset_idx]]))
+                    cursors[dataset_idx] += 1
+        self.schedule = schedule
+
+    def __len__(self) -> int:
+        return len(self.schedule)
+
+    def get_sample_length(self, idx: int) -> int:
+        dataset_idx, sample_idx = self.schedule[idx]
+        dataset = self.datasets[dataset_idx]
+        get_sample_length = getattr(dataset, "get_sample_length", None)
+        if callable(get_sample_length):
+            return int(get_sample_length(sample_idx))
+        sample = dataset[sample_idx]
+        return max(int(torch.as_tensor(ts).numel()) for ts in sample.get("time_series", []))
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        dataset_idx, sample_idx = self.schedule[idx]
+        return self.datasets[dataset_idx][sample_idx]

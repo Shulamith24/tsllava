@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import queue
 import shlex
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
@@ -26,6 +31,7 @@ export CUDA_VISIBLE_DEVICES=0 uv run python scripts/experiments/ucr_batch/run_uc
     --experiment tslib_crossformer \
     --protocol fewshot \
     --job-name my_timesnet_fewshot \
+    --gpu-ids 0,1 \
     --shots "1,2,5,10" \
     --num_runs 5
 
@@ -54,6 +60,24 @@ OOM_PATTERNS = (
     "torch.OutOfMemoryError",
     "CUBLAS_STATUS_ALLOC_FAILED",
 )
+DDP_ENV_VARS = (
+    "LOCAL_RANK",
+    "RANK",
+    "WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+)
+
+
+@dataclass(frozen=True)
+class WorkerMessage:
+    kind: str
+    worker_id: int
+    gpu_id: str | None
+    dataset: str | None = None
+    return_code: int | None = None
+    log_path: Path | None = None
+    error_message: str | None = None
 
 
 def parse_args(argv: Sequence[str] | None = None):
@@ -71,29 +95,32 @@ def parse_args(argv: Sequence[str] | None = None):
     parser.add_argument("--datasets", default=None, help="Comma-separated dataset allowlist.")
     parser.add_argument("--exclude-datasets", default=None, help="Comma-separated dataset blocklist.")
     parser.add_argument("--start-from", default=None, help="Start execution from this dataset name.")
-    parser.add_argument(
-        "--torchrun",
-        action="store_true",
-        help=(
-            "Launch each dataset training job via torch.distributed.run instead of a plain "
-            "single-process Python subprocess."
-        ),
-    )
-    parser.add_argument(
-        "--torchrun-args",
-        default="",
-        help=(
-            "Extra arguments forwarded to torch.distributed.run. Example: "
-            '\'--standalone --nproc_per_node=4\'.'
-        ),
-    )
+    parser.add_argument("--gpu-ids", default=None, help="Comma-separated CUDA device ids for parallel workers.")
     parser.add_argument("--dry-run", action="store_true")
     args, forward_args = parser.parse_known_args(argv)
-    if args.torchrun_args and not args.torchrun:
-        raise ValueError("--torchrun-args requires --torchrun.")
+    args.gpu_ids = parse_gpu_ids(args.gpu_ids)
     if forward_args and forward_args[0] == "--":
         forward_args = forward_args[1:]
     return args, forward_args
+
+
+def parse_gpu_ids(raw_value: str | None) -> List[str]:
+    if raw_value is None:
+        return []
+
+    gpu_ids: List[str] = []
+    seen: set[str] = set()
+    for token in raw_value.split(","):
+        stripped = token.strip()
+        if not stripped:
+            raise ValueError("--gpu-ids must not contain empty items")
+        if not stripped.isdigit():
+            raise ValueError(f"--gpu-ids must be numeric CUDA device ids, got: {stripped}")
+        if stripped in seen:
+            raise ValueError(f"--gpu-ids contains duplicate device id: {stripped}")
+        seen.add(stripped)
+        gpu_ids.append(stripped)
+    return gpu_ids
 
 
 def parse_csv_arg(value: str | None) -> List[str]:
@@ -119,6 +146,17 @@ def validate_forward_args(forward_args: Sequence[str], blocked_flags: Iterable[s
             "These arguments are managed by the batch runner and must not be forwarded: "
             + ", ".join(matches)
         )
+
+
+def dedupe_preserve_order(items: Sequence[str]) -> List[str]:
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
 
 
 def filter_datasets(
@@ -166,13 +204,15 @@ def dataset_is_complete(ledger, dataset: str, shots: Sequence[str]) -> bool:
 
 
 def build_batch_config(args, entry, resolved_data_path: Path, forward_args: Sequence[str]) -> dict:
+    worker_count = len(args.gpu_ids) if args.gpu_ids else 1
     return {
         "experiment": args.experiment,
         "protocol": args.protocol,
         "script_path": str(entry.script_path.resolve()),
         "data_path": str(resolved_data_path),
-        "launcher": "torchrun" if args.torchrun else "python",
-        "torchrun_args": list(parse_torchrun_args(args.torchrun_args)),
+        "launcher": "single_gpu_workers" if args.gpu_ids else "single_process",
+        "gpu_ids": list(args.gpu_ids),
+        "worker_count": worker_count,
         "fixed_args": list(entry.fixed_args),
         "forward_args": list(forward_args),
         "supports_inner_resume": entry.supports_inner_resume,
@@ -211,15 +251,6 @@ def backfill_existing_results(ledger, *, datasets: Sequence[str], logs_dir: Path
             remove_row(ledger, dataset, "__dataset__")
 
 
-def parse_torchrun_args(raw_value: str) -> List[str]:
-    if not raw_value.strip():
-        return []
-    try:
-        return shlex.split(raw_value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid --torchrun-args: {exc}") from exc
-
-
 def build_command(
     entry,
     *,
@@ -228,13 +259,8 @@ def build_command(
     data_path: str,
     save_dir: str,
     forward_args: Sequence[str],
-    use_torchrun: bool,
-    torchrun_args: Sequence[str],
 ) -> List[str]:
-    if use_torchrun:
-        command = [sys.executable, "-m", "torch.distributed.run", *torchrun_args, str(entry.script_path)]
-    else:
-        command = [sys.executable, str(entry.script_path)]
+    command = [sys.executable, str(entry.script_path)]
     if entry.add_protocol_flag:
         command.extend(["--protocol", protocol])
     if entry.supports_inner_resume:
@@ -255,9 +281,20 @@ def detect_failure_status(log_path: Path) -> str:
     return "failed"
 
 
-def run_dataset(command: Sequence[str], log_path: Path) -> int:
+def build_subprocess_env(gpu_id: str | None) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in DDP_ENV_VARS:
+        env.pop(key, None)
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+    return env
+
+
+def run_dataset(command: Sequence[str], log_path: Path, env: dict[str, str] | None = None) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as log_file:
+        if env is not None and "CUDA_VISIBLE_DEVICES" in env:
+            log_file.write(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}\n")
         log_file.write("COMMAND: " + " ".join(shlex.quote(token) for token in command) + "\n\n")
         log_file.flush()
         completed = subprocess.run(
@@ -265,25 +302,119 @@ def run_dataset(command: Sequence[str], log_path: Path) -> int:
             cwd=str(REPO_ROOT),
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            env=env,
             text=True,
             check=False,
         )
     return completed.returncode
 
 
+@contextmanager
+def acquire_job_lock(job_root: Path):
+    job_root.mkdir(parents=True, exist_ok=True)
+    lock_path = job_root / ".job.lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"Another batch run is already using job-name '{job_root.name}': {job_root}"
+            ) from exc
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def worker_loop(
+    *,
+    worker_id: int,
+    gpu_id: str | None,
+    entry,
+    protocol: str,
+    data_path: str,
+    save_dir: str,
+    forward_args: Sequence[str],
+    logs_dir: Path,
+    task_queue: "queue.Queue[str | None]",
+    result_queue: "queue.Queue[WorkerMessage]",
+) -> None:
+    try:
+        while True:
+            dataset = task_queue.get()
+            if dataset is None:
+                return
+
+            log_path = logs_dir / f"{dataset}.log"
+            result_queue.put(
+                WorkerMessage(
+                    kind="dataset_started",
+                    worker_id=worker_id,
+                    gpu_id=gpu_id,
+                    dataset=dataset,
+                    log_path=log_path,
+                )
+            )
+            command = build_command(
+                entry,
+                protocol=protocol,
+                dataset=dataset,
+                data_path=data_path,
+                save_dir=save_dir,
+                forward_args=forward_args,
+            )
+            return_code = run_dataset(
+                command,
+                log_path,
+                env=build_subprocess_env(gpu_id),
+            )
+            result_queue.put(
+                WorkerMessage(
+                    kind="dataset_finished",
+                    worker_id=worker_id,
+                    gpu_id=gpu_id,
+                    dataset=dataset,
+                    return_code=return_code,
+                    log_path=log_path,
+                )
+            )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        result_queue.put(
+            WorkerMessage(
+                kind="worker_error",
+                worker_id=worker_id,
+                gpu_id=gpu_id,
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+        )
+    finally:
+        result_queue.put(
+            WorkerMessage(
+                kind="worker_done",
+                worker_id=worker_id,
+                gpu_id=gpu_id,
+            )
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args, forward_args = parse_args(argv)
     entry = get_entry(args.experiment, args.protocol)
     validate_forward_args(forward_args, entry.blocked_forward_args)
-    torchrun_args = parse_torchrun_args(args.torchrun_args)
 
     ucr_archive_dir = resolve_ucr_archive(args.data_path)
     discovered = discover_datasets(ucr_archive_dir)
-    selected_datasets = filter_datasets(
-        discovered,
-        allowlist=parse_csv_arg(args.datasets),
-        denylist=parse_csv_arg(args.exclude_datasets),
-        start_from=args.start_from,
+    selected_datasets = dedupe_preserve_order(
+        filter_datasets(
+            discovered,
+            allowlist=parse_csv_arg(args.datasets),
+            denylist=parse_csv_arg(args.exclude_datasets),
+            start_from=args.start_from,
+        )
     )
     shots = requested_shots(args.protocol, entry.default_shots, forward_args)
 
@@ -292,89 +423,168 @@ def main(argv: Sequence[str] | None = None) -> int:
     datasets_dir = job_root / "datasets"
     ledger_path = job_root / "results.txt"
     config_path = job_root / "batch_config.json"
-
     config_payload = build_batch_config(args, entry, Path(args.data_path).resolve(), forward_args)
-    ensure_batch_config(config_path, config_payload)
 
-    ledger = load_ledger(ledger_path)
-    backfill_existing_results(
-        ledger,
-        datasets=discovered,
-        logs_dir=logs_dir,
-        datasets_dir=datasets_dir,
-        summary_kind=entry.summary_kind,
-    )
-    write_ledger(ledger_path, ledger)
+    with acquire_job_lock(job_root):
+        ensure_batch_config(config_path, config_payload)
 
-    print(f"Experiment: {args.experiment} | protocol={args.protocol} | datasets={len(selected_datasets)}")
-    print(f"Job root: {job_root}")
-    if args.dry_run:
-        print("Dry run enabled.")
-
-    for dataset in selected_datasets:
-        dataset_dir = datasets_dir / dataset
-        log_path = logs_dir / f"{dataset}.log"
-
-        if dataset_is_complete(ledger, dataset, shots):
-            print(f"[SKIP] {dataset} already complete for shots={shots}")
-            continue
-
-        command = build_command(
-            entry,
-            protocol=args.protocol,
-            dataset=dataset,
-            data_path=args.data_path,
-            save_dir=str(datasets_dir),
-            forward_args=forward_args,
-            use_torchrun=args.torchrun,
-            torchrun_args=torchrun_args,
+        ledger = load_ledger(ledger_path)
+        backfill_existing_results(
+            ledger,
+            datasets=discovered,
+            logs_dir=logs_dir,
+            datasets_dir=datasets_dir,
+            summary_kind=entry.summary_kind,
         )
-
-        if args.dry_run:
-            print(f"[DRY-RUN] {dataset}: {' '.join(shlex.quote(token) for token in command)}")
-            continue
-
-        print(f"[RUN] {dataset}")
-        return_code = run_dataset(command, log_path)
-
-        if return_code == 0:
-            rows = parse_summary_rows(
-                dataset=dataset,
-                dataset_dir=dataset_dir,
-                log_file=log_path,
-                summary_kind=entry.summary_kind,
-            )
-            if not rows:
-                failure_row = build_failure_row(
-                    dataset=dataset,
-                    status="failed",
-                    result_file=str(dataset_dir.resolve()) if dataset_dir.exists() else "",
-                    log_file=str(log_path.resolve()),
-                    note="exit_code=0 but no summary file was produced",
-                )
-                upsert_row(ledger, failure_row)
-                print(f"[FAIL] {dataset} produced no summary output")
-            else:
-                for row in rows:
-                    upsert_row(ledger, row)
-                remove_row(ledger, dataset, "__dataset__")
-                print(f"[OK] {dataset}")
-        else:
-            status = detect_failure_status(log_path)
-            failure_row = build_failure_row(
-                dataset=dataset,
-                status=status,
-                result_file=str(dataset_dir.resolve()) if dataset_dir.exists() else "",
-                log_file=str(log_path.resolve()),
-                note=f"exit_code={return_code}",
-            )
-            upsert_row(ledger, failure_row)
-            print(f"[{status.upper()}] {dataset} (exit {return_code})")
-
         write_ledger(ledger_path, ledger)
 
-    print(f"Ledger written to: {ledger_path}")
-    return 0
+        print(f"Experiment: {args.experiment} | protocol={args.protocol} | datasets={len(selected_datasets)}")
+        print(f"Job root: {job_root}")
+        if args.gpu_ids:
+            print(f"Workers: {len(args.gpu_ids)} | gpu_ids={','.join(args.gpu_ids)}")
+        else:
+            print("Workers: 1 | gpu_ids=inherit")
+        if args.dry_run:
+            print("Dry run enabled.")
+
+        pending_datasets: List[str] = []
+        for dataset in selected_datasets:
+            if dataset_is_complete(ledger, dataset, shots):
+                print(f"[SKIP] {dataset} already complete for shots={shots}")
+                continue
+            pending_datasets.append(dataset)
+
+        if args.dry_run:
+            preview_gpu_ids = args.gpu_ids or [None]
+            for idx, dataset in enumerate(pending_datasets):
+                gpu_id = preview_gpu_ids[idx % len(preview_gpu_ids)]
+                command = build_command(
+                    entry,
+                    protocol=args.protocol,
+                    dataset=dataset,
+                    data_path=args.data_path,
+                    save_dir=str(datasets_dir),
+                    forward_args=forward_args,
+                )
+                prefix = f"CUDA_VISIBLE_DEVICES={gpu_id} " if gpu_id is not None else ""
+                print(f"[DRY-RUN] {dataset}: {prefix}{' '.join(shlex.quote(token) for token in command)}")
+            print(f"Ledger written to: {ledger_path}")
+            return 0
+
+        if not pending_datasets:
+            print("No pending datasets remain.")
+            print(f"Ledger written to: {ledger_path}")
+            return 0
+
+        task_queue: queue.Queue[str | None] = queue.Queue()
+        result_queue: queue.Queue[WorkerMessage] = queue.Queue()
+        worker_gpu_ids = args.gpu_ids or [None]
+
+        for dataset in pending_datasets:
+            task_queue.put(dataset)
+        for _ in worker_gpu_ids:
+            task_queue.put(None)
+
+        workers: List[threading.Thread] = []
+        for worker_id, gpu_id in enumerate(worker_gpu_ids, start=1):
+            thread = threading.Thread(
+                target=worker_loop,
+                kwargs={
+                    "worker_id": worker_id,
+                    "gpu_id": gpu_id,
+                    "entry": entry,
+                    "protocol": args.protocol,
+                    "data_path": args.data_path,
+                    "save_dir": str(datasets_dir),
+                    "forward_args": forward_args,
+                    "logs_dir": logs_dir,
+                    "task_queue": task_queue,
+                    "result_queue": result_queue,
+                },
+                name=f"ucr-batch-worker-{worker_id}",
+            )
+            thread.start()
+            workers.append(thread)
+
+        active_workers = len(workers)
+        completed_datasets = 0
+        worker_errors: List[str] = []
+
+        while active_workers > 0:
+            message = result_queue.get()
+
+            if message.kind == "dataset_started":
+                gpu_label = message.gpu_id if message.gpu_id is not None else "inherit"
+                print(f"[RUN] worker={message.worker_id} gpu={gpu_label} dataset={message.dataset}")
+                continue
+
+            if message.kind == "worker_error":
+                gpu_label = message.gpu_id if message.gpu_id is not None else "inherit"
+                worker_errors.append(
+                    f"worker={message.worker_id} gpu={gpu_label}: {message.error_message}"
+                )
+                print(f"[WORKER-ERROR] worker={message.worker_id} gpu={gpu_label}: {message.error_message}")
+                continue
+
+            if message.kind == "worker_done":
+                active_workers -= 1
+                continue
+
+            if message.kind != "dataset_finished":  # pragma: no cover - defensive fallback
+                raise RuntimeError(f"Unknown worker message: {message.kind}")
+
+            dataset = str(message.dataset)
+            log_path = message.log_path
+            if log_path is None:
+                raise RuntimeError(f"Worker result for {dataset} is missing log_path")
+            dataset_dir = datasets_dir / dataset
+            return_code = int(message.return_code if message.return_code is not None else -1)
+            completed_datasets += 1
+
+            if return_code == 0:
+                rows = parse_summary_rows(
+                    dataset=dataset,
+                    dataset_dir=dataset_dir,
+                    log_file=log_path,
+                    summary_kind=entry.summary_kind,
+                )
+                if not rows:
+                    failure_row = build_failure_row(
+                        dataset=dataset,
+                        status="failed",
+                        result_file=str(dataset_dir.resolve()) if dataset_dir.exists() else "",
+                        log_file=str(log_path.resolve()),
+                        note="exit_code=0 but no summary file was produced",
+                    )
+                    upsert_row(ledger, failure_row)
+                    print(f"[FAIL] {dataset} produced no summary output ({completed_datasets}/{len(pending_datasets)})")
+                else:
+                    for row in rows:
+                        upsert_row(ledger, row)
+                    remove_row(ledger, dataset, "__dataset__")
+                    print(f"[OK] {dataset} ({completed_datasets}/{len(pending_datasets)})")
+            else:
+                status = detect_failure_status(log_path)
+                failure_row = build_failure_row(
+                    dataset=dataset,
+                    status=status,
+                    result_file=str(dataset_dir.resolve()) if dataset_dir.exists() else "",
+                    log_file=str(log_path.resolve()),
+                    note=f"exit_code={return_code}",
+                )
+                upsert_row(ledger, failure_row)
+                print(f"[{status.upper()}] {dataset} (exit {return_code}) ({completed_datasets}/{len(pending_datasets)})")
+
+            write_ledger(ledger_path, ledger)
+
+        for thread in workers:
+            thread.join()
+
+        if worker_errors:
+            raise RuntimeError("Worker threads failed internally:\n" + "\n".join(worker_errors))
+
+        print(f"Ledger written to: {ledger_path}")
+        return 0
 
 
 if __name__ == "__main__":

@@ -5,21 +5,22 @@
 # SPDX-License-Identifier: MIT
 
 """
-Curriculum pretraining V2 for UCR-oriented transfer.
+Curriculum pretraining V4 for UCR-oriented transfer.
 
 Stages:
 1. stage0_encoder_ssl
 2. stage1_tsqa_transfer
-3. stage2_synthetic_semantics
+3. stage2_semantic_bridge
 4. stage3_m4_caption
 
-This script intentionally keeps the stable stage12 training scaffold while
-re-organizing the curriculum around a stronger TSQA transfer stage and more
-controlled semantic expansion stages.
+This script keeps the stable stage12 TSQA transfer recipe as the downstream
+reference checkpoint while replacing stage0 with a branch-preserving multi-view
+SSL objective that better matches classification transfer.
 """
 
 import argparse
 import datetime
+import faulthandler
 import json
 import math
 import os
@@ -56,9 +57,11 @@ from opentslm.model.encoder.NewTSVisionEncoder import (
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
 from opentslm.model_config import BATCH_SIZE, EARLY_STOP_PAT, ENCODER_OUTPUT_DIM
 from opentslm.time_series_datasets.curriculum_pretrain_aux import (
+    AlignmentTargetDataset,
     DEFAULT_SYNTHETIC_SAMPLE_TYPES,
     FULL_SYNTHETIC_SAMPLE_TYPES,
     DEFAULT_UCR_TRAIN_LIST,
+    MixedPretrainDataset,
     RawSeriesDataset,
     SyntheticAttributeDataset,
     load_m4_raw_records,
@@ -68,49 +71,68 @@ from opentslm.time_series_datasets.curriculum_pretrain_aux import (
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
 
 
+faulthandler.enable(all_threads=True, file=sys.stderr)
+
+
+STAGE0_MIX_WEIGHTS = (2, 1, 2)
+STAGE0_VICREG_SIM_COEFF = 25.0
+STAGE0_VICREG_VAR_COEFF = 25.0
+STAGE0_VICREG_COV_COEFF = 1.0
+STAGE0_VICREG_EPS = 1e-4
+STAGE2_COMPONENT_NAMES = ("tsqa", "m4", "synthetic")
+STAGE2_DEFAULT_MIX_WEIGHTS = (1, 1, 2)
+STAGE2_LOSS_W_ALIGN = 0.2
+STAGE2_LOSS_W_CONSISTENCY = 0.05
+STAGE2_LEGACY_NAME = "stage2_synthetic_semantics"
+STAGE2_CANONICAL_NAME = "stage2_semantic_bridge"
+
 STAGE_ORDER = [
     "stage0_encoder_ssl",
     "stage1_tsqa_transfer",
-    "stage2_synthetic_semantics",
+    STAGE2_CANONICAL_NAME,
     "stage3_m4_caption",
 ]
 
+STAGE_NAME_ALIASES = {
+    STAGE2_LEGACY_NAME: STAGE2_CANONICAL_NAME,
+}
+
 STAGE_SPECS = {
     "stage0_encoder_ssl": {
-        "default_epochs": 10,
-        "description": "Encoder-only SSL pretraining on raw TSQA + M4 time series",
+        "default_epochs": 8,
+        "description": "TS foundation pretraining on raw TSQA + M4 + UCR series",
         "selection": "loss",
         "recommended_use": "Warm-start encoder weights for stage1_tsqa_transfer.",
     },
     "stage1_tsqa_transfer": {
-        "default_epochs": 25,
-        "default_lr_encoder": 2e-4,
+        "default_epochs": 20,
+        "default_lr_encoder": 5e-5,
         "default_lr_projector": 1e-4,
-        "description": "Primary TSQA transfer stage for downstream few-shot classification",
-        "selection": "accuracy",
+        "description": "Reference TSQA transfer stage for downstream classification",
+        "selection": "loss",
         "recommended_use": "Default UCR few-shot reference checkpoint.",
     },
-    "stage2_synthetic_semantics": {
-        "default_epochs": 8,
-        "default_lr_encoder": 1e-4,
-        "default_lr_projector": 5e-5,
-        "description": "Controlled synthetic semantic expansion without mixing TSQA/M4",
-        "selection": "loss",
-        "recommended_use": "Ablation checkpoint for controlled semantic enrichment.",
-    },
-    "stage3_m4_caption": {
-        "default_epochs": 20,
+    STAGE2_CANONICAL_NAME: {
+        "default_epochs": 6,
         "default_lr_encoder": 1e-4,
         "default_lr_projector": 1e-4,
-        "description": "Natural caption extension on M4 after TSQA/synthetic stages",
+        "description": "Semantic bridge with TSQA retention, M4 alignment, and synthetic attributes",
         "selection": "loss",
-        "recommended_use": "Final caption-capable checkpoint for transfer comparison.",
+        "recommended_use": "Intermediate semantic bridge checkpoint for caption specialization.",
+    },
+    "stage3_m4_caption": {
+        "default_epochs": 12,
+        "default_lr_encoder": 1e-4,
+        "default_lr_projector": 1e-4,
+        "description": "Caption specialization on M4 with frozen encoder and LoRA",
+        "selection": "loss",
+        "recommended_use": "Default captioning checkpoint.",
     },
 }
 
 STAGE_ALIAS_FILENAMES = {
     "stage1_tsqa_transfer": "stage1_transfer_checkpoint.pt",
-    "stage2_synthetic_semantics": "stage2_synthetic_checkpoint.pt",
+    STAGE2_CANONICAL_NAME: "stage2_semantic_bridge_checkpoint.pt",
     "stage3_m4_caption": "stage3_m4_checkpoint.pt",
 }
 
@@ -133,21 +155,38 @@ def parse_stage_list(value: str) -> List[str]:
     stages = [stage.strip() for stage in value.split(",") if stage.strip()]
     if not stages:
         raise ValueError("At least one stage must be provided in --stages")
-    unknown = [stage for stage in stages if stage not in STAGE_ORDER]
+    normalized = [normalize_stage_name(stage) for stage in stages]
+    unknown = [stage for stage in normalized if stage not in STAGE_ORDER]
     if unknown:
         raise ValueError(f"Unknown stage(s): {unknown}. Valid stages: {STAGE_ORDER}")
-    return stages
+    return normalized
+
+
+def normalize_stage_name(stage_name: str) -> str:
+    return STAGE_NAME_ALIASES.get(stage_name, stage_name)
+
+
+def parse_weight_list(value: Optional[str], *, expected_len: int) -> Tuple[int, ...]:
+    weights = parse_int_list(value)
+    if weights is None:
+        raise ValueError("Weights must be provided")
+    if len(weights) != expected_len:
+        raise ValueError(f"Expected {expected_len} weights, got {len(weights)}")
+    if any(weight <= 0 for weight in weights):
+        raise ValueError("Weights must all be positive")
+    return tuple(int(weight) for weight in weights)
 
 
 def stage_dependency_candidates(stage_name: str) -> List[str]:
+    stage_name = normalize_stage_name(stage_name)
     if stage_name == "stage0_encoder_ssl":
         return []
     if stage_name == "stage1_tsqa_transfer":
         return ["stage0_encoder_ssl"]
-    if stage_name == "stage2_synthetic_semantics":
+    if stage_name == STAGE2_CANONICAL_NAME:
         return ["stage1_tsqa_transfer"]
     if stage_name == "stage3_m4_caption":
-        return ["stage2_synthetic_semantics", "stage1_tsqa_transfer"]
+        return [STAGE2_CANONICAL_NAME, "stage1_tsqa_transfer"]
     raise ValueError(f"Unsupported stage: {stage_name}")
 
 
@@ -166,17 +205,17 @@ def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
 
 
 def default_run_name(args) -> str:
-    return "newts_dual_branch_stage0_tsqa_m4"
+    return "newts_dual_branch_curriculum_v4"
 
 
 def parse_args(argv=None):
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
-    parser = argparse.ArgumentParser(description="Curriculum pretraining V2 with stage0/TSQA/synthetic/M4 stages")
+    parser = argparse.ArgumentParser(description="Curriculum pretraining V4 with stage0/TSQA/semantic-bridge/M4 stages")
 
     parser.add_argument(
         "--stages",
         type=str,
-        default="stage0_encoder_ssl,stage1_tsqa_transfer,stage2_synthetic_semantics,stage3_m4_caption",
+        default=f"stage0_encoder_ssl,stage1_tsqa_transfer,{STAGE2_CANONICAL_NAME},stage3_m4_caption",
         help="Comma-separated stages to run.",
     )
     parser.add_argument("--run_name", type=str, default=None, help="Optional subdirectory for this run")
@@ -187,7 +226,7 @@ def parse_args(argv=None):
     parser.add_argument("--llm_attn_impl", type=str, default="sdpa", choices=["sdpa", "eager", "flash_attention_2"])
     parser.add_argument("--random_init_llm", action="store_true", help="Replace the frozen base LLM with a random initialization")
     parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--use_lora", action="store_true", help="Enable LoRA only for stage3_m4_caption")
+    parser.add_argument("--use_lora", action="store_true", help="Explicitly enable LoRA for stage3_m4_caption (it is enabled by default when not specified)")
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lr_lora", type=float, default=1e-4)
@@ -245,7 +284,28 @@ def parse_args(argv=None):
     parser.add_argument("--stage0_lr_heads", type=float, default=1e-4)
     parser.add_argument("--stage0_mask_ratio", type=float, default=0.4)
     parser.add_argument("--stage0_batch_multiplier", type=int, default=4)
-    parser.add_argument("--stage0_downstream_pool", type=str, default="none", choices=["none", "ucr_train_list"])
+    parser.add_argument(
+        "--stage0_mix_weights",
+        type=str,
+        default="2,1,2",
+        help="Comma-separated train mix weights for stage0 in TSQA,M4,UCR order.",
+    )
+    parser.add_argument("--stage0_downstream_pool", type=str, default="ucr_train_list", choices=["none", "ucr_train_list"])
+    parser.add_argument(
+        "--stage0_train_vision",
+        action="store_true",
+        help="Train the stage0 vision backbone instead of keeping the ViT backbone frozen.",
+    )
+    parser.add_argument(
+        "--stage0_branch_dropout",
+        type=float,
+        default=0.1,
+        help="Stage0-only random branch dropout probability for fused multi-view SSL.",
+    )
+    parser.add_argument("--stage0_w_ts_recon", type=float, default=1.0)
+    parser.add_argument("--stage0_w_ts_vicreg", type=float, default=0.25)
+    parser.add_argument("--stage0_w_vi_vicreg", type=float, default=0.25)
+    parser.add_argument("--stage0_w_fuse_vicreg", type=float, default=0.5)
     parser.add_argument("--aug_jitter_std", type=float, default=0.03)
     parser.add_argument("--aug_scaling_min", type=float, default=0.8)
     parser.add_argument("--aug_scaling_max", type=float, default=1.2)
@@ -254,24 +314,41 @@ def parse_args(argv=None):
     parser.add_argument("--ucr_train_list_path", type=str, default=str(DEFAULT_UCR_TRAIN_LIST))
 
     parser.add_argument("--stage1_epochs", type=int, default=STAGE_SPECS["stage1_tsqa_transfer"]["default_epochs"])
-    parser.add_argument("--stage2_epochs", type=int, default=STAGE_SPECS["stage2_synthetic_semantics"]["default_epochs"])
+    parser.add_argument("--stage2_epochs", type=int, default=STAGE_SPECS[STAGE2_CANONICAL_NAME]["default_epochs"])
     parser.add_argument("--stage3_epochs", type=int, default=STAGE_SPECS["stage3_m4_caption"]["default_epochs"])
     parser.add_argument("--stage1_lr_encoder", type=float, default=STAGE_SPECS["stage1_tsqa_transfer"]["default_lr_encoder"])
     parser.add_argument("--stage1_lr_projector", type=float, default=STAGE_SPECS["stage1_tsqa_transfer"]["default_lr_projector"])
-    parser.add_argument("--stage2_lr_encoder", type=float, default=STAGE_SPECS["stage2_synthetic_semantics"]["default_lr_encoder"])
-    parser.add_argument("--stage2_lr_projector", type=float, default=STAGE_SPECS["stage2_synthetic_semantics"]["default_lr_projector"])
+    parser.add_argument("--stage2_lr_encoder", type=float, default=STAGE_SPECS[STAGE2_CANONICAL_NAME]["default_lr_encoder"])
+    parser.add_argument("--stage2_lr_projector", type=float, default=STAGE_SPECS[STAGE2_CANONICAL_NAME]["default_lr_projector"])
     parser.add_argument("--stage3_lr_encoder", type=float, default=STAGE_SPECS["stage3_m4_caption"]["default_lr_encoder"])
     parser.add_argument("--stage3_lr_projector", type=float, default=STAGE_SPECS["stage3_m4_caption"]["default_lr_projector"])
+    parser.add_argument(
+        "--stage1_projector_only_epochs",
+        type=int,
+        default=2,
+        help="Freeze the stage1 encoder for the first N epochs before low-LR joint tuning.",
+    )
     parser.add_argument(
         "--stage2_synthetic_sample_types",
         type=str,
         default=",".join(DEFAULT_SYNTHETIC_SAMPLE_TYPES),
-        help="Comma-separated synthetic sample types for stage2. Defaults exclude match_mismatch.",
+        help="Comma-separated synthetic sample types for stage2 semantic bridge. Defaults exclude match_mismatch.",
+    )
+    parser.add_argument(
+        "--stage2_mix_weights",
+        type=str,
+        default="1,1,2",
+        help="Comma-separated train mix weights for stage2_semantic_bridge in TSQA,M4,SYN order.",
+    )
+    parser.add_argument(
+        "--stage3_unfreeze_encoder",
+        action="store_true",
+        help="Allow stage3_m4_caption to update encoder weights instead of using the default frozen-encoder path.",
     )
 
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     parser.add_argument("--eval_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
@@ -300,11 +377,14 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     args.stages = parse_stage_list(args.stages)
     args.vit_mix_layers = parse_int_list(args.vit_mix_layers)
+    args.stage0_mix_weights = parse_weight_list(args.stage0_mix_weights, expected_len=3)
     args.stage2_synthetic_sample_types = parse_str_list(args.stage2_synthetic_sample_types)
+    args.stage2_mix_weights = parse_weight_list(args.stage2_mix_weights, expected_len=len(STAGE2_COMPONENT_NAMES))
     args.pad_mode_explicit = cli_flag_was_provided(provided_argv, "--pad_mode")
     args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
     args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
     args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
+    args.use_lora_explicit = cli_flag_was_provided(provided_argv, "--use_lora")
     validate_args(args)
     return args
 
@@ -326,16 +406,29 @@ def validate_args(args):
         raise ValueError("--vit_num_hidden_layers must be positive when provided")
     if args.stage0_batch_multiplier < 1:
         raise ValueError("--stage0_batch_multiplier must be >= 1")
+    if not 0.0 <= args.stage0_branch_dropout <= 0.5:
+        raise ValueError("--stage0_branch_dropout must be in [0, 0.5]")
     if args.dataloader_num_workers < 0:
         raise ValueError("--dataloader_num_workers must be >= 0")
     if any(epoch <= 0 for epoch in [args.stage0_epochs, args.stage1_epochs, args.stage2_epochs, args.stage3_epochs]):
         raise ValueError("All stage epoch counts must be positive")
+    if args.stage1_projector_only_epochs < 0:
+        raise ValueError("--stage1_projector_only_epochs must be >= 0")
+    if args.stage1_projector_only_epochs > args.stage1_epochs:
+        raise ValueError("--stage1_projector_only_epochs must be <= --stage1_epochs")
     if args.aug_scaling_min <= 0 or args.aug_scaling_max <= 0 or args.aug_scaling_min > args.aug_scaling_max:
         raise ValueError("Invalid augmentation scaling range")
     if not 0.0 <= args.stage0_mask_ratio < 1.0:
         raise ValueError("--stage0_mask_ratio must be in [0, 1)")
     if not 0.0 <= args.aug_time_mask_ratio < 1.0:
         raise ValueError("--aug_time_mask_ratio must be in [0, 1)")
+    if any(weight < 0.0 for weight in [
+        args.stage0_w_ts_recon,
+        args.stage0_w_ts_vicreg,
+        args.stage0_w_vi_vicreg,
+        args.stage0_w_fuse_vicreg,
+    ]):
+        raise ValueError("Stage0 loss weights must be non-negative")
     validate_vision_2d_mode(args.vision_2d_mode)
 
     if args.vit_feature_mode == "single":
@@ -370,6 +463,8 @@ def validate_args(args):
     unknown_sample_types = sorted(set(args.stage2_synthetic_sample_types) - set(FULL_SYNTHETIC_SAMPLE_TYPES))
     if unknown_sample_types:
         raise ValueError(f"Unsupported --stage2_synthetic_sample_types entries: {unknown_sample_types}")
+    if len(args.stage2_mix_weights) != len(STAGE2_COMPONENT_NAMES):
+        raise ValueError(f"--stage2_mix_weights must contain {len(STAGE2_COMPONENT_NAMES)} entries")
 
 
 def setup_distributed() -> Tuple[int, int, int]:
@@ -379,7 +474,14 @@ def setup_distributed() -> Tuple[int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     rank = int(os.environ.get("RANK", 0))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", init_method="env://")
+    try:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            device_id=torch.device("cuda", local_rank),
+        )
+    except TypeError:
+        dist.init_process_group(backend="nccl", init_method="env://")
     return local_rank, world_size, rank
 
 
@@ -479,9 +581,9 @@ def build_newts_dual_branch_config(args, *, for_stage0: bool) -> Dict[str, Any]:
         "aggregator_gate_type": args.aggregator_gate_type,
         "aggregator_fuse_layers": args.aggregator_fuse_layers,
         "freeze_ts_backbone": False if for_stage0 else args.freeze_ts_backbone,
-        "freeze_vision_backbone": False if for_stage0 else args.freeze_vision_backbone,
+        "freeze_vision_backbone": (not args.stage0_train_vision) if for_stage0 else args.freeze_vision_backbone,
         "enable_modality_embeddings": False,
-        "branch_dropout": 0.0,
+        "branch_dropout": args.stage0_branch_dropout if for_stage0 else 0.0,
     }
     return config
 
@@ -564,7 +666,7 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         self.bucket_size = max(self.batch_size, self.batch_size * int(bucket_size_multiplier))
         self.seed = int(seed)
         self.epoch = 0
-        self.sample_lengths = [self._infer_sample_length(dataset[idx]) for idx in range(len(dataset))]
+        self.sample_lengths = [self._resolve_sample_length(dataset, idx) for idx in range(len(dataset))]
 
     @staticmethod
     def _infer_sample_length(sample: Dict[str, Any]) -> int:
@@ -574,6 +676,13 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         if max_len <= 0:
             raise ValueError("Encountered a sample without a positive time-series length")
         return max_len
+
+    @classmethod
+    def _resolve_sample_length(cls, dataset: Dataset, idx: int) -> int:
+        get_sample_length = getattr(dataset, "get_sample_length", None)
+        if callable(get_sample_length):
+            return int(get_sample_length(idx))
+        return cls._infer_sample_length(dataset[idx])
 
     def _build_all_batches(self) -> List[List[int]]:
         rng = random.Random(self.seed + self.epoch)
@@ -736,10 +845,8 @@ def create_simple_loader(
 
 
 def build_stage0_datasets(args) -> Dict[str, Dataset]:
-    train_sets: List[Dataset] = [
-        RawSeriesDataset(load_tsqa_raw_records("train")),
-        RawSeriesDataset(load_m4_raw_records("train")),
-    ]
+    train_sets: List[Dataset] = [RawSeriesDataset(load_tsqa_raw_records("train")), RawSeriesDataset(load_m4_raw_records("train"))]
+    mix_weights = list(args.stage0_mix_weights[:2])
     if args.stage0_downstream_pool == "ucr_train_list":
         train_sets.append(
             RawSeriesDataset(
@@ -749,8 +856,11 @@ def build_stage0_datasets(args) -> Dict[str, Dataset]:
                 )
             )
         )
+        mix_weights.append(args.stage0_mix_weights[2])
+    tsqa_units = math.ceil(len(train_sets[0]) / max(mix_weights[0], 1))
+    epoch_size = tsqa_units * sum(mix_weights)
     return {
-        "train": ConcatDataset(train_sets),
+        "train": MixedPretrainDataset(train_sets, mix_weights, seed=args.seed, epoch_size=epoch_size),
         "validation": ConcatDataset(
             [
                 RawSeriesDataset(load_tsqa_raw_records("validation")),
@@ -766,18 +876,47 @@ def build_stage0_datasets(args) -> Dict[str, Dataset]:
     }
 
 
-def create_stage_dataset(stage_name: str, split: str, eos_token: str, args) -> Dataset:
-    if stage_name == "stage1_tsqa_transfer":
-        from opentslm.time_series_datasets.TSQADataset import TSQADataset
+def build_stage2_component_datasets(split: str, eos_token: str, args) -> Dict[str, Dataset]:
+    from opentslm.time_series_datasets.TSQADataset import TSQADataset
+    from opentslm.time_series_datasets.m4.M4QADataset import M4QADataset
 
-        return TSQADataset(split, EOS_TOKEN=eos_token)
-    if stage_name == "stage2_synthetic_semantics":
-        return SyntheticAttributeDataset(
+    return {
+        "tsqa": AlignmentTargetDataset(
+            TSQADataset(split, EOS_TOKEN=eos_token),
+            eos_token=eos_token,
+            source_name="tsqa",
+            alignment_from_answer=False,
+        ),
+        "m4": AlignmentTargetDataset(
+            M4QADataset(split, EOS_TOKEN=eos_token),
+            eos_token=eos_token,
+            source_name="m4",
+            alignment_from_answer=True,
+        ),
+        "synthetic": SyntheticAttributeDataset(
             split,
             eos_token=eos_token,
             seed=args.seed,
             sample_types=args.stage2_synthetic_sample_types,
-        )
+        ),
+    }
+
+
+def create_stage_dataset(stage_name: str, split: str, eos_token: str, args) -> Dataset:
+    stage_name = normalize_stage_name(stage_name)
+    if stage_name == "stage1_tsqa_transfer":
+        from opentslm.time_series_datasets.TSQADataset import TSQADataset
+
+        return TSQADataset(split, EOS_TOKEN=eos_token)
+    if stage_name == STAGE2_CANONICAL_NAME:
+        split_components = build_stage2_component_datasets(split, eos_token, args)
+        if split == "train":
+            return MixedPretrainDataset(
+                [split_components[name] for name in STAGE2_COMPONENT_NAMES],
+                args.stage2_mix_weights,
+                seed=args.seed,
+            )
+        return ConcatDataset([split_components[name] for name in STAGE2_COMPONENT_NAMES])
     if stage_name == "stage3_m4_caption":
         from opentslm.time_series_datasets.m4.M4QADataset import M4QADataset
 
@@ -791,31 +930,45 @@ class DualViewSSLModel(nn.Module):
         *,
         encoder_config: Dict[str, Any],
         device: str,
+        train_vision: bool,
         mask_ratio: float,
         jitter_std: float,
         scaling_range: Tuple[float, float],
         time_mask_ratio: float,
+        loss_w_ts_recon: float,
+        loss_w_ts_vicreg: float,
+        loss_w_vi_vicreg: float,
+        loss_w_fuse_vicreg: float,
     ):
         super().__init__()
         self.device = device
+        self.train_vision = bool(train_vision)
         self.mask_ratio = float(mask_ratio)
         self.jitter_std = float(jitter_std)
         self.scaling_range = scaling_range
         self.time_mask_ratio = float(time_mask_ratio)
+        self.loss_w_ts_recon = float(loss_w_ts_recon)
+        self.loss_w_ts_vicreg = float(loss_w_ts_vicreg)
+        self.loss_w_vi_vicreg = float(loss_w_vi_vicreg)
+        self.loss_w_fuse_vicreg = float(loss_w_fuse_vicreg)
 
         self.encoder = NewTSDualBranchEncoder(**encoder_config, device=device).to(device)
         self.ts_recon_head = nn.Linear(self.encoder.output_dim, self.encoder.patch_length).to(device)
-        self.ts_align_head = nn.Sequential(
-            nn.LayerNorm(self.encoder.output_dim),
-            nn.Linear(self.encoder.output_dim, 256),
-        ).to(device)
-        self.vision_align_head = nn.Sequential(
-            nn.LayerNorm(self.encoder.output_dim),
-            nn.Linear(self.encoder.output_dim, 256),
-        ).to(device)
+        self.ts_ssl_head = self._build_ssl_head(self.encoder.output_dim).to(device)
+        self.vision_ssl_head = self._build_ssl_head(self.encoder.output_dim).to(device)
+        self.fuse_ssl_head = self._build_ssl_head(self.encoder.output_dim).to(device)
 
     def forward(self, batch: Dict[str, Any]) -> torch.Tensor:
         return self.compute_losses(batch)["loss_total"]
+
+    @staticmethod
+    def _build_ssl_head(hidden_size: int) -> nn.Module:
+        return nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
 
     def _apply_mask(self, x: torch.Tensor) -> torch.Tensor:
         if self.mask_ratio <= 0:
@@ -842,38 +995,96 @@ class DualViewSSLModel(nn.Module):
         return augmented
 
     @staticmethod
-    def _info_nce(z_a: torch.Tensor, z_b: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
-        logits = torch.matmul(z_a, z_b.transpose(0, 1)) / temperature
-        targets = torch.arange(logits.size(0), device=logits.device)
-        return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.transpose(0, 1), targets))
+    def _off_diagonal(x: torch.Tensor) -> torch.Tensor:
+        n, m = x.shape
+        if n != m:
+            raise ValueError("off_diagonal expects a square matrix")
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+    @classmethod
+    def _vicreg_loss(cls, z_a: torch.Tensor, z_b: torch.Tensor) -> torch.Tensor:
+        if z_a.shape != z_b.shape:
+            raise ValueError(f"VICReg tensors must share a shape, got {tuple(z_a.shape)} vs {tuple(z_b.shape)}")
+
+        repr_loss = F.mse_loss(z_a, z_b)
+
+        std_a = torch.sqrt(z_a.var(dim=0, unbiased=False) + STAGE0_VICREG_EPS)
+        std_b = torch.sqrt(z_b.var(dim=0, unbiased=False) + STAGE0_VICREG_EPS)
+        var_loss = torch.mean(F.relu(1.0 - std_a)) + torch.mean(F.relu(1.0 - std_b))
+
+        centered_a = z_a - z_a.mean(dim=0, keepdim=True)
+        centered_b = z_b - z_b.mean(dim=0, keepdim=True)
+        cov_a = (centered_a.transpose(0, 1) @ centered_a) / max(z_a.size(0) - 1, 1)
+        cov_b = (centered_b.transpose(0, 1) @ centered_b) / max(z_b.size(0) - 1, 1)
+        cov_loss = cls._off_diagonal(cov_a).pow(2).sum() / max(z_a.size(1), 1)
+        cov_loss = cov_loss + cls._off_diagonal(cov_b).pow(2).sum() / max(z_b.size(1), 1)
+
+        return (
+            STAGE0_VICREG_SIM_COEFF * repr_loss
+            + STAGE0_VICREG_VAR_COEFF * var_loss
+            + STAGE0_VICREG_COV_COEFF * cov_loss
+        )
+
+    def _encode_view(
+        self,
+        x: torch.Tensor,
+        *,
+        runtime_branch_mode: str,
+        apply_mask: bool = False,
+    ) -> Dict[str, Any]:
+        source = self._apply_mask(x) if apply_mask else x
+        return self.encoder(
+            source,
+            return_intermediates=True,
+            runtime_branch_mode=runtime_branch_mode,
+        )
+
+    def _masked_reconstruction_loss(self, x: torch.Tensor) -> torch.Tensor:
+        masked_outputs = self._encode_view(x, runtime_branch_mode="ts_only", apply_mask=True)
+        target_patches = self.encoder.ts_backbone._extract_patches(x)
+        pred_patches = self.ts_recon_head(masked_outputs["ts_tokens"].float()).to(target_patches.dtype)
+        return F.mse_loss(pred_patches, target_patches)
 
     def compute_losses(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         x = batch["series"].to(self.device, non_blocking=True)
-        base_outputs = self.encoder(x, return_intermediates=True, runtime_branch_mode="both")
-        masked_outputs = self.encoder(self._apply_mask(x), return_intermediates=True, runtime_branch_mode="both")
-        aug_outputs = self.encoder(self._apply_augment(x), return_intermediates=True, runtime_branch_mode="both")
+        x_a = self._apply_augment(x)
+        x_b = self._apply_augment(x)
 
-        target_patches = self.encoder.ts_backbone._extract_patches(x)
-        pred_patches = self.ts_recon_head(masked_outputs["ts_tokens"].float()).to(target_patches.dtype)
-        loss_recon = F.mse_loss(pred_patches, target_patches)
-
-        z_ts = F.normalize(self.ts_align_head(base_outputs["pooled_ts"].float()), dim=-1)
-        z_vi = F.normalize(self.vision_align_head(base_outputs["pooled_vision"].float()), dim=-1)
-        loss_info = self._info_nce(z_ts, z_vi)
-
-        z_ts_aug = F.normalize(self.ts_align_head(aug_outputs["pooled_ts"].float()), dim=-1)
-        z_vi_aug = F.normalize(self.vision_align_head(aug_outputs["pooled_vision"].float()), dim=-1)
-        loss_aug = 0.5 * (
-            (1.0 - F.cosine_similarity(z_ts, z_ts_aug, dim=-1)).mean()
-            + (1.0 - F.cosine_similarity(z_vi, z_vi_aug, dim=-1)).mean()
+        loss_ts_recon = 0.5 * (
+            self._masked_reconstruction_loss(x_a) + self._masked_reconstruction_loss(x_b)
         )
 
-        loss_total = loss_recon + 0.5 * loss_info + 0.1 * loss_aug
+        ts_outputs_a = self._encode_view(x_a, runtime_branch_mode="ts_only")
+        ts_outputs_b = self._encode_view(x_b, runtime_branch_mode="ts_only")
+        vi_outputs_a = self._encode_view(x_a, runtime_branch_mode="vision_only")
+        vi_outputs_b = self._encode_view(x_b, runtime_branch_mode="vision_only")
+        fuse_outputs_a = self._encode_view(x_a, runtime_branch_mode="both")
+        fuse_outputs_b = self._encode_view(x_b, runtime_branch_mode="both")
+
+        z_ts_a = self.ts_ssl_head(ts_outputs_a["pooled_ts"].float())
+        z_ts_b = self.ts_ssl_head(ts_outputs_b["pooled_ts"].float())
+        loss_ts_vicreg = self._vicreg_loss(z_ts_a, z_ts_b)
+
+        z_vi_a = self.vision_ssl_head(vi_outputs_a["pooled_vision"].float())
+        z_vi_b = self.vision_ssl_head(vi_outputs_b["pooled_vision"].float())
+        loss_vi_vicreg = self._vicreg_loss(z_vi_a, z_vi_b)
+
+        z_fuse_a = self.fuse_ssl_head(fuse_outputs_a["pooled_fused"].float())
+        z_fuse_b = self.fuse_ssl_head(fuse_outputs_b["pooled_fused"].float())
+        loss_fuse_vicreg = self._vicreg_loss(z_fuse_a, z_fuse_b)
+
+        loss_total = (
+            self.loss_w_ts_recon * loss_ts_recon
+            + self.loss_w_ts_vicreg * loss_ts_vicreg
+            + self.loss_w_vi_vicreg * loss_vi_vicreg
+            + self.loss_w_fuse_vicreg * loss_fuse_vicreg
+        )
         return {
             "loss_total": loss_total,
-            "loss_recon": loss_recon,
-            "loss_info": loss_info,
-            "loss_aug": loss_aug,
+            "loss_ts_recon": loss_ts_recon,
+            "loss_ts_vicreg": loss_ts_vicreg,
+            "loss_vi_vicreg": loss_vi_vicreg,
+            "loss_fuse_vicreg": loss_fuse_vicreg,
         }
 
     def get_checkpoint_metadata(self) -> Dict[str, Any]:
@@ -1055,10 +1266,36 @@ def load_sp_checkpoint(
 
 def load_stage0_encoder_into_sp(model, checkpoint_path: str, device: str) -> Dict[str, List[str]]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    missing = get_model(model).encoder.load_state_dict(checkpoint["encoder_state"], strict=False)
+    checkpoint_config = sanitize_checkpoint_metadata(
+        {
+            "encoder_config": dict((checkpoint.get("model_config") or {}).get("encoder_config") or {}),
+        }
+    )["encoder_config"]
+    current_config = sanitize_checkpoint_metadata(
+        {
+            "encoder_config": get_model(model).encoder.get_config(),
+        }
+    )["encoder_config"]
+    if checkpoint_config != current_config:
+        raise RuntimeError(
+            "Stage0 encoder config mismatch while initializing stage1. "
+            f"checkpoint={checkpoint_config!r}, current={current_config!r}"
+        )
+    current_state = get_model(model).encoder.state_dict()
+    filtered_encoder_state = dict(checkpoint["encoder_state"])
+    dropped_stage0_only_keys: List[str] = []
+    for key in list(filtered_encoder_state.keys()):
+        if key in current_state:
+            continue
+        if key.startswith("fused_pool_proj."):
+            dropped_stage0_only_keys.append(key)
+            filtered_encoder_state.pop(key)
+
+    missing = get_model(model).encoder.load_state_dict(filtered_encoder_state, strict=True)
     return {
         "missing_keys": list(missing.missing_keys),
         "unexpected_keys": list(missing.unexpected_keys),
+        "dropped_stage0_only_keys": dropped_stage0_only_keys,
     }
 
 
@@ -1069,10 +1306,13 @@ def build_stage0_optimizer(model: DualViewSSLModel, args):
 
     groups = []
     groups.append(collect(model.encoder.ts_backbone.parameters(), lr=args.stage0_lr_ts))
-    groups.append(collect(model.encoder.vision_encoder.vit.parameters(), lr=args.stage0_lr_vision))
+    excluded_modules = [model.encoder.ts_backbone]
+    if args.stage0_train_vision and model.encoder.vision_encoder is not None:
+        groups.append(collect(model.encoder.vision_encoder.vit.parameters(), lr=args.stage0_lr_vision))
+        excluded_modules.append(model.encoder.vision_encoder.vit)
     excluded = {
         id(param)
-        for module in [model.encoder.ts_backbone, model.encoder.vision_encoder.vit]
+        for module in excluded_modules
         for param in module.parameters()
     }
     head_params = [param for param in model.parameters() if param.requires_grad and id(param) not in excluded]
@@ -1117,17 +1357,46 @@ def build_sp_model(args, device: str, rank: int, *, enable_lora: bool):
     return model
 
 
-def build_sp_optimizer(model, args, stage_name: str):
-    underlying = get_model(model)
+def stage_uses_lora(args, stage_name: str) -> bool:
+    stage_name = normalize_stage_name(stage_name)
+    if stage_name != "stage3_m4_caption":
+        return False
+    if args.use_lora_explicit:
+        return bool(args.use_lora)
+    return True
 
-    def collect(parameters: Sequence[torch.nn.Parameter], lr: float):
-        params = [param for param in parameters if param.requires_grad]
-        return {"params": params, "lr": lr} if params else None
+
+def configure_sp_trainable_parameters(model, args, stage_name: str, rank: int):
+    stage_name = normalize_stage_name(stage_name)
+    underlying = get_model(model)
+    if stage_name == "stage1_tsqa_transfer":
+        current_epoch = int(getattr(underlying, "_curriculum_stage_epoch", 1))
+        freeze_encoder = current_epoch <= args.stage1_projector_only_epochs
+        for param in underlying.encoder.parameters():
+            param.requires_grad = not freeze_encoder
+        last_state = getattr(underlying, "_stage1_encoder_frozen", None)
+        if rank == 0 and last_state != freeze_encoder:
+            if freeze_encoder:
+                print(f"🧊 Stage1 encoder frozen for projector-only warm-start (epoch {current_epoch})")
+            else:
+                print(f"🔥 Stage1 encoder unfrozen for joint TSQA transfer (epoch {current_epoch})")
+        underlying._stage1_encoder_frozen = freeze_encoder
+        return
+    if stage_name == "stage3_m4_caption" and not args.stage3_unfreeze_encoder:
+        for param in underlying.encoder.parameters():
+            param.requires_grad = False
+        if rank == 0:
+            print("🧊 Stage3 encoder frozen (default caption specialization path)")
+
+
+def build_sp_optimizer(model, args, stage_name: str):
+    stage_name = normalize_stage_name(stage_name)
+    underlying = get_model(model)
 
     if stage_name == "stage1_tsqa_transfer":
         encoder_lr = args.stage1_lr_encoder
         projector_lr = args.stage1_lr_projector
-    elif stage_name == "stage2_synthetic_semantics":
+    elif stage_name == STAGE2_CANONICAL_NAME:
         encoder_lr = args.stage2_lr_encoder
         projector_lr = args.stage2_lr_projector
     elif stage_name == "stage3_m4_caption":
@@ -1137,12 +1406,47 @@ def build_sp_optimizer(model, args, stage_name: str):
         raise ValueError(f"Unsupported stage: {stage_name}")
 
     param_groups = []
-    param_groups.append(collect(underlying.encoder.parameters(), lr=encoder_lr))
-    param_groups.append(collect(underlying.projector.parameters(), lr=projector_lr))
+    encoder_params = list(underlying.encoder.parameters())
+    projector_params = list(underlying.projector.parameters())
+    covered_param_ids = {id(param) for param in encoder_params + projector_params}
+
+    if encoder_params:
+        param_groups.append({"params": encoder_params, "lr": encoder_lr})
+    if projector_params:
+        param_groups.append({"params": projector_params, "lr": projector_lr})
+
+    extra_params = [
+        param
+        for param in underlying.parameters()
+        if param.requires_grad and id(param) not in covered_param_ids
+    ]
     if underlying.lora_enabled:
-        param_groups.append(collect(underlying.get_lora_parameters(), lr=args.lr_lora))
+        lora_params = [param for param in underlying.get_lora_parameters() if param.requires_grad]
+        covered_param_ids.update(id(param) for param in lora_params)
+        extra_params = [param for param in extra_params if id(param) not in covered_param_ids]
+        param_groups.append({"params": lora_params, "lr": args.lr_lora} if lora_params else None)
+    param_groups.append({"params": extra_params, "lr": projector_lr} if extra_params else None)
 
     return AdamW([group for group in param_groups if group is not None], weight_decay=args.weight_decay)
+
+
+def resolve_stage_num_epochs(args, stage_name: str) -> int:
+    stage_name = normalize_stage_name(stage_name)
+    if stage_name == "stage1_tsqa_transfer":
+        return args.stage1_epochs
+    if stage_name == STAGE2_CANONICAL_NAME:
+        return args.stage2_epochs
+    if stage_name == "stage3_m4_caption":
+        return args.stage3_epochs
+    raise ValueError(f"Unsupported stage: {stage_name}")
+
+
+def resolve_stage_gradient_accumulation_steps(args, stage_name: str, world_size: int) -> int:
+    stage_name = normalize_stage_name(stage_name)
+    if stage_name != "stage1_tsqa_transfer":
+        return args.gradient_accumulation_steps
+    desired_effective_global_batch = args.batch_size * args.gradient_accumulation_steps
+    return max(1, math.ceil(desired_effective_global_batch / max(world_size * args.batch_size, 1)))
 
 
 def optimizer_step_count(num_batches: int, grad_accum_steps: int) -> int:
@@ -1150,6 +1454,9 @@ def optimizer_step_count(num_batches: int, grad_accum_steps: int) -> int:
 
 
 def maybe_set_epoch(data_loader: DataLoader, epoch: int):
+    dataset = getattr(data_loader, "dataset", None)
+    if hasattr(dataset, "set_epoch"):
+        dataset.set_epoch(epoch)
     sampler = getattr(data_loader, "batch_sampler", None) or getattr(data_loader, "sampler", None)
     if hasattr(sampler, "set_epoch"):
         sampler.set_epoch(epoch)
@@ -1253,6 +1560,7 @@ def evaluate_sp_stage(
 
 
 def stage_metrics_improved(stage_name: str, current_metrics: Dict[str, Any], best_metrics: Optional[Dict[str, Any]]) -> bool:
+    stage_name = normalize_stage_name(stage_name)
     if not best_metrics:
         return True
     selection = STAGE_SPECS[stage_name]["selection"]
@@ -1269,6 +1577,20 @@ def stage_metrics_improved(stage_name: str, current_metrics: Dict[str, Any], bes
     return current_loss + 1e-4 < best_loss
 
 
+def accuracy_metrics_improved(current_metrics: Dict[str, Any], best_metrics: Optional[Dict[str, Any]]) -> bool:
+    if not best_metrics:
+        return True
+    current_acc = float(current_metrics.get("accuracy", float("-inf")))
+    best_acc = float(best_metrics.get("accuracy", float("-inf")))
+    current_loss = float(current_metrics.get("loss_total", float("inf")))
+    best_loss = float(best_metrics.get("loss_total", float("inf")))
+    if current_acc > best_acc + 1e-6:
+        return True
+    if abs(current_acc - best_acc) <= 1e-6 and current_loss + 1e-4 < best_loss:
+        return True
+    return False
+
+
 def build_checkpoint_index_entry(
     *,
     stage_name: str,
@@ -1276,7 +1598,9 @@ def build_checkpoint_index_entry(
     best_checkpoint_path: str,
     metrics_path: str,
     model_config: Dict[str, Any],
+    best_accuracy_checkpoint_path: Optional[str] = None,
 ) -> Dict[str, Any]:
+    stage_name = normalize_stage_name(stage_name)
     entry = {
         "stage_name": stage_name,
         "description": STAGE_SPECS[stage_name]["description"],
@@ -1285,7 +1609,10 @@ def build_checkpoint_index_entry(
         "model_config": model_config,
         "encoder_config": dict(model_config.get("encoder_config") or {}),
         "recommended_use": STAGE_SPECS[stage_name]["recommended_use"],
+        "reference_downstream_checkpoint": stage_name == "stage1_tsqa_transfer",
     }
+    if best_accuracy_checkpoint_path:
+        entry["best_accuracy_checkpoint"] = os.path.relpath(best_accuracy_checkpoint_path, run_dir)
     alias_filename = STAGE_ALIAS_FILENAMES.get(stage_name)
     if alias_filename:
         entry["alias_checkpoint"] = alias_filename
@@ -1293,9 +1620,17 @@ def build_checkpoint_index_entry(
 
 
 def resolve_stage_checkpoint_path(run_dir: str, stage_name: str) -> str:
+    stage_name = normalize_stage_name(stage_name)
     if stage_name == "stage0_encoder_ssl":
         return os.path.join(run_dir, stage_name, "checkpoints", "best_encoder.pt")
     return os.path.join(run_dir, stage_name, "checkpoints", "best_model.pt")
+
+
+def resolve_stage_accuracy_checkpoint_path(run_dir: str, stage_name: str) -> Optional[str]:
+    stage_name = normalize_stage_name(stage_name)
+    if stage_name != "stage1_tsqa_transfer":
+        return None
+    return os.path.join(run_dir, stage_name, "checkpoints", "best_accuracy.pt")
 
 
 def initialize_sp_model_from_previous_stage(
@@ -1306,6 +1641,7 @@ def initialize_sp_model_from_previous_stage(
     device: str,
     rank: int,
 ):
+    stage_name = normalize_stage_name(stage_name)
     if stage_name == "stage1_tsqa_transfer":
         stage0_checkpoint = resolve_stage_checkpoint_path(run_dir, "stage0_encoder_ssl")
         if not os.path.exists(stage0_checkpoint):
@@ -1314,13 +1650,13 @@ def initialize_sp_model_from_previous_stage(
             )
         load_info = load_stage0_encoder_into_sp(model, stage0_checkpoint, device=device)
         if rank == 0:
-            print(f"📂 Loaded stage0 encoder into stage1 (strict=False): {load_info}")
+            print(f"📂 Loaded stage0 encoder into stage1 (strict=True): {load_info}")
         return
 
-    if stage_name == "stage2_synthetic_semantics":
+    if stage_name == STAGE2_CANONICAL_NAME:
         previous_checkpoint = resolve_stage_checkpoint_path(run_dir, "stage1_tsqa_transfer")
     elif stage_name == "stage3_m4_caption":
-        stage2_checkpoint = resolve_stage_checkpoint_path(run_dir, "stage2_synthetic_semantics")
+        stage2_checkpoint = resolve_stage_checkpoint_path(run_dir, STAGE2_CANONICAL_NAME)
         stage1_checkpoint = resolve_stage_checkpoint_path(run_dir, "stage1_tsqa_transfer")
         previous_checkpoint = stage2_checkpoint if os.path.exists(stage2_checkpoint) else stage1_checkpoint
     else:
@@ -1387,10 +1723,15 @@ def train_stage0(
     model = DualViewSSLModel(
         encoder_config=build_newts_dual_branch_config(args, for_stage0=True),
         device=device,
+        train_vision=args.stage0_train_vision,
         mask_ratio=args.stage0_mask_ratio,
         jitter_std=args.aug_jitter_std,
         scaling_range=(args.aug_scaling_min, args.aug_scaling_max),
         time_mask_ratio=args.aug_time_mask_ratio,
+        loss_w_ts_recon=args.stage0_w_ts_recon,
+        loss_w_ts_vicreg=args.stage0_w_ts_vicreg,
+        loss_w_vi_vicreg=args.stage0_w_vi_vicreg,
+        loss_w_fuse_vicreg=args.stage0_w_fuse_vicreg,
     )
     if args.gradient_checkpointing:
         model.encoder.enable_gradient_checkpointing()
@@ -1432,6 +1773,17 @@ def train_stage0(
         print(f"   epochs={args.stage0_epochs}")
         print(f"   batch_size={max(1, args.batch_size * args.stage0_batch_multiplier)}")
         print(f"   grad_accum={args.gradient_accumulation_steps}")
+        print(f"   train_vision={args.stage0_train_vision}")
+        used_weights = args.stage0_mix_weights if args.stage0_downstream_pool == "ucr_train_list" else args.stage0_mix_weights[:2]
+        print(f"   train_mix_weights={used_weights}")
+        print(f"   branch_dropout={args.stage0_branch_dropout:.2f}")
+        print(
+            "   loss_weights="
+            f"ts_recon:{args.stage0_w_ts_recon:.2f},"
+            f"ts_vicreg:{args.stage0_w_ts_vicreg:.2f},"
+            f"vi_vicreg:{args.stage0_w_vi_vicreg:.2f},"
+            f"fuse_vicreg:{args.stage0_w_fuse_vicreg:.2f}"
+        )
         print("=" * 72)
 
     for epoch in range(start_epoch, args.stage0_epochs + 1):
@@ -1530,14 +1882,23 @@ def train_sp_stage(
     rank: int,
     export_root_model_checkpoint: bool,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    stage_name = normalize_stage_name(stage_name)
     stage_dir = os.path.join(run_dir, stage_name)
     checkpoint_path = resolve_stage_checkpoint_path(run_dir, stage_name)
+    best_accuracy_checkpoint_path = resolve_stage_accuracy_checkpoint_path(run_dir, stage_name)
     history_path = os.path.join(stage_dir, "checkpoints", "history.jsonl")
     metrics_path = os.path.join(stage_dir, "results", "metrics.json")
     alias_path = os.path.join(run_dir, STAGE_ALIAS_FILENAMES[stage_name])
 
-    enable_lora = args.use_lora and stage_name == "stage3_m4_caption"
+    enable_lora = stage_uses_lora(args, stage_name)
     model = build_sp_model(args, device=device, rank=rank, enable_lora=enable_lora)
+    if stage_name == STAGE2_CANONICAL_NAME:
+        model.enable_alignment_losses(
+            loss_w_align=STAGE2_LOSS_W_ALIGN,
+            loss_w_consistency=STAGE2_LOSS_W_CONSISTENCY,
+        )
+    get_model(model)._curriculum_stage_epoch = 1
+    configure_sp_trainable_parameters(model, args, stage_name, rank)
     model.to(device)
     if world_size > 1:
         model = DDP(
@@ -1601,14 +1962,9 @@ def train_sp_stage(
     )
 
     optimizer = build_sp_optimizer(model, args, stage_name)
-    num_epochs = (
-        args.stage1_epochs
-        if stage_name == "stage1_tsqa_transfer"
-        else args.stage2_epochs
-        if stage_name == "stage2_synthetic_semantics"
-        else args.stage3_epochs
-    )
-    total_steps = optimizer_step_count(len(train_loader), args.gradient_accumulation_steps) * num_epochs
+    num_epochs = resolve_stage_num_epochs(args, stage_name)
+    stage_grad_accum = resolve_stage_gradient_accumulation_steps(args, stage_name, world_size)
+    total_steps = optimizer_step_count(len(train_loader), stage_grad_accum) * num_epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(args.warmup_ratio * total_steps),
@@ -1616,6 +1972,7 @@ def train_sp_stage(
     )
 
     best_metrics: Optional[Dict[str, Any]] = None
+    best_accuracy_metrics: Optional[Dict[str, Any]] = None
     start_epoch = 1
     if args.resume and os.path.exists(checkpoint_path):
         checkpoint = load_sp_checkpoint(
@@ -1628,6 +1985,10 @@ def train_sp_stage(
         if checkpoint is not None:
             start_epoch = int(checkpoint.get("epoch", 0)) + 1
             best_metrics = checkpoint.get("metrics") or None
+            if best_accuracy_checkpoint_path and os.path.exists(best_accuracy_checkpoint_path):
+                best_accuracy_metrics = (
+                    torch.load(best_accuracy_checkpoint_path, map_location=device, weights_only=False).get("metrics") or None
+                )
             if rank == 0:
                 print(f"📂 Resuming {stage_name} from epoch {checkpoint.get('epoch', 0)}")
     else:
@@ -1646,12 +2007,24 @@ def train_sp_stage(
         print(f"🚀 Starting {stage_name}: {STAGE_SPECS[stage_name]['description']}")
         print(f"   epochs={num_epochs}")
         print(f"   batch_size={args.batch_size}")
-        print(f"   grad_accum={args.gradient_accumulation_steps}")
+        print(f"   grad_accum={stage_grad_accum}")
+        print(f"   effective_global_batch={world_size * args.batch_size * stage_grad_accum}")
         print(f"   pad_mode={pad_mode}")
+        print(f"   lora_enabled={enable_lora}")
+        if stage_name == "stage1_tsqa_transfer":
+            print(f"   projector_only_epochs={args.stage1_projector_only_epochs}")
+        if stage_name == STAGE2_CANONICAL_NAME:
+            print(f"   stage2_mix_weights={args.stage2_mix_weights}")
+            print(
+                f"   alignment_losses=align:{STAGE2_LOSS_W_ALIGN:.2f},"
+                f"consistency:{STAGE2_LOSS_W_CONSISTENCY:.2f}"
+            )
         print("   length_bucket_batching=True")
         print("=" * 72)
 
     for epoch in range(start_epoch, num_epochs + 1):
+        get_model(model)._curriculum_stage_epoch = epoch
+        configure_sp_trainable_parameters(model, args, stage_name, rank)
         maybe_set_epoch(train_loader, epoch)
         train_loss = train_one_epoch(
             model=model,
@@ -1659,7 +2032,7 @@ def train_sp_stage(
             optimizer=optimizer,
             scheduler=scheduler,
             grad_clip=args.grad_clip,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            gradient_accumulation_steps=stage_grad_accum,
             rank=rank,
             epoch=epoch,
             num_epochs=num_epochs,
@@ -1707,15 +2080,37 @@ def train_sp_stage(
         elif rank == 0:
             epochs_no_improve += 1
 
+        if (
+            rank == 0
+            and stage_name == "stage1_tsqa_transfer"
+            and best_accuracy_checkpoint_path is not None
+            and accuracy_metrics_improved(val_metrics, best_accuracy_metrics)
+        ):
+            best_accuracy_metrics = dict(val_metrics)
+            save_sp_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                train_loss=train_loss,
+                metrics=best_accuracy_metrics,
+                save_path=best_accuracy_checkpoint_path,
+                args=args,
+                stage_name=stage_name,
+                rank=rank,
+            )
+
         state = broadcast_object_from_rank0(
             {
                 "best_metrics": best_metrics,
+                "best_accuracy_metrics": best_accuracy_metrics,
                 "epochs_no_improve": epochs_no_improve,
                 "stop": epochs_no_improve >= args.early_stop,
             },
             rank,
         )
         best_metrics = state["best_metrics"]
+        best_accuracy_metrics = state["best_accuracy_metrics"]
         epochs_no_improve = int(state["epochs_no_improve"])
         if state["stop"]:
             if rank == 0:
@@ -1765,6 +2160,9 @@ def train_sp_stage(
         best_checkpoint_path=checkpoint_path,
         metrics_path=metrics_path,
         model_config=encoder_config,
+        best_accuracy_checkpoint_path=(
+            best_accuracy_checkpoint_path if best_accuracy_checkpoint_path and os.path.exists(best_accuracy_checkpoint_path) else None
+        ),
     )
     return test_metrics, index_entry
 
@@ -1789,7 +2187,7 @@ def main():
 
         if rank == 0:
             print("=" * 72)
-            print("Curriculum Pretraining V2")
+            print("Curriculum Pretraining V4")
             print("=" * 72)
             print(f"Time: {datetime.datetime.now()}")
             print(f"Device: {device}")
@@ -1798,7 +2196,7 @@ def main():
             print(f"Stages: {args.stages}")
             print(f"Run dir: {run_dir}")
             print(f"Resume: {args.resume}")
-            print(f"LoRA(stage3 only): {args.use_lora}")
+            print(f"LoRA(stage3 default): {stage_uses_lora(args, 'stage3_m4_caption')}")
             resolved_vision_config = resolve_effective_newts_vision_config(args)
             print("Dynamic length: enabled")
             print(f"Pad mode: {resolve_effective_pad_mode(args)}")

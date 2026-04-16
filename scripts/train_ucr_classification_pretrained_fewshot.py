@@ -152,7 +152,7 @@ def parse_args(argv=None):
         "--local_checkpoint",
         type=str,
         default=None,
-        help="Local checkpoint path, e.g. results/curriculum_pretrain/.../best_model.pt",
+        help="Local checkpoint path, e.g. results/curriculum_pretrain/.../best_accuracy.pt",
     )
     parser.add_argument(
         "--encoder_type",

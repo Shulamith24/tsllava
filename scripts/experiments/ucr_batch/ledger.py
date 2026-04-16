@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -53,10 +55,20 @@ def remove_row(ledger: Ledger, dataset: str, shot: str) -> None:
 def write_ledger(path: Path, ledger: Ledger) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = sorted(ledger.values(), key=lambda item: (item["dataset"], item["shot"]))
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        newline="",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as f:
         writer = csv.DictWriter(f, fieldnames=LEDGER_FIELDS, delimiter="\t")
         writer.writeheader()
         writer.writerows(rows)
+        temp_path = Path(f.name)
+    os.replace(temp_path, path)
 
 
 def has_success(ledger: Ledger, dataset: str, shot: str) -> bool:
