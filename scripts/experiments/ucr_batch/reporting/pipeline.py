@@ -16,16 +16,26 @@ from .data import (
     analyze_coverage,
     build_ablation_cell_deltas,
     build_ablation_summary,
+    build_paper_appendix_csv,
+    build_paper_appendix_shot_bundle,
+    build_paper_overall_summary,
+    build_paper_rank_table,
+    build_paper_wtl_table,
     build_rank_summary,
     build_summary_by_shot,
     infer_shots,
     load_result_bundles,
+    resolve_primary_item,
 )
 from .latex import (
     render_ablation_appendix_table,
     render_ablation_main_table,
     render_appendix_table,
     render_main_table,
+    render_paper_appendix_table,
+    render_paper_overall_table,
+    render_paper_rank_table,
+    render_paper_wtl_table,
     write_appendix_wrapper,
 )
 from .plotting import plot_ablation_trend, plot_fewshot_trend
@@ -51,6 +61,8 @@ def _manifest_item_entry(bundle) -> dict[str, object]:
         "color": bundle.spec.color,
         "marker": bundle.spec.marker,
         "variant_tags": list(bundle.spec.variant_tags),
+        "family": bundle.spec.family,
+        "paper_label": bundle.spec.paper_label,
         "available_datasets": list(bundle.available_datasets),
         "available_shots": list(bundle.available_shots),
     }
@@ -61,6 +73,8 @@ def _build_model_order(config: ReportConfig) -> list[dict[str, object]]:
         {
             "key": item.key,
             "label": item.label,
+            "paper_label": item.paper_label or item.label,
+            "family": item.family or "",
             "primary": item.primary,
             "color": item.color,
             "marker": item.marker,
@@ -119,30 +133,35 @@ def _write_leaderboard_outputs(
             summary_by_shot=summary_by_shot,
             rank_summary=rank_summary,
             shots=shots,
+            dataset_count=len(selected_datasets),
+            num_runs=config.override_num_runs,
         ),
         encoding="utf-8",
     )
 
-    appendix_shot_files: list[str] = []
     generated_files.extend([str(summary_by_shot_path), str(rank_summary_path), str(main_table_path)])
 
-    for shot in shots:
-        appendix_path = report_dir / f"appendix_shot_{shot}.tex"
-        appendix_path.write_text(
-            render_appendix_table(
-                report_name=config.report_name,
-                shot=shot,
-                datasets=selected_datasets,
-                model_order=model_order,
-                selected_frame=selected_frame,
-            ),
-            encoding="utf-8",
-        )
-        appendix_shot_files.append(appendix_path.name)
-        generated_files.append(str(appendix_path))
+    if config.appendix_tables_enabled:
+        appendix_shot_files: list[str] = []
+        for shot in shots:
+            appendix_path = report_dir / f"appendix_shot_{shot}.tex"
+            appendix_path.write_text(
+                render_appendix_table(
+                    report_name=config.report_name,
+                    shot=shot,
+                    datasets=selected_datasets,
+                    model_order=model_order,
+                    selected_frame=selected_frame,
+                    dataset_count=len(selected_datasets),
+                    num_runs=config.override_num_runs,
+                ),
+                encoding="utf-8",
+            )
+            appendix_shot_files.append(appendix_path.name)
+            generated_files.append(str(appendix_path))
 
-    appendix_wrapper_path = write_appendix_wrapper(report_dir, appendix_shot_files)
-    generated_files.append(str(appendix_wrapper_path))
+        appendix_wrapper_path = write_appendix_wrapper(report_dir, appendix_shot_files)
+        generated_files.append(str(appendix_wrapper_path))
 
     generated_plot_files = plot_fewshot_trend(
         summary_csv=summary_by_shot_path,
@@ -151,6 +170,137 @@ def _write_leaderboard_outputs(
         report_name=config.report_name,
     )
     generated_files.extend(str(path) for path in generated_plot_files)
+
+    if config.paper_tables_enabled:
+        _write_paper_outputs(
+            config=config,
+            report_dir=report_dir,
+            selected_frame=selected_frame,
+            selected_datasets=selected_datasets,
+            shots=shots,
+            generated_files=generated_files,
+        )
+
+
+def _write_paper_outputs(
+    *,
+    config: ReportConfig,
+    report_dir: Path,
+    selected_frame: pd.DataFrame,
+    selected_datasets: list[str],
+    shots: list[str],
+    generated_files: list[str],
+) -> None:
+    model_order = _build_model_order(config)
+    overall_summary = build_paper_overall_summary(
+        selected_frame=selected_frame,
+        items=config.items,
+        shots=shots,
+    )
+    overall_csv_path = _write_csv(overall_summary, report_dir / "paper_table_overall.csv")
+
+    rank_table = build_paper_rank_table(
+        selected_frame=selected_frame,
+        items=config.items,
+        shots=shots,
+    )
+    rank_csv_path = _write_csv(rank_table, report_dir / "paper_table_rank.csv")
+
+    primary_item = resolve_primary_item(config.items)
+    baseline_keys = config.wtl_baselines or tuple(item.key for item in config.items if item.key != primary_item.key)
+    wtl_table = build_paper_wtl_table(
+        selected_frame=selected_frame,
+        items=config.items,
+        shots=shots,
+        primary_key=primary_item.key,
+        baseline_keys=baseline_keys,
+    )
+    wtl_csv_path = _write_csv(wtl_table, report_dir / "paper_table_wtl.csv")
+
+    overall_tex_path = report_dir / "paper_table_overall.tex"
+    overall_tex_path.write_text(
+        render_paper_overall_table(
+            report_name=config.report_name,
+            model_order=model_order,
+            overall_summary=overall_summary,
+            shots=shots,
+            dataset_count=len(selected_datasets),
+            num_runs=config.override_num_runs,
+        ),
+        encoding="utf-8",
+    )
+
+    rank_tex_path = report_dir / "paper_table_rank.tex"
+    rank_tex_path.write_text(
+        render_paper_rank_table(
+            report_name=config.report_name,
+            model_order=model_order,
+            rank_table=rank_table,
+            shots=shots,
+            dataset_count=len(selected_datasets),
+        ),
+        encoding="utf-8",
+    )
+
+    wtl_tex_path = report_dir / "paper_table_wtl.tex"
+    wtl_tex_path.write_text(
+        render_paper_wtl_table(
+            report_name=config.report_name,
+            primary_label=primary_item.paper_label or primary_item.label,
+            wtl_table=wtl_table,
+            shots=shots,
+            dataset_count=len(selected_datasets),
+        ),
+        encoding="utf-8",
+    )
+
+    generated_files.extend(
+        [
+            str(overall_csv_path),
+            str(rank_csv_path),
+            str(wtl_csv_path),
+            str(overall_tex_path),
+            str(rank_tex_path),
+            str(wtl_tex_path),
+        ]
+    )
+
+    paper_appendix_files: list[str] = []
+    for shot in shots:
+        bundle = build_paper_appendix_shot_bundle(
+            selected_frame=selected_frame,
+            items=config.items,
+            shot=shot,
+            datasets=selected_datasets,
+        )
+        appendix_csv_path = _write_csv(
+            build_paper_appendix_csv(bundle=bundle, items=config.items, show_std=config.appendix_show_std),
+            report_dir / f"paper_appendix_shot_{shot}.csv",
+        )
+        appendix_tex_path = report_dir / f"paper_appendix_shot_{shot}.tex"
+        appendix_tex_path.write_text(
+            render_paper_appendix_table(
+                report_name=config.report_name,
+                shot=shot,
+                model_order=model_order,
+                appendix_bundle=bundle,
+                show_std=config.appendix_show_std,
+                dataset_count=len(selected_datasets),
+                num_runs=config.override_num_runs,
+            ),
+            encoding="utf-8",
+        )
+        generated_files.extend([str(appendix_csv_path), str(appendix_tex_path)])
+        paper_appendix_files.append(appendix_tex_path.name)
+
+    paper_wrapper_path = report_dir / "paper_appendix_tables.tex"
+    wrapper_lines = ["% Wrapper file for paper appendix few-shot tables."]
+    for idx, shot_file in enumerate(paper_appendix_files):
+        if idx:
+            wrapper_lines.append(r"\clearpage")
+        wrapper_lines.append(rf"\input{{{shot_file}}}")
+    paper_wrapper_path.write_text("\n".join(wrapper_lines) + "\n", encoding="utf-8")
+    generated_files.append(str(paper_wrapper_path))
 
 
 def _write_ablation_outputs(
@@ -194,28 +344,29 @@ def _write_ablation_outputs(
         encoding="utf-8",
     )
 
-    appendix_shot_files: list[str] = []
     generated_files.extend([str(ablation_summary_path), str(cell_deltas_path), str(main_table_path)])
 
-    for shot in shots:
-        appendix_path = report_dir / f"appendix_shot_{shot}.tex"
-        appendix_path.write_text(
-            render_ablation_appendix_table(
-                report_name=config.report_name,
-                family_label=config.family_label or config.report_name,
-                shot=shot,
-                datasets=selected_datasets,
-                model_order=model_order,
-                reference_key=config.reference_key or "",
-                cell_deltas=cell_deltas,
-            ),
-            encoding="utf-8",
-        )
-        appendix_shot_files.append(appendix_path.name)
-        generated_files.append(str(appendix_path))
+    if config.appendix_tables_enabled:
+        appendix_shot_files: list[str] = []
+        for shot in shots:
+            appendix_path = report_dir / f"appendix_shot_{shot}.tex"
+            appendix_path.write_text(
+                render_ablation_appendix_table(
+                    report_name=config.report_name,
+                    family_label=config.family_label or config.report_name,
+                    shot=shot,
+                    datasets=selected_datasets,
+                    model_order=model_order,
+                    reference_key=config.reference_key or "",
+                    cell_deltas=cell_deltas,
+                ),
+                encoding="utf-8",
+            )
+            appendix_shot_files.append(appendix_path.name)
+            generated_files.append(str(appendix_path))
 
-    appendix_wrapper_path = write_appendix_wrapper(report_dir, appendix_shot_files)
-    generated_files.append(str(appendix_wrapper_path))
+        appendix_wrapper_path = write_appendix_wrapper(report_dir, appendix_shot_files)
+        generated_files.append(str(appendix_wrapper_path))
 
     generated_plot_files = plot_ablation_trend(
         summary_csv=ablation_summary_path,
@@ -240,12 +391,23 @@ def generate_report(
     )
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    bundles = load_result_bundles(config.items)
+    bundles = load_result_bundles(config.items, override_num_runs=config.override_num_runs)
     frame = pd.concat([bundle.frame for bundle in bundles if not bundle.frame.empty], ignore_index=True)
     shots = list(config.shots) if config.shots else infer_shots(frame)
 
     archive_dir = resolve_ucr_archive(config.dataset_source)
-    expected_datasets = discover_datasets(archive_dir)
+    discovered_datasets = discover_datasets(archive_dir)
+    if config.dataset_allowlist is None:
+        expected_datasets = discovered_datasets
+    else:
+        discovered_set = set(discovered_datasets)
+        missing = [dataset for dataset in config.dataset_allowlist if dataset not in discovered_set]
+        if missing:
+            raise ValueError(
+                "dataset_allowlist contains datasets not found in dataset_source: "
+                + ",".join(missing)
+            )
+        expected_datasets = list(config.dataset_allowlist)
 
     _deduped_frame, selected_frame, issues, selected_datasets, has_fatal_coverage = analyze_coverage(
         frame=frame,
@@ -296,7 +458,13 @@ def generate_report(
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "config_path": str(config.config_path),
         "dataset_source": str(config.dataset_source),
+        "dataset_allowlist": list(config.dataset_allowlist) if config.dataset_allowlist is not None else None,
         "coverage_mode": config.coverage_mode,
+        "paper_tables_enabled": config.paper_tables_enabled,
+        "appendix_show_std": config.appendix_show_std,
+        "appendix_tables_enabled": config.appendix_tables_enabled,
+        "override_num_runs": config.override_num_runs,
+        "wtl_baselines": list(config.wtl_baselines),
         "shots": shots,
         "expected_dataset_count": len(expected_datasets),
         "dataset_count": len(selected_datasets),

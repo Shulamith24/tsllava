@@ -287,6 +287,11 @@ def parse_args(argv=None):
     # Generation / eval
     parser.add_argument("--max_new_tokens", type=int, default=2, help="Class token + EOS")
     parser.add_argument(
+        "--disable_constrained_decoding",
+        action="store_true",
+        help="Disable constrained label-token decoding during evaluation.",
+    )
+    parser.add_argument(
         "--eval_every",
         type=int,
         default=5,
@@ -324,6 +329,7 @@ def parse_args(argv=None):
     args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
     args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
     args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
+    args.constrained_decoding = not args.disable_constrained_decoding
     return args
 
 
@@ -1311,6 +1317,7 @@ def evaluate(
     data_loader: DataLoader,
     max_new_tokens: int,
     class_token_ids: Optional[List[int]] = None,
+    disable_constrained_decoding: bool = False,
     desc: str = "Testing",
     rank: int = 0,
 ) -> Dict[str, Any]:
@@ -1325,7 +1332,7 @@ def evaluate(
     all_labels: List[str] = []
 
     logits_processor = None
-    if class_token_ids is not None:
+    if class_token_ids is not None and not disable_constrained_decoding:
         eos_token_id = underlying_model.tokenizer.eos_token_id
         allowed_ids = class_token_ids + [eos_token_id]
         logits_processor = LogitsProcessorList([AllowedTokensLogitsProcessor(allowed_ids)])
@@ -1899,6 +1906,7 @@ def run_single_experiment(
             data_loader=test_loader,
             max_new_tokens=args.max_new_tokens,
             class_token_ids=selected_class_token_ids,
+            disable_constrained_decoding=args.disable_constrained_decoding,
             desc="Testing",
             rank=rank,
         )
@@ -1923,6 +1931,7 @@ def run_single_experiment(
             "phase2_epochs": phase2_epochs,
             "train_batch_size": train_batch_size,
             "gradient_accumulation_steps": grad_acc_steps,
+            "constrained_decoding": not args.disable_constrained_decoding,
             "phase1_last_train_loss": phase1_stats["last_loss"],
             "phase2_last_train_loss": phase2_stats["last_loss"],
             "test_loss": test_results["loss"],
@@ -2039,6 +2048,7 @@ def main():
             print(f"llm_id: {args.llm_id}")
             print(f"use_lora: {args.use_lora}")
             print(f"tokenizer_training_mode: {args.tokenizer_training_mode}")
+            print(f"constrained_decoding: {args.constrained_decoding}")
             print(f"epochs: {args.epochs}")
             print(f"pad_mode: {resolve_effective_pad_mode(args)}")
             print(f"augmentation: {args.enable_augmentation}")

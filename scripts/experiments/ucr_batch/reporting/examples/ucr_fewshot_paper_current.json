@@ -1,0 +1,135 @@
+{
+  "report_name": "ucr_fewshot_paper_current",
+  "report_kind": "leaderboard",
+  "report_stage": "preview",
+  "dataset_source": "data/UCRArchive_2018",
+  "coverage_mode": "intersection",
+  "override_num_runs": 5,
+  "shots": [
+    "1",
+    "2",
+    "5",
+    "10"
+  ],
+  "paper_tables_enabled": true,
+  "appendix_show_std": true,
+  "wtl_baselines": [
+    "cosco_resnet",
+    "patchtst",
+    "tslib_timesnet",
+    "onefitsall",
+    "resnet",
+    "tapnet"
+  ],
+  "items": [
+    {
+      "key": "resnet",
+      "label": "ResNet",
+      "paper_label": "ResNet",
+      "family": "TSC classifier",
+      "job_dir": "results/ucr_batches/resnet/fewshot/fewshot_resnet",
+      "color": "#4C72B0",
+      "marker": "s"
+    },
+    {
+      "key": "tapnet",
+      "label": "TapNet",
+      "paper_label": "TapNet",
+      "family": "TSC classifier",
+      "job_dir": "results/ucr_batches/tapnet/tapnet_6gpu",
+      "color": "#55A868",
+      "marker": "^"
+    },
+    {
+      "key": "cosco_resnet",
+      "label": "COSCO-ResNet",
+      "paper_label": "COSCO-ResNet",
+      "family": "TSC classifier",
+      "job_dir": "results/ucr_batches/cosco_resnet/fewshot/cosco_resnet_6gpu",
+      "color": "#C44E52",
+      "marker": "D"
+    },
+    {
+      "key": "tslib_dlinear",
+      "label": "DLinear",
+      "paper_label": "DLinear",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_dlinear/fewshot/shots_1_2_5_10_runs3",
+      "color": "#8172B2",
+      "marker": "P"
+    },
+    {
+      "key": "patchtst",
+      "label": "PatchTST",
+      "paper_label": "PatchTST",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/patchtst/fewshot/patchtst_6gpu",
+      "color": "#CCB974",
+      "marker": "X"
+    },
+    {
+      "key": "tslib_timesnet",
+      "label": "TimesNet",
+      "paper_label": "TimesNet",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_timesnet/fewshot/shots_1_2_5_10_runs3",
+      "color": "#64B5CD",
+      "marker": "v"
+    },
+    {
+      "key": "tslib_autoformer",
+      "label": "Autoformer",
+      "paper_label": "Autoformer",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_autoformer/fewshot/shots_1_2_5_10_runs3",
+      "color": "#8C564B",
+      "marker": "<"
+    },
+    {
+      "key": "tslib_crossformer",
+      "label": "Crossformer",
+      "paper_label": "Crossformer",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_crossformer/fewshot/shots_1_2_5_10_runs3",
+      "color": "#E377C2",
+      "marker": ">"
+    },
+    {
+      "key": "tslib_fedformer",
+      "label": "FEDformer",
+      "paper_label": "FEDformer",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_fedformer/fewshot/my_timesnet_fewshot",
+      "color": "#7F7F7F",
+      "marker": "*"
+    },
+    {
+      "key": "tslib_informer",
+      "label": "Informer",
+      "paper_label": "Informer",
+      "family": "TS backbone",
+      "job_dir": "results/ucr_batches/tslib_informer/fewshot/shots_1_2_5_10_runs3",
+      "color": "#BCBD22",
+      "marker": "h"
+    },
+    {
+      "key": "onefitsall",
+      "label": "GPT4TS",
+      "paper_label": "GPT4TS",
+      "family": "Foundation-style TS model",
+      "job_dir": "results/ucr_batches/onefitsall/fewshot/first",
+      "color": "#17BECF",
+      "marker": "x"
+    },
+    {
+      "key": "m2_pretrained",
+      "label": "Ours",
+      "paper_label": "Ours",
+      "family": "Foundation-style TS model",
+      "job_dir": "results/ucr_batches/m2_pretrained/fewshot/m2_fewshot_6gpu",
+      "primary": true,
+      "color": "#B22222",
+      "marker": "o"
+    }
+  ]
+}

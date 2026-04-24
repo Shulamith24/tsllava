@@ -1,0 +1,188 @@
+\begin{thebibliography}{26}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Barreda et~al.(2024)Barreda, Gomez, Puga, Zhou, and
+  Zhang]{barreda2024cosco}
+J.~Barreda, A.~Gomez, R.~Puga, K.~Zhou, and L.~Zhang.
+\newblock Cosco: a sharpness-aware training framework for few-shot multivariate
+  time series classification.
+\newblock In \emph{Proceedings of the 33rd ACM international conference on
+  information and knowledge management}, pages 3622--3626, 2024.
+
+\bibitem[Chang et~al.(2025)Chang, Wang, Peng, and Chen]{chang2025llm4ts}
+C.~Chang, W.-Y. Wang, W.-C. Peng, and T.-F. Chen.
+\newblock Llm4ts: Aligning pre-trained llms as data-efficient time-series
+  forecasters.
+\newblock \emph{ACM Transactions on Intelligent Systems and Technology},
+  16\penalty0 (3):\penalty0 1--20, 2025.
+
+\bibitem[Chen et~al.(2025)Chen, Li, Yang, Wang, and Xu]{chen2025large}
+Y.~Chen, Z.~Li, C.~Yang, X.~Wang, and G.~Xu.
+\newblock Large language models are few-shot multivariate time series
+  classifiers.
+\newblock \emph{Data Mining and Knowledge Discovery}, 39\penalty0 (5):\penalty0
+  66, 2025.
+
+\bibitem[Cheng et~al.(2024)Cheng, Chen, Liu, Liu, and Luo]{cheng2024advancing}
+M.~Cheng, Y.~Chen, Q.~Liu, Z.~Liu, and Y.~Luo.
+\newblock Advancing time series classification with multimodal language
+  modeling.
+\newblock \emph{arXiv preprint arXiv:2403.12371}, 2024.
+
+\bibitem[Hokamp and Liu(2017)]{hokamp2017lexically}
+C.~Hokamp and Q.~Liu.
+\newblock Lexically constrained decoding for sequence generation using grid
+  beam search.
+\newblock In \emph{Proceedings of the 55th Annual Meeting of the Association
+  for Computational Linguistics (Volume 1: Long Papers)}, pages 1535--1546,
+  2017.
+
+\bibitem[Ismail~Fawaz et~al.(2019)Ismail~Fawaz, Forestier, Weber, Idoumghar,
+  and Muller]{ismail2019deep}
+H.~Ismail~Fawaz, G.~Forestier, J.~Weber, L.~Idoumghar, and P.-A. Muller.
+\newblock Deep learning for time series classification: a review.
+\newblock \emph{Data mining and knowledge discovery}, 33\penalty0 (4):\penalty0
+  917--963, 2019.
+
+\bibitem[Jiang et~al.(2024)Jiang, Pan, Zhang, Garg, Schneider, Nevmyvaka, and
+  Song]{jiang2024empowering}
+Y.~Jiang, Z.~Pan, X.~Zhang, S.~Garg, A.~Schneider, Y.~Nevmyvaka, and D.~Song.
+\newblock Empowering time series analysis with large language models: A survey.
+\newblock \emph{arXiv preprint arXiv:2402.03182}, 2024.
+
+\bibitem[Jin et~al.(2024)Jin, Wang, Ma, Chu, Zhang, Shi, Chen, Liang, Li, Pan,
+  et~al.]{jin2024time}
+M.~Jin, S.~Wang, L.~Ma, Z.~Chu, J.~Zhang, X.~Shi, P.-Y. Chen, Y.~Liang, Y.-f.
+  Li, S.~Pan, et~al.
+\newblock Time-llm: Time series forecasting by reprogramming large language
+  models.
+\newblock In \emph{International Conference on Learning Representations}, 2024.
+
+\bibitem[Koo et~al.(2024)Koo, Liu, and He]{koo2024automata}
+T.~Koo, F.~Liu, and L.~He.
+\newblock Automata-based constraints for language model decoding.
+\newblock \emph{arXiv preprint arXiv:2407.08103}, 2024.
+
+\bibitem[Langer et~al.(2025)Langer, Kaar, Rosenblattl, Xu, Chow, Maritsch,
+  Jakob, Wang, Liu, Verma, et~al.]{langer2025opentslm}
+P.~Langer, T.~Kaar, M.~Rosenblattl, M.~A. Xu, W.~Chow, M.~Maritsch, R.~Jakob,
+  N.~Wang, J.~Liu, A.~Verma, et~al.
+\newblock Opentslm: Time-series language models for reasoning over multivariate
+  medical text-and time-series data.
+\newblock \emph{arXiv preprint arXiv:2510.02410}, 2025.
+
+\bibitem[Liu et~al.(2025)Liu, Liu, and Prakash]{liu2025picture}
+H.~Liu, C.~Liu, and B.~A. Prakash.
+\newblock A picture is worth a thousand numbers: Enabling llms reason about
+  time series via visualization.
+\newblock In \emph{Proceedings of the 2025 Conference of the Nations of the
+  Americas Chapter of the Association for Computational Linguistics: Human
+  Language Technologies (Volume 1: Long Papers)}, pages 7486--7518, 2025.
+
+\bibitem[Narwariya et~al.(2020)Narwariya, Malhotra, Vig, Shroff, and
+  Vishnu]{narwariya2020meta}
+J.~Narwariya, P.~Malhotra, L.~Vig, G.~Shroff, and T.~Vishnu.
+\newblock Meta-learning for few-shot time series classification.
+\newblock In \emph{Proceedings of the 7th ACM IKDD CoDS and 25th COMAD}, pages
+  28--36. 2020.
+
+\bibitem[Ni et~al.(2025)Ni, Zhao, Shen, Tong, Song, Cheng, Luo, and
+  Chen]{ni2025harnessing}
+J.~Ni, Z.~Zhao, C.~Shen, H.~Tong, D.~Song, W.~Cheng, D.~Luo, and H.~Chen.
+\newblock Harnessing vision models for time series analysis: a survey.
+\newblock In \emph{Proceedings of the Thirty-Fourth International Joint
+  Conference on Artificial Intelligence}, pages 10612--10620, 2025.
+
+\bibitem[Nie et~al.(2022)Nie, Nguyen, Sinthong, and Kalagnanam]{nietime}
+Y.~Nie, N.~H. Nguyen, P.~Sinthong, and J.~Kalagnanam.
+\newblock A time series is worth 64 words: Long-term forecasting with
+  transformers.
+\newblock In \emph{The Eleventh International Conference on Learning
+  Representations}, 2022.
+
+\bibitem[Pan et~al.(2024{\natexlab{a}})Pan, Luo, Chua, Pugalenthi, and
+  Yapp]{pan2024review}
+S.~Pan, H.~Luo, M.~C. Chua, K.~Pugalenthi, and E.~K. Yapp.
+\newblock A review of similarity-based few-shot learning methods for time
+  series classification in manufacturing.
+\newblock In \emph{2024 6th International Conference on Industrial Artificial
+  Intelligence (IAI)}, pages 1--6. IEEE, 2024{\natexlab{a}}.
+
+\bibitem[Pan et~al.(2024{\natexlab{b}})Pan, Jiang, Garg, Schneider, Nevmyvaka,
+  and Song]{pan2024s}
+Z.~Pan, Y.~Jiang, S.~Garg, A.~Schneider, Y.~Nevmyvaka, and D.~Song.
+\newblock {S$^2$IP-LLM}: Semantic space informed prompt learning with {LLM} for
+  time series forecasting.
+\newblock In \emph{International Conference on Machine Learning}, pages
+  39135--39153. PMLR, 2024{\natexlab{b}}.
+
+\bibitem[Raffel et~al.(2020)Raffel, Shazeer, Roberts, Lee, Narang, Matena,
+  Zhou, Li, and Liu]{raffel2020exploring}
+C.~Raffel, N.~Shazeer, A.~Roberts, K.~Lee, S.~Narang, M.~Matena, Y.~Zhou,
+  W.~Li, and P.~J. Liu.
+\newblock Exploring the limits of transfer learning with a unified text-to-text
+  transformer.
+\newblock \emph{Journal of machine learning research}, 21\penalty0
+  (140):\penalty0 1--67, 2020.
+
+\bibitem[Roschmann et~al.(2025)Roschmann, Bouniot, Feofanov, Redko, and
+  Akata]{roschmann2025time}
+S.~Roschmann, Q.~Bouniot, V.~Feofanov, I.~Redko, and Z.~Akata.
+\newblock Time series representations for classification lie hidden in
+  pretrained vision transformers.
+\newblock \emph{arXiv preprint arXiv:2506.08641}, 2025.
+
+\bibitem[Schumacher et~al.(2026)Schumacher, Nourbakhsh, Slavin, and
+  Rios]{schumacher2026prompting}
+D.~Schumacher, E.~Nourbakhsh, R.~Slavin, and A.~Rios.
+\newblock Prompting underestimates llm capability for time series
+  classification.
+\newblock \emph{arXiv preprint arXiv:2601.03464}, 2026.
+
+\bibitem[Shi et~al.(2025)Shi, Yin, Wang, Tu, Sun, and Ning]{shi2025large}
+F.~Shi, X.~Yin, K.~Wang, W.~Tu, Q.~Sun, and H.~Ning.
+\newblock Large language models for time series analysis: Techniques,
+  applications, and challenges.
+\newblock \emph{arXiv preprint arXiv:2506.11040}, 2025.
+
+\bibitem[Sun et~al.(2023)Sun, Li, Li, and Hong]{sun2023test}
+C.~Sun, H.~Li, Y.~Li, and S.~Hong.
+\newblock Test: Text prototype aligned embedding to activate llm's ability for
+  time series.
+\newblock \emph{arXiv preprint arXiv:2308.08241}, 2023.
+
+\bibitem[Tan et~al.(2024)Tan, Merrill, Gupta, Althoff, and
+  Hartvigsen]{tan2024language}
+M.~Tan, M.~A. Merrill, V.~Gupta, T.~Althoff, and T.~Hartvigsen.
+\newblock Are language models actually useful for time series forecasting?
+\newblock \emph{Advances in Neural Information Processing Systems},
+  37:\penalty0 60162--60191, 2024.
+
+\bibitem[Tang et~al.(2020)Tang, Liu, and Long]{tang2020interpretable}
+W.~Tang, L.~Liu, and G.~Long.
+\newblock Interpretable time-series classification on few-shot samples.
+\newblock In \emph{2020 International joint conference on neural networks
+  (IJCNN)}, pages 1--8. IEEE, 2020.
+
+\bibitem[Yang et~al.(2022)Yang, Hong, and Zhang]{yang2022spectral}
+L.~Yang, S.~Hong, and L.~Zhang.
+\newblock Spectral propagation graph network for few-shot time series
+  classification.
+\newblock \emph{arXiv preprint arXiv:2202.04769}, 2022.
+
+\bibitem[Ye et~al.(2024)Ye, Zhang, Yi, Yu, Li, Li, and Tsung]{ye2024survey}
+J.~Ye, W.~Zhang, K.~Yi, Y.~Yu, Z.~Li, J.~Li, and F.~Tsung.
+\newblock A survey of time series foundation models: Generalizing time series
+  representation with large language model.
+\newblock \emph{arXiv e-prints}, pages arXiv--2405, 2024.
+
+\bibitem[Zhang et~al.(2024)Zhang, Chowdhury, Gupta, and Shang]{zhang2024large}
+X.~Zhang, R.~R. Chowdhury, R.~K. Gupta, and J.~Shang.
+\newblock Large language models for time series: A survey.
+\newblock \emph{arXiv preprint arXiv:2402.01801}, 2024.
+
+\end{thebibliography}

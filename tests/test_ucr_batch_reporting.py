@@ -289,6 +289,249 @@ class UCRReportingTest(unittest.TestCase):
         self.assertIn(r"Model B & \textbf{80.00} & 60.00", rendered)
         self.assertIn(r"Model C & \underline{70.00} & \textbf{90.00}", rendered)
 
+    def test_paper_config_parses_sparse_and_item_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha"])
+            primary_job = _write_job_dir(tmp_path / "primary_job", [_make_row("Alpha", "1", "0.80")])
+            baseline_job = _write_job_dir(tmp_path / "baseline_job", [_make_row("Alpha", "1", "0.70")])
+
+            config_path = tmp_path / "paper_sparse.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "paper sparse preview",
+                        "report_kind": "leaderboard",
+                        "report_stage": "preview",
+                        "dataset_source": str(archive),
+                        "coverage_mode": "sparse",
+                        "shots": ["1"],
+                        "paper_tables_enabled": True,
+                        "appendix_show_std": True,
+                        "override_num_runs": 5,
+                        "wtl_baselines": ["baseline"],
+                        "items": [
+                            {
+                                "key": "primary",
+                                "label": "Primary",
+                                "paper_label": "Ours",
+                                "family": "Foundation-style TS model",
+                                "job_dir": str(primary_job),
+                                "primary": True,
+                            },
+                            {
+                                "key": "baseline",
+                                "label": "Baseline",
+                                "paper_label": "PatchTST",
+                                "family": "TS backbone",
+                                "job_dir": str(baseline_job),
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_report_config(config_path)
+            self.assertEqual(config.coverage_mode, "sparse")
+            self.assertTrue(config.paper_tables_enabled)
+            self.assertTrue(config.appendix_show_std)
+            self.assertEqual(config.override_num_runs, 5)
+            self.assertEqual(config.wtl_baselines, ("baseline",))
+            self.assertEqual(config.items[0].paper_label, "Ours")
+            self.assertEqual(config.items[0].family, "Foundation-style TS model")
+
+    def test_override_num_runs_normalizes_reporting_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha"])
+            primary_job = _write_job_dir(
+                tmp_path / "primary_job",
+                [
+                    _make_row("Alpha", "1", "0.80", num_runs="3"),
+                    _make_row("Alpha", "2", "0.82", num_runs="5"),
+                ],
+            )
+            baseline_job = _write_job_dir(
+                tmp_path / "baseline_job",
+                [
+                    _make_row("Alpha", "1", "0.70", num_runs="3"),
+                    _make_row("Alpha", "2", "0.72", num_runs="5"),
+                ],
+            )
+
+            config_path = tmp_path / "override_num_runs.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "override num runs",
+                        "dataset_source": str(archive),
+                        "coverage_mode": "intersection",
+                        "shots": ["1", "2"],
+                        "override_num_runs": 5,
+                        "paper_tables_enabled": True,
+                        "items": [
+                            {"key": "primary", "label": "Primary", "job_dir": str(primary_job), "primary": True},
+                            {"key": "baseline", "label": "Baseline", "job_dir": str(baseline_job)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = generate_report(config_path, output_root=tmp_path / "out")
+            self.assertEqual(manifest["override_num_runs"], 5)
+
+            coverage = pd.read_csv(tmp_path / "out" / "override_num_runs" / "coverage_report.csv")
+            self.assertNotIn("mixed_num_runs", coverage["issue_type"].tolist())
+
+            merged = pd.read_csv(tmp_path / "out" / "override_num_runs" / "merged_results.csv")
+            self.assertEqual(set(merged["num_runs"].astype(str).tolist()), {"5"})
+
+    def test_sparse_paper_outputs_include_blank_cells_and_summary_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha", "Beta", "Gamma"])
+
+            primary_job = _write_job_dir(
+                tmp_path / "primary_job",
+                [
+                    _make_row("Alpha", "1", "0.80", num_runs="5"),
+                    _make_row("Alpha", "2", "0.70", num_runs="5"),
+                    _make_row("Beta", "1", "0.50", num_runs="5"),
+                    _make_row("Beta", "2", "0.60", num_runs="5"),
+                    _make_row("Gamma", "1", "0.90", num_runs="5"),
+                    _make_row("Gamma", "2", "0.40", num_runs="5"),
+                ],
+            )
+            baseline_a_job = _write_job_dir(
+                tmp_path / "baseline_a_job",
+                [
+                    _make_row("Alpha", "1", "0.80", num_runs="5"),
+                    _make_row("Alpha", "2", "0.65", num_runs="5"),
+                    _make_row("Beta", "1", "0.40", num_runs="5"),
+                    _make_row("Beta", "2", "0.70", num_runs="5"),
+                    _make_row("Gamma", "1", "0.85", num_runs="5"),
+                ],
+            )
+            baseline_b_job = _write_job_dir(
+                tmp_path / "baseline_b_job",
+                [
+                    _make_row("Alpha", "1", "0.70", num_runs="3"),
+                    _make_row("Alpha", "2", "0.75", num_runs="3"),
+                    _make_row("Beta", "1", "0.50", num_runs="3"),
+                    _make_row("Beta", "2", "0.55", num_runs="3"),
+                    _make_row("Gamma", "1", "0.90", num_runs="3"),
+                    _make_row("Gamma", "2", "0.45", num_runs="3"),
+                ],
+            )
+
+            config_path = tmp_path / "paper_sparse.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "paper sparse preview",
+                        "report_kind": "leaderboard",
+                        "report_stage": "preview",
+                        "dataset_source": str(archive),
+                        "coverage_mode": "sparse",
+                        "shots": ["1", "2"],
+                        "paper_tables_enabled": True,
+                        "appendix_show_std": True,
+                        "wtl_baselines": ["baseline_a"],
+                        "items": [
+                            {
+                                "key": "primary",
+                                "label": "Primary",
+                                "paper_label": "Ours",
+                                "family": "Foundation-style TS model",
+                                "job_dir": str(primary_job),
+                                "primary": True,
+                            },
+                            {
+                                "key": "baseline_a",
+                                "label": "Baseline A",
+                                "paper_label": "PatchTST",
+                                "family": "TS backbone",
+                                "job_dir": str(baseline_a_job),
+                            },
+                            {
+                                "key": "baseline_b",
+                                "label": "Baseline B",
+                                "paper_label": "TimesNet",
+                                "family": "TS backbone",
+                                "job_dir": str(baseline_b_job),
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = generate_report(config_path, output_root=tmp_path / "out")
+
+            self.assertEqual(manifest["coverage_mode"], "sparse")
+            self.assertTrue(manifest["paper_tables_enabled"])
+            self.assertEqual(manifest["dataset_count"], 3)
+            self.assertEqual(manifest["datasets"], ["Alpha", "Beta", "Gamma"])
+
+            report_dir = tmp_path / "out" / "paper_sparse_preview"
+            self.assertTrue((report_dir / "paper_table_overall.csv").exists())
+            self.assertTrue((report_dir / "paper_table_rank.csv").exists())
+            self.assertTrue((report_dir / "paper_table_wtl.csv").exists())
+            self.assertTrue((report_dir / "paper_table_overall.tex").exists())
+            self.assertTrue((report_dir / "paper_table_rank.tex").exists())
+            self.assertTrue((report_dir / "paper_table_wtl.tex").exists())
+            self.assertTrue((report_dir / "paper_appendix_shot_1.csv").exists())
+            self.assertTrue((report_dir / "paper_appendix_shot_2.csv").exists())
+            self.assertTrue((report_dir / "paper_appendix_shot_1.tex").exists())
+            self.assertTrue((report_dir / "paper_appendix_shot_2.tex").exists())
+            self.assertTrue((report_dir / "paper_appendix_tables.tex").exists())
+
+            coverage = pd.read_csv(report_dir / "coverage_report.csv")
+            sparse_missing = coverage[
+                (coverage["issue_type"] == "missing_result_sparse")
+                & (coverage["model_key"] == "baseline_a")
+                & (coverage["dataset"] == "Gamma")
+            ]
+            self.assertEqual(len(sparse_missing), 1)
+            self.assertEqual(str(sparse_missing.iloc[0]["shot"]), "2")
+
+            overall = pd.read_csv(report_dir / "paper_table_overall.csv").set_index("model_key")
+            self.assertAlmostEqual(float(overall.loc["primary", "shot_1_accuracy_pct"]), 73.3333333333, places=6)
+            self.assertEqual(int(overall.loc["baseline_a", "shot_2_coverage_count"]), 2)
+            self.assertEqual(str(overall.loc["primary", "family"]), "Foundation-style TS model")
+
+            rank_table = pd.read_csv(report_dir / "paper_table_rank.csv").set_index("model_key")
+            self.assertAlmostEqual(float(rank_table.loc["primary", "shot_1_rank"]), 1.5, places=6)
+            self.assertAlmostEqual(float(rank_table.loc["baseline_b", "avg_rank"]), 11.0 / 6.0, places=6)
+
+            wtl_table = pd.read_csv(report_dir / "paper_table_wtl.csv").set_index("baseline_key")
+            self.assertEqual(str(wtl_table.loc["baseline_a", "shot_1_wtl"]), "2 / 1 / 0")
+            self.assertEqual(int(wtl_table.loc["baseline_a", "shot_2_comparisons"]), 2)
+
+            appendix_csv = pd.read_csv(report_dir / "paper_appendix_shot_2.csv")
+            gamma_row = appendix_csv[appendix_csv["Dataset"] == "Gamma"].iloc[0]
+            self.assertTrue(pd.isna(gamma_row["PatchTST"]))
+            self.assertEqual(str(gamma_row["Ours"]), "40.00 \u00b1 1.00")
+
+            best_row = appendix_csv[appendix_csv["Dataset"] == "#Best"].iloc[0]
+            self.assertEqual(int(float(best_row["Ours"])), 0)
+
+            appendix_csv_1 = pd.read_csv(report_dir / "paper_appendix_shot_1.csv")
+            best_row_1 = appendix_csv_1[appendix_csv_1["Dataset"] == "#Best"].iloc[0]
+            self.assertEqual(int(float(best_row_1["Ours"])), 3)
+            self.assertEqual(int(float(best_row_1["PatchTST"])), 1)
+            self.assertEqual(int(float(best_row_1["TimesNet"])), 2)
+
+            overall_tex = (report_dir / "paper_table_overall.tex").read_text(encoding="utf-8")
+            self.assertIn("Method & Family & 1-shot Acc.", overall_tex)
+            rank_tex = (report_dir / "paper_table_rank.tex").read_text(encoding="utf-8")
+            self.assertIn("Avg. Rank", rank_tex)
+            appendix_tex = (report_dir / "paper_appendix_shot_2.tex").read_text(encoding="utf-8")
+            self.assertIn("$\\pm$", appendix_tex)
+            self.assertIn("Avg. Acc.", appendix_tex)
+
     def test_ablation_config_supports_job_dir_and_stage_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -520,6 +763,92 @@ class UCRReportingTest(unittest.TestCase):
             self.assertLess(appendix.find("Alpha"), appendix.find("Beta"))
             self.assertIn("+10.00", appendix)
             self.assertIn("-10.00", appendix)
+
+    def test_dataset_allowlist_limits_coverage_scope_and_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha", "Beta"])
+            model_a = _write_job_dir(
+                tmp_path / "model_a",
+                [
+                    _make_row("Alpha", "1", "0.80"),
+                    _make_row("Beta", "1", "0.60"),
+                ],
+            )
+            model_b = _write_job_dir(
+                tmp_path / "model_b",
+                [
+                    _make_row("Alpha", "1", "0.75"),
+                    _make_row("Beta", "1", "0.55"),
+                ],
+            )
+
+            config_path = tmp_path / "allowlist.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "allowlist only",
+                        "dataset_source": str(archive),
+                        "coverage_mode": "strict",
+                        "dataset_allowlist": ["Beta"],
+                        "shots": ["1"],
+                        "items": [
+                            {"key": "a", "label": "Model A", "job_dir": str(model_a)},
+                            {"key": "b", "label": "Model B", "job_dir": str(model_b)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = generate_report(config_path, output_root=tmp_path / "out")
+            self.assertEqual(manifest["dataset_allowlist"], ["Beta"])
+            self.assertEqual(manifest["dataset_count"], 1)
+            self.assertEqual(manifest["datasets"], ["Beta"])
+
+            report_dir = tmp_path / "out" / "allowlist_only"
+            merged = pd.read_csv(report_dir / "merged_results.csv")
+            self.assertEqual(sorted(merged["dataset"].unique().tolist()), ["Beta"])
+
+    def test_ablation_can_skip_appendix_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha"])
+            ref_job = _write_job_dir(tmp_path / "ref_job", [_make_row("Alpha", "1", "0.70")])
+            variant_job = _write_job_dir(tmp_path / "variant_job", [_make_row("Alpha", "1", "0.80")])
+
+            config_path = tmp_path / "no_appendix.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "ablation no appendix",
+                        "report_kind": "ablation",
+                        "report_stage": "final",
+                        "family_label": "Component Study",
+                        "reference_key": "ref",
+                        "dataset_source": str(archive),
+                        "shots": ["1"],
+                        "appendix_tables_enabled": False,
+                        "items": [
+                            {"key": "ref", "label": "Reference", "job_dir": str(ref_job)},
+                            {"key": "variant", "label": "Variant", "job_dir": str(variant_job)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = generate_report(config_path, output_root=tmp_path / "out")
+            self.assertFalse(manifest["appendix_tables_enabled"])
+
+            report_dir = tmp_path / "out" / "ablation_no_appendix"
+            self.assertTrue((report_dir / "main_table.tex").exists())
+            self.assertTrue((report_dir / "ablation_summary.csv").exists())
+            self.assertTrue((report_dir / "cell_deltas.csv").exists())
+            self.assertTrue((report_dir / "ablation_trend.png").exists())
+            self.assertTrue((report_dir / "ablation_trend.pdf").exists())
+            self.assertFalse((report_dir / "appendix_shot_1.tex").exists())
+            self.assertFalse((report_dir / "appendix_tables.tex").exists())
 
 
 if __name__ == "__main__":

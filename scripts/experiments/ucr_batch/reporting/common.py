@@ -24,7 +24,7 @@ DEFAULT_MARKERS = ["o", "s", "^", "D", "P", "X", "v", "*", "<", ">"]
 
 VALID_REPORT_KINDS = {"leaderboard", "ablation"}
 VALID_REPORT_STAGES = {"preview", "final"}
-VALID_COVERAGE_MODES = {"strict", "intersection"}
+VALID_COVERAGE_MODES = {"strict", "intersection", "sparse"}
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class ReportItemSpec:
     color: str | None = None
     marker: str | None = None
     variant_tags: tuple[str, ...] = tuple()
+    family: str | None = None
+    paper_label: str | None = None
 
 
 ModelSpec = ReportItemSpec
@@ -62,11 +64,17 @@ class ReportConfig:
     report_kind: str
     report_stage: str
     dataset_source: Path
+    dataset_allowlist: tuple[str, ...] | None
     coverage_mode: str
     shots: tuple[str, ...] | None
     items: tuple[ReportItemSpec, ...]
     reference_key: str | None = None
     family_label: str | None = None
+    wtl_baselines: tuple[str, ...] = tuple()
+    appendix_show_std: bool = True
+    appendix_tables_enabled: bool = True
+    paper_tables_enabled: bool = False
+    override_num_runs: int | None = None
 
     @property
     def models(self) -> tuple[ReportItemSpec, ...]:

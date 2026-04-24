@@ -84,6 +84,8 @@ def _load_items(payload: dict[str, object], *, config_file: Path) -> tuple[Repor
                 color=str(raw_item["color"]).strip() if raw_item.get("color") else None,
                 marker=str(raw_item["marker"]).strip() if raw_item.get("marker") else None,
                 variant_tags=variant_tags,
+                family=str(raw_item["family"]).strip() if raw_item.get("family") else None,
+                paper_label=str(raw_item["paper_label"]).strip() if raw_item.get("paper_label") else None,
             )
         )
     return tuple(items)
@@ -122,6 +124,32 @@ def load_report_config(config_path: str | Path) -> ReportConfig:
 
     reference_key = str(payload.get("reference_key", "")).strip() or None
     family_label = str(payload.get("family_label", "")).strip() or None
+    raw_dataset_allowlist = payload.get("dataset_allowlist")
+    if raw_dataset_allowlist in (None, ""):
+        dataset_allowlist = None
+    elif isinstance(raw_dataset_allowlist, list):
+        dataset_allowlist = tuple(str(item).strip() for item in raw_dataset_allowlist if str(item).strip())
+        if not dataset_allowlist:
+            raise ValueError("dataset_allowlist must not be empty when provided")
+    else:
+        raise ValueError("dataset_allowlist must be omitted or provided as a non-empty list")
+    raw_wtl_baselines = payload.get("wtl_baselines", [])
+    if raw_wtl_baselines in (None, ""):
+        wtl_baselines: tuple[str, ...] = tuple()
+    elif isinstance(raw_wtl_baselines, list):
+        wtl_baselines = tuple(str(item).strip() for item in raw_wtl_baselines if str(item).strip())
+    else:
+        raise ValueError("wtl_baselines must be omitted or provided as a list")
+    appendix_show_std = bool(payload.get("appendix_show_std", True))
+    appendix_tables_enabled = bool(payload.get("appendix_tables_enabled", True))
+    paper_tables_enabled = bool(payload.get("paper_tables_enabled", False))
+    raw_override_num_runs = payload.get("override_num_runs")
+    if raw_override_num_runs in (None, ""):
+        override_num_runs = None
+    else:
+        override_num_runs = int(raw_override_num_runs)
+        if override_num_runs <= 0:
+            raise ValueError("override_num_runs must be a positive integer when provided")
 
     if report_kind == "ablation":
         if len(items) < 2:
@@ -142,6 +170,17 @@ def load_report_config(config_path: str | Path) -> ReportConfig:
     else:
         coverage_mode = raw_coverage_mode
 
+    if paper_tables_enabled and report_kind != "leaderboard":
+        raise ValueError("paper_tables_enabled is only supported for leaderboard reports")
+
+    if wtl_baselines:
+        item_keys = {item.key for item in items}
+        unknown_baselines = [key for key in wtl_baselines if key not in item_keys]
+        if unknown_baselines:
+            raise ValueError(
+                "wtl_baselines contains unknown item keys: " + ",".join(sorted(unknown_baselines))
+            )
+
     raw_shots = payload.get("shots")
     if raw_shots is None:
         shots = None
@@ -158,9 +197,15 @@ def load_report_config(config_path: str | Path) -> ReportConfig:
         report_kind=report_kind,
         report_stage=report_stage,
         dataset_source=_resolve_path(str(dataset_source), config_path=config_file),
+        dataset_allowlist=dataset_allowlist,
         coverage_mode=coverage_mode,
         shots=shots,
         items=items,
         reference_key=reference_key,
         family_label=family_label,
+        wtl_baselines=wtl_baselines,
+        appendix_show_std=appendix_show_std,
+        appendix_tables_enabled=appendix_tables_enabled,
+        paper_tables_enabled=paper_tables_enabled,
+        override_num_runs=override_num_runs,
     )

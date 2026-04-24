@@ -30,6 +30,15 @@ class ResultBundle:
     available_shots: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PaperAppendixShotBundle:
+    shot: str
+    accuracy_pct: pd.DataFrame
+    std_pct: pd.DataFrame
+    rank: pd.DataFrame
+    summary: pd.DataFrame
+
+
 def _load_batch_config(path: Path | None) -> dict[str, object] | None:
     if path is None or not path.exists():
         return None
@@ -75,6 +84,8 @@ def _read_ledger_rows(item: ReportItemSpec, run_ref: RunRef) -> list[dict[str, o
                 {
                     "model_key": item.key,
                     "model_label": item.label,
+                    "family": item.family or "",
+                    "paper_label": item.paper_label or item.label,
                     "results_txt": str(item.results_txt),
                     "job_dir": str(item.job_dir) if item.job_dir else "",
                     "batch_config_path": str(run_ref.batch_config_path) if run_ref.batch_config_path else "",
@@ -99,7 +110,11 @@ def _read_ledger_rows(item: ReportItemSpec, run_ref: RunRef) -> list[dict[str, o
     return rows
 
 
-def load_result_bundles(items: tuple[ReportItemSpec, ...]) -> tuple[ResultBundle, ...]:
+def load_result_bundles(
+    items: tuple[ReportItemSpec, ...],
+    *,
+    override_num_runs: int | None = None,
+) -> tuple[ResultBundle, ...]:
     bundles: list[ResultBundle] = []
     total_rows = 0
     for item in items:
@@ -113,6 +128,8 @@ def load_result_bundles(items: tuple[ReportItemSpec, ...]) -> tuple[ResultBundle
                 columns=[
                     "model_key",
                     "model_label",
+                    "family",
+                    "paper_label",
                     "results_txt",
                     "job_dir",
                     "batch_config_path",
@@ -135,7 +152,10 @@ def load_result_bundles(items: tuple[ReportItemSpec, ...]) -> tuple[ResultBundle
         else:
             frame["shot"] = frame["shot"].astype(str)
             frame["dataset"] = frame["dataset"].astype(str)
-            frame["num_runs"] = frame["num_runs"].astype(str)
+            if override_num_runs is not None:
+                frame["num_runs"] = str(override_num_runs)
+            else:
+                frame["num_runs"] = frame["num_runs"].astype(str)
             available_datasets = tuple(sorted(frame["dataset"].unique().tolist()))
             available_shots = tuple(sort_shots(frame["shot"].unique().tolist()))
             total_rows += len(frame)
@@ -261,11 +281,13 @@ def analyze_coverage(
 
     if coverage_mode == "strict":
         selected_datasets = list(expected_datasets)
-    else:
+    elif coverage_mode == "intersection":
         common = set(expected_datasets)
         for datasets in complete_by_model.values():
             common &= datasets
         selected_datasets = [dataset for dataset in expected_datasets if dataset in common]
+    else:
+        selected_datasets = list(expected_datasets)
 
     fatal_issues = bool(not duplicate_groups.empty)
     if coverage_mode == "strict":
@@ -289,7 +311,7 @@ def analyze_coverage(
                             )
                         )
                         fatal_issues = True
-    else:
+    elif coverage_mode == "intersection":
         for item in items:
             for dataset in expected_datasets:
                 if dataset not in complete_by_model[item.key]:
@@ -331,6 +353,26 @@ def analyze_coverage(
                 )
             )
             fatal_issues = True
+    else:
+        for item in items:
+            available_keys = {
+                (row.dataset, row.shot)
+                for row in deduped.loc[deduped["model_key"] == item.key, ["dataset", "shot"]].itertuples(index=False)
+            }
+            for dataset in expected_datasets:
+                missing_shots = [shot for shot in shots if (dataset, shot) not in available_keys]
+                if missing_shots:
+                    issues.append(
+                        CoverageIssue(
+                            severity="warning",
+                            issue_type="missing_result_sparse",
+                            model_key=item.key,
+                            model_label=item.label,
+                            dataset=dataset,
+                            shot=",".join(missing_shots),
+                            details="missing success record retained as blank cells under sparse coverage",
+                        )
+                    )
 
     selected_frame = deduped[deduped["dataset"].isin(selected_datasets)].copy()
     selected_frame["shot"] = pd.Categorical(selected_frame["shot"], categories=shots, ordered=True)
@@ -393,6 +435,227 @@ def build_rank_summary(selected_frame: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return summary
+
+
+def _paper_label(item: ReportItemSpec) -> str:
+    return item.paper_label or item.label
+
+
+def _paper_family(item: ReportItemSpec) -> str:
+    return item.family or ""
+
+
+def resolve_primary_item(items: tuple[ReportItemSpec, ...]) -> ReportItemSpec:
+    for item in items:
+        if item.primary:
+            return item
+    return items[0]
+
+
+def build_paper_overall_summary(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    shots: list[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for item in items:
+        item_df = selected_frame[selected_frame["model_key"] == item.key].copy()
+        row: dict[str, object] = {
+            "model_key": item.key,
+            "model_label": item.label,
+            "paper_label": _paper_label(item),
+            "family": _paper_family(item),
+            "primary": item.primary,
+        }
+        shot_metrics: list[float] = []
+        for shot in shots:
+            shot_df = item_df[item_df["shot"].astype(str) == shot]
+            row[f"shot_{shot}_accuracy_pct"] = (
+                float(shot_df["accuracy"].mean() * 100.0) if not shot_df.empty else pd.NA
+            )
+            row[f"shot_{shot}_coverage_count"] = int(shot_df["dataset"].astype(str).nunique())
+            if not shot_df.empty:
+                shot_metrics.append(float(shot_df["accuracy"].mean() * 100.0))
+        row["avg_accuracy_pct"] = float(sum(shot_metrics) / len(shot_metrics)) if shot_metrics else pd.NA
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_paper_rank_table(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    shots: list[str],
+) -> pd.DataFrame:
+    ranked = selected_frame.copy()
+    ranked["rank"] = ranked.groupby(["dataset", "shot"], observed=True)["accuracy"].transform(_average_rank)
+
+    rows: list[dict[str, object]] = []
+    for item in items:
+        item_df = ranked[ranked["model_key"] == item.key].copy()
+        row: dict[str, object] = {
+            "model_key": item.key,
+            "model_label": item.label,
+            "paper_label": _paper_label(item),
+            "family": _paper_family(item),
+            "primary": item.primary,
+        }
+        shot_ranks: list[float] = []
+        for shot in shots:
+            shot_df = item_df[item_df["shot"].astype(str) == shot]
+            row[f"shot_{shot}_rank"] = float(shot_df["rank"].mean()) if not shot_df.empty else pd.NA
+            row[f"shot_{shot}_coverage_count"] = int(shot_df["dataset"].astype(str).nunique())
+            if not shot_df.empty:
+                shot_ranks.append(float(shot_df["rank"].mean()))
+        row["avg_rank"] = float(sum(shot_ranks) / len(shot_ranks)) if shot_ranks else pd.NA
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_paper_wtl_table(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    shots: list[str],
+    primary_key: str,
+    baseline_keys: tuple[str, ...],
+) -> pd.DataFrame:
+    item_lookup = {item.key: item for item in items}
+    primary_item = item_lookup[primary_key]
+    ours = selected_frame[selected_frame["model_key"] == primary_key][["dataset", "shot", "accuracy"]].rename(
+        columns={"accuracy": "primary_accuracy"}
+    )
+
+    rows: list[dict[str, object]] = []
+    for baseline_key in baseline_keys:
+        baseline_item = item_lookup[baseline_key]
+        baseline_df = selected_frame[selected_frame["model_key"] == baseline_key][["dataset", "shot", "accuracy"]].rename(
+            columns={"accuracy": "baseline_accuracy"}
+        )
+        compared = ours.merge(baseline_df, on=["dataset", "shot"], how="inner")
+        row: dict[str, object] = {
+            "primary_key": primary_item.key,
+            "primary_label": _paper_label(primary_item),
+            "baseline_key": baseline_item.key,
+            "baseline_label": _paper_label(baseline_item),
+            "baseline_family": _paper_family(baseline_item),
+        }
+        total_compared = 0
+        total_wins = 0
+        total_ties = 0
+        total_losses = 0
+        for shot in shots:
+            shot_df = compared[compared["shot"].astype(str) == shot].copy()
+            deltas = shot_df["primary_accuracy"] - shot_df["baseline_accuracy"]
+            wins = int((deltas > 1e-12).sum())
+            ties = int((deltas.abs() <= 1e-12).sum())
+            losses = int((deltas < -1e-12).sum())
+            comparisons = int(len(shot_df))
+            row[f"shot_{shot}_wins"] = wins
+            row[f"shot_{shot}_ties"] = ties
+            row[f"shot_{shot}_losses"] = losses
+            row[f"shot_{shot}_comparisons"] = comparisons
+            row[f"shot_{shot}_wtl"] = f"{wins} / {ties} / {losses}"
+            total_compared += comparisons
+            total_wins += wins
+            total_ties += ties
+            total_losses += losses
+        row["total_comparisons"] = total_compared
+        row["total_wins"] = total_wins
+        row["total_ties"] = total_ties
+        row["total_losses"] = total_losses
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_paper_appendix_shot_bundle(
+    *,
+    selected_frame: pd.DataFrame,
+    items: tuple[ReportItemSpec, ...],
+    shot: str,
+    datasets: list[str],
+) -> PaperAppendixShotBundle:
+    model_keys = [item.key for item in items]
+    shot_df = selected_frame[selected_frame["shot"].astype(str) == shot].copy()
+
+    accuracy = (
+        shot_df.pivot(index="dataset", columns="model_key", values="accuracy")
+        .reindex(index=datasets, columns=model_keys)
+        .astype(float)
+        .mul(100.0)
+    )
+    std = (
+        shot_df.pivot(index="dataset", columns="model_key", values="accuracy_std")
+        .reindex(index=datasets, columns=model_keys)
+        .apply(pd.to_numeric, errors="coerce")
+        .mul(100.0)
+    )
+    rank = accuracy.rank(axis=1, method="average", ascending=False)
+    summary = pd.DataFrame(index=model_keys)
+    summary["avg_accuracy_pct"] = accuracy.mean(axis=0)
+    summary["avg_rank"] = rank.mean(axis=0)
+    best_mask = accuracy.eq(accuracy.max(axis=1), axis=0) & accuracy.notna()
+    summary["num_best"] = best_mask.sum(axis=0).astype(int)
+    summary.index.name = "model_key"
+
+    return PaperAppendixShotBundle(
+        shot=shot,
+        accuracy_pct=accuracy,
+        std_pct=std,
+        rank=rank,
+        summary=summary,
+    )
+
+
+def _format_appendix_value(value: object, std_value: object, *, show_std: bool) -> str:
+    if pd.isna(value):
+        return ""
+    rendered = f"{float(value):.2f}"
+    if show_std and not pd.isna(std_value):
+        return f"{rendered} \u00b1 {float(std_value):.2f}"
+    return rendered
+
+
+def build_paper_appendix_csv(
+    *,
+    bundle: PaperAppendixShotBundle,
+    items: tuple[ReportItemSpec, ...],
+    show_std: bool,
+) -> pd.DataFrame:
+    columns = ["Dataset"] + [_paper_label(item) for item in items]
+    rows: list[dict[str, object]] = []
+
+    for dataset in bundle.accuracy_pct.index.tolist():
+        row: dict[str, object] = {"Dataset": dataset}
+        for item in items:
+            row[_paper_label(item)] = _format_appendix_value(
+                bundle.accuracy_pct.loc[dataset, item.key],
+                bundle.std_pct.loc[dataset, item.key],
+                show_std=show_std,
+            )
+        rows.append(row)
+
+    for summary_label, column_name in (
+        ("Avg. Acc.", "avg_accuracy_pct"),
+        ("Avg. Rank", "avg_rank"),
+        ("#Best", "num_best"),
+    ):
+        row = {"Dataset": summary_label}
+        for item in items:
+            value = bundle.summary.loc[item.key, column_name]
+            if summary_label == "#Best" and not pd.isna(value):
+                row[_paper_label(item)] = str(int(value))
+            elif pd.isna(value):
+                row[_paper_label(item)] = ""
+            else:
+                row[_paper_label(item)] = f"{float(value):.2f}"
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=columns)
 
 
 def build_ablation_summary(
