@@ -159,12 +159,19 @@ def load_report_config(config_path: str | Path) -> ReportConfig:
         item_keys = {item.key for item in items}
         if reference_key not in item_keys:
             raise ValueError(f"reference_key {reference_key} is not present in items")
-        expected_coverage_mode = "intersection" if report_stage == "preview" else "strict"
-        if "coverage_mode" in payload and raw_coverage_mode != expected_coverage_mode:
-            raise ValueError(
-                f"ablation report_stage={report_stage} requires coverage_mode={expected_coverage_mode}"
-            )
-        coverage_mode = expected_coverage_mode
+        if report_stage == "final":
+            if "coverage_mode" in payload and raw_coverage_mode != "strict":
+                raise ValueError("ablation report_stage=final requires coverage_mode=strict")
+            coverage_mode = "strict"
+        else:
+            if "coverage_mode" not in payload:
+                coverage_mode = "intersection"
+            elif raw_coverage_mode in {"intersection", "sparse"}:
+                coverage_mode = raw_coverage_mode
+            else:
+                raise ValueError(
+                    "ablation report_stage=preview requires coverage_mode to be intersection or sparse"
+                )
         if not family_label:
             family_label = report_name
     else:

@@ -116,7 +116,12 @@ def plot_ablation_trend(
         if model_df.empty:
             continue
         row = model_df.iloc[0]
-        y_values = [float(row[f"shot_{shot}_accuracy_pct"]) for shot in ordered_shots]
+        y_values = [
+            float(row[f"shot_{shot}_accuracy_pct"])
+            if not pd.isna(row[f"shot_{shot}_accuracy_pct"])
+            else float("nan")
+            for shot in ordered_shots
+        ]
         color = model.get("color") or DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]
         marker = model.get("marker") or DEFAULT_MARKERS[idx % len(DEFAULT_MARKERS)]
         linewidth = 2.8 if model.get("primary") else 1.8

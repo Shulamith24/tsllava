@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
 
+"""uv run python scripts/experiments/ucr_batch/run_ucr_batch.py \
+  --experiment m2_pretrained \
+  --protocol fewshot \
+  --job-name m2_fewshot_6gpu \
+  --data-path /root/data1/tsllava/data \
+  --gpu-ids 0,1,2,3,4,5 \
+  -- \
+  --local_checkpoint /root/data1/tsllava/results/from_83/stage01/best_model.pt \
+  --epochs 60 \
+  --batch_size 8 \
+  --eval_batch_size 8 \
+  --shots 1,2,5,10 \
+  --num_runs 5 \
+  --fewshot_batch_mode manual \
+  --gradient_accumulation_steps 4 \
+  --device cuda \
+  --gradient_checkpointing \
+  --cleanup_checkpoints \
+  --resume"""
+
 from __future__ import annotations
 
 import argparse

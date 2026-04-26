@@ -698,7 +698,7 @@ def build_ablation_summary(
             "color": item.color or "",
             "marker": item.marker or "",
             "is_reference": item.key == reference_key,
-            "avg_accuracy_pct": overall_lookup[item.key],
+            "avg_accuracy_pct": overall_lookup.get(item.key, pd.NA),
             "delta_vs_reference_pct": pd.NA,
             "wins": pd.NA,
             "ties": pd.NA,
@@ -710,19 +710,20 @@ def build_ablation_summary(
             ),
         }
         for shot in shots:
-            row[f"shot_{shot}_accuracy_pct"] = shot_lookup[(item.key, shot)]
+            row[f"shot_{shot}_accuracy_pct"] = shot_lookup.get((item.key, shot), pd.NA)
 
         if item.key != reference_key:
             item_compared = compared[compared["model_key"] == item.key].copy()
-            deltas = item_compared["delta_vs_reference_pct"]
-            wins = int((deltas > 1e-12).sum())
-            ties = int((deltas.abs() <= 1e-12).sum())
-            losses = int((deltas < -1e-12).sum())
-            row["delta_vs_reference_pct"] = float(deltas.mean())
-            row["wins"] = wins
-            row["ties"] = ties
-            row["losses"] = losses
-            row["win_tie_loss"] = f"{wins}/{ties}/{losses}"
+            deltas = item_compared["delta_vs_reference_pct"].dropna()
+            if not deltas.empty:
+                wins = int((deltas > 1e-12).sum())
+                ties = int((deltas.abs() <= 1e-12).sum())
+                losses = int((deltas < -1e-12).sum())
+                row["delta_vs_reference_pct"] = float(deltas.mean())
+                row["wins"] = wins
+                row["ties"] = ties
+                row["losses"] = losses
+                row["win_tie_loss"] = f"{wins}/{ties}/{losses}"
 
         rows.append(row)
 
@@ -744,21 +745,26 @@ def build_ablation_cell_deltas(
     for dataset in datasets:
         for shot in shots:
             row_key = (dataset, shot)
-            if row_key not in pivot.index:
-                continue
             row: dict[str, object] = {
                 "dataset": dataset,
                 "shot": shot,
                 "reference_key": reference_key,
                 "reference_label": reference_label,
-                "reference_accuracy_pct": float(pivot.loc[row_key, reference_key]) * 100.0,
+                "reference_accuracy_pct": pd.NA,
             }
+            if row_key in pivot.index and reference_key in pivot.columns and not pd.isna(pivot.loc[row_key, reference_key]):
+                row["reference_accuracy_pct"] = float(pivot.loc[row_key, reference_key]) * 100.0
             reference_accuracy_pct = row["reference_accuracy_pct"]
             for item in items:
-                accuracy_pct = float(pivot.loc[row_key, item.key]) * 100.0
+                accuracy_pct: float | object = pd.NA
+                if row_key in pivot.index and item.key in pivot.columns and not pd.isna(pivot.loc[row_key, item.key]):
+                    accuracy_pct = float(pivot.loc[row_key, item.key]) * 100.0
                 row[f"{item.key}_accuracy_pct"] = accuracy_pct
                 if item.key != reference_key:
-                    row[f"{item.key}_delta_vs_reference_pct"] = accuracy_pct - reference_accuracy_pct
+                    if pd.isna(accuracy_pct) or pd.isna(reference_accuracy_pct):
+                        row[f"{item.key}_delta_vs_reference_pct"] = pd.NA
+                    else:
+                        row[f"{item.key}_delta_vs_reference_pct"] = float(accuracy_pct) - float(reference_accuracy_pct)
             rows.append(row)
 
     cells = pd.DataFrame(rows)

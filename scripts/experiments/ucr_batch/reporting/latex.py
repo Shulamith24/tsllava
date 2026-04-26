@@ -271,17 +271,26 @@ def render_ablation_main_table(
     reference_key: str,
     report_stage: str,
     dataset_count: int,
+    coverage_mode: str,
 ) -> str:
     summary = ablation_summary.set_index("model_key")
     shot_highlights = {
         shot: _highlight_groups(
-            {key: float(summary.loc[key, f"shot_{shot}_accuracy_pct"]) for key in summary.index},
+            {
+                key: float(summary.loc[key, f"shot_{shot}_accuracy_pct"])
+                for key in summary.index
+                if not pd.isna(summary.loc[key, f"shot_{shot}_accuracy_pct"])
+            },
             higher_is_better=True,
         )
         for shot in shots
     }
     avg_highlights = _highlight_groups(
-        {key: float(summary.loc[key, "avg_accuracy_pct"]) for key in summary.index},
+        {
+            key: float(summary.loc[key, "avg_accuracy_pct"])
+            for key in summary.index
+            if not pd.isna(summary.loc[key, "avg_accuracy_pct"])
+        },
         higher_is_better=True,
     )
 
@@ -293,19 +302,21 @@ def render_ablation_main_table(
         for shot in shots:
             best, second = shot_highlights[shot]
             rendered.append(
-                _format_metric(
+                _format_optional_metric(
                     model_key=key,
-                    value=float(summary.loc[key, f"shot_{shot}_accuracy_pct"]),
+                    value=summary.loc[key, f"shot_{shot}_accuracy_pct"],
                     best=best,
                     second=second,
+                    missing_text="",
                 )
             )
         rendered.append(
-            _format_metric(
+            _format_optional_metric(
                 model_key=key,
-                value=float(summary.loc[key, "avg_accuracy_pct"]),
+                value=summary.loc[key, "avg_accuracy_pct"],
                 best=avg_highlights[0],
                 second=avg_highlights[1],
+                missing_text="",
             )
         )
         if key == reference_key:
@@ -317,7 +328,13 @@ def render_ablation_main_table(
 
     stage_note = ""
     if report_stage == "preview":
-        stage_note = f" Preview uses the {dataset_count} shared datasets currently available."
+        if coverage_mode == "sparse":
+            stage_note = (
+                f" Preview uses the {dataset_count} datasets currently available."
+                " Blank cells indicate missing shot coverage, and averages/deltas are computed from the available cells only."
+            )
+        else:
+            stage_note = f" Preview uses the {dataset_count} shared datasets currently available."
     label = slugify(report_name)
     lines = [
         "% Requires \\usepackage{booktabs}",
@@ -356,32 +373,41 @@ def render_ablation_appendix_table(
     for dataset in datasets:
         dataset_row = shot_df[shot_df["dataset"].astype(str) == dataset].iloc[0]
         accuracy_values = {
-            reference_key: float(dataset_row["reference_accuracy_pct"]),
-            **{
-                model["key"]: float(dataset_row[f"{model['key']}_accuracy_pct"])
-                for model in variant_models
-            },
+            key: float(value)
+            for key, value in {
+                reference_key: dataset_row["reference_accuracy_pct"],
+                **{model["key"]: dataset_row[f"{model['key']}_accuracy_pct"] for model in variant_models},
+            }.items()
+            if not pd.isna(value)
         }
         best, second = _highlight_groups(accuracy_values, higher_is_better=True)
-        rendered = [
-            latex_escape(dataset),
-            _format_metric(
-                model_key=reference_key,
-                value=float(dataset_row["reference_accuracy_pct"]),
-                best=best,
-                second=second,
-            ),
-        ]
-        for model in variant_models:
-            key = model["key"]
+        rendered = [latex_escape(dataset)]
+        reference_value = dataset_row["reference_accuracy_pct"]
+        if pd.isna(reference_value):
+            rendered.append("")
+        else:
             rendered.append(
                 _format_metric(
-                    model_key=key,
-                    value=float(dataset_row[f"{key}_accuracy_pct"]),
+                    model_key=reference_key,
+                    value=float(reference_value),
                     best=best,
                     second=second,
                 )
             )
+        for model in variant_models:
+            key = model["key"]
+            value = dataset_row[f"{key}_accuracy_pct"]
+            if pd.isna(value):
+                rendered.append("")
+            else:
+                rendered.append(
+                    _format_metric(
+                        model_key=key,
+                        value=float(value),
+                        best=best,
+                        second=second,
+                    )
+                )
             rendered.append(_format_signed(dataset_row[f"{key}_delta_vs_reference_pct"]))
         body_rows.append(" & ".join(rendered) + r" \\")
 

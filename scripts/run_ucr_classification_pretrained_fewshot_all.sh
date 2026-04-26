@@ -7,8 +7,8 @@
 : <<'USAGE'
 example usage:
   uv run  scripts/run_ucr_classification_pretrained_fewshot_all.sh \
-  --job-name fewshot_first   --data-path /mnt/data/qyh/codes/tsllava/data \
-  --local_checkpoint /mnt/data/qyh/codes/tsllava/results/curriculum_pretrain_stage0_tsqa_m4/Llama_3_2_1B/newts_dual_branch_curriculum_v3/stage1_transfer_checkpoint.pt \
+  --job-name fewshot_first   --data-path ./data \
+  --local_checkpoint ./results/curriculum_pretrain_stage0_tsqa_m4/Llama_3_2_1B/newts_dual_branch_curriculum_v3/stage1_transfer_checkpoint.pt \
   --epochs 60   --batch_size 8   --eval_batch_size 8 \
   --protocol fewshot  --shots 1,2,5,10 --num_runs 3 --fewshot_batch_mode manual \
   --gradient_accumulation_steps 4   --device cuda  --gradient_checkpointing --cleanup_checkpoints
@@ -16,8 +16,8 @@ example usage:
 torchrun example:
   uv run scripts/run_ucr_classification_pretrained_fewshot_all.sh \
   --torchrun --torchrun-args "--standalone --nproc_per_node=4" \
-  --job-name fewshot_ddp   --data-path /mnt/data/qyh/codes/tsllava/data \
-  --local_checkpoint /mnt/data/qyh/codes/tsllava/results/curriculum_pretrain_stage0_tsqa_m4/Llama_3_2_1B/newts_dual_branch_curriculum_v3/stage1_transfer_checkpoint.pt \
+  --job-name fewshot_ddp   --data-path ./data \
+  --local_checkpoint ./results/curriculum_pretrain_stage0_tsqa_m4/Llama_3_2_1B/newts_dual_branch_curriculum_v3/stage1_transfer_checkpoint.pt \
   --epochs 60   --batch_size 8   --eval_batch_size 8 \
   --shots 1,2,5,10 --num_runs 3 --fewshot_batch_mode manual \
   --gradient_accumulation_steps 4   --device cuda  --gradient_checkpointing --cleanup_checkpoints

@@ -60,6 +60,7 @@ from opentslm.model.encoder.NewTSVisionEncoder import (
 )
 from opentslm.model.llm.OpenTSLM import OpenTSLM
 from opentslm.model.llm.OpenTSLMSP import OpenTSLMSP
+from opentslm.model.llm.hf_local import resolve_local_hf_snapshot
 from opentslm.model.class_token_rows import (
     get_class_token_trainable_parameters,
     load_class_token_rows_from_checkpoint,
@@ -729,7 +730,12 @@ def resolve_base_llm_id(args) -> str:
 
 def resolve_dataset_eos_token(args) -> str:
     base_llm_id = resolve_base_llm_id(args)
-    tokenizer = AutoTokenizer.from_pretrained(base_llm_id, use_fast=True)
+    tokenizer_source = resolve_local_hf_snapshot(base_llm_id)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_source,
+        use_fast=True,
+        local_files_only=Path(tokenizer_source).exists(),
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.eos_token is None:
@@ -1359,7 +1365,15 @@ def evaluate(
                 match = re.search(r"<c\d+>", pred)
                 predictions.append(match.group() if match else pred.strip())
         else:
-            predictions = underlying_model.generate(batch, max_new_tokens=max_new_tokens)
+            decoded_predictions = underlying_model.generate(
+                batch,
+                max_new_tokens=max_new_tokens,
+                skip_special_tokens=False,
+            )
+            predictions = []
+            for pred in decoded_predictions:
+                match = re.search(r"<c\d+>", pred)
+                predictions.append(match.group() if match else pred.strip())
 
         for sample, pred in zip(batch, predictions):
             label = sample["answer"].replace(underlying_model.get_eos_token(), "").strip()

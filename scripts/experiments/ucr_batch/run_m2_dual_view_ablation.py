@@ -8,7 +8,17 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-
+"""bash scripts/run_m2_dual_view_ablation.sh \
+  --local_checkpoint /root/data1/tsllava/results/from_83/stage01/best_model.pt \
+  --reference_job_dir /root/data1/tsllava/results/ucr_batches/m2_pretrained/fewshot/m2_fewshot_6gpu \
+  --comparison_job_dir /root/data1/tsllava/results/ucr_batches/m2_pretrained/fewshot/m2_fewshot_6gpu \
+  --shots 1,2,5,10 \
+  --num_runs 5 \
+  --gpu_ids 0,1,2,3,4,5 \
+  --job_prefix m2_dualview_vs_main6gpu \
+  --report_name m2_dualview_vs_m2_fewshot_6gpu \
+  --appendix_tables
+"""
 from m2_ablation_common import (
     DEFAULT_DATA_PATH,
     DEFAULT_FEWSHOT_SECOND_JOB_DIR,
@@ -29,7 +39,6 @@ from m2_ablation_common import (
 from reporting import generate_report
 from run_ucr_batch import main as run_ucr_batch_main
 
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the M2 dual-view ablation on a selected UCR subset.")
     parser.add_argument("--local_checkpoint", required=True, help="Checkpoint used for ts_only / vision_only reruns.")
@@ -37,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--reference_job_dir", default=str(DEFAULT_REFERENCE_JOB_DIR))
     parser.add_argument("--comparison_job_dir", default=str(DEFAULT_FEWSHOT_SECOND_JOB_DIR))
     parser.add_argument("--shots", default=",".join(DEFAULT_SHOTS))
-    parser.add_argument("--num_runs", type=int, default=3)
+    parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--num_datasets", type=int, default=None)
     parser.add_argument("--dataset_list", default=None, help="Comma-separated explicit dataset subset.")
     parser.add_argument("--sampling_seed", type=int, default=3407)

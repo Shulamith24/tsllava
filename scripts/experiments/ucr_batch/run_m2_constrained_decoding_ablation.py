@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 
+"""uv run scripts/run_m2_constrained_decoding_ablation.sh \
+  --local_checkpoint /root/data1/tsllava/results/from_83/stage01/best_model.pt \
+  --data_path /root/data1/tsllava/data \
+  --reference_job_dir /root/data1/tsllava/results/ucr_batches/m2_pretrained/fewshot/m2_fewshot_6gpu \
+  --comparison_job_dir /root/data1/tsllava/results/ucr_batches/m2_pretrained/fewshot/m2_fewshot_6gpu \
+  --shots 1,5,10 \
+  --num_runs 1 \
+  --gpu_ids 0,1,2,3,4,5 \
+  --job_prefix m2_cd_after_dualview \
+  --report_name m2_cd_after_dualview
+"""
+
+
 from __future__ import annotations
 
 import argparse

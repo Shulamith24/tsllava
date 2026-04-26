@@ -850,6 +850,63 @@ class UCRReportingTest(unittest.TestCase):
             self.assertFalse((report_dir / "appendix_shot_1.tex").exists())
             self.assertFalse((report_dir / "appendix_tables.tex").exists())
 
+    def test_ablation_preview_sparse_allows_blank_missing_shots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _make_ucr_archive(tmp_path, ["Alpha", "Beta"])
+            ref_job = _write_job_dir(
+                tmp_path / "ref_job",
+                [
+                    _make_row("Alpha", "1", "0.70"),
+                    _make_row("Alpha", "5", "0.75"),
+                    _make_row("Beta", "1", "0.60"),
+                    _make_row("Beta", "5", "0.65"),
+                ],
+            )
+            variant_job = _write_job_dir(
+                tmp_path / "variant_job",
+                [
+                    _make_row("Alpha", "1", "0.80"),
+                    _make_row("Beta", "1", "0.55"),
+                ],
+            )
+
+            config_path = tmp_path / "sparse_preview.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "report_name": "ablation sparse preview",
+                        "report_kind": "ablation",
+                        "report_stage": "preview",
+                        "coverage_mode": "sparse",
+                        "family_label": "Component Study",
+                        "reference_key": "ref",
+                        "dataset_source": str(archive),
+                        "dataset_allowlist": ["Alpha", "Beta"],
+                        "shots": ["1", "5"],
+                        "items": [
+                            {"key": "ref", "label": "Reference", "job_dir": str(ref_job)},
+                            {"key": "variant", "label": "Variant", "job_dir": str(variant_job)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = generate_report(config_path, output_root=tmp_path / "out")
+            self.assertEqual(manifest["coverage_mode"], "sparse")
+            self.assertEqual(manifest["dataset_count"], 2)
+
+            report_dir = tmp_path / "out" / "ablation_sparse_preview"
+            main_table = (report_dir / "main_table.tex").read_text(encoding="utf-8")
+            self.assertIn("Blank cells indicate missing shot coverage", main_table)
+            self.assertIn("Variant & \\textbf{67.50} &  & \\textbf{67.50}", main_table)
+
+            summary = pd.read_csv(report_dir / "ablation_summary.csv")
+            variant = summary[summary["model_key"] == "variant"].iloc[0]
+            self.assertTrue(pd.isna(variant["shot_5_accuracy_pct"]))
+            self.assertAlmostEqual(float(variant["delta_vs_reference_pct"]), 2.5, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -340,6 +340,7 @@ def _write_ablation_outputs(
             reference_key=config.reference_key or "",
             report_stage=config.report_stage,
             dataset_count=len(selected_datasets),
+            coverage_mode=config.coverage_mode,
         ),
         encoding="utf-8",
     )

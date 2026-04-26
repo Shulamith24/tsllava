@@ -10,8 +10,11 @@ UEA多变量时间序列数据集加载器,在 train_uea_classification.py时使
 """
 
 import os
+from pathlib import Path
 from typing import Tuple, Optional
 import numpy as np
+
+DEFAULT_UEA_EXTRACT_PATH = Path(__file__).resolve().parents[4] / "data" / "Multivariate_ts"
 
 # 尝试导入aeon库
 try:
@@ -33,14 +36,15 @@ def ensure_uea_data():
 
 def load_uea_dataset(
     dataset_name: str,
-    extract_path: Optional[str] = "/mnt/data/qyh/codes/tsllava/data/Multivariate_ts",
+    extract_path: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     加载UEA多变量时间序列数据集
     
     Args:
         dataset_name: 数据集名称 (e.g. "Handwriting", "BasicMotions")
-        extract_path: 数据解压路径（可选）
+        extract_path: 数据解压路径（可选）。默认使用仓库下的 data/Multivariate_ts，
+            也可通过环境变量 OPENTSLM_UEA_EXTRACT_PATH 覆盖。
     
     Returns:
         X_train: [N_train, C, L] 训练数据
@@ -49,6 +53,7 @@ def load_uea_dataset(
         y_test: [N_test] 测试标签
     """
     ensure_uea_data()
+    resolved_extract_path = extract_path or os.environ.get("OPENTSLM_UEA_EXTRACT_PATH") or str(DEFAULT_UEA_EXTRACT_PATH)
     
     print(f"📂 Loading UEA dataset: {dataset_name}")
     
@@ -56,14 +61,14 @@ def load_uea_dataset(
     X_train, y_train = load_classification(
         name=dataset_name,
         split="train",
-        extract_path=extract_path,
+        extract_path=resolved_extract_path,
     )
     
     # 加载测试集
     X_test, y_test = load_classification(
         name=dataset_name,
         split="test",
-        extract_path=extract_path,
+        extract_path=resolved_extract_path,
     )
     
     print(f"   Train: {X_train.shape}, Test: {X_test.shape}")

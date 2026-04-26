@@ -5,6 +5,7 @@
 
 import torch
 import torch.nn as nn
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.nn.utils.rnn import pad_sequence
@@ -27,6 +28,7 @@ from opentslm.prompt.full_prompt import FullPrompt
 from opentslm.time_series_datasets.util import (
     extend_time_series_to_match_patch_size_and_aggregate,
 )
+from .hf_local import resolve_local_hf_snapshot
 
 
 class OpenTSLMSP(TimeSeriesLLM):
@@ -42,16 +44,22 @@ class OpenTSLMSP(TimeSeriesLLM):
     ):
         super().__init__(device)
         self.llm_id = llm_id
+        self.llm_source = resolve_local_hf_snapshot(llm_id)
+        self.llm_source_is_local = self.llm_source != llm_id
         self.requested_llm_attn_impl = llm_attn_impl
 
         # 1) tokenizer (ensure pad_token exists)
-        self.tokenizer = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.llm_source,
+            use_fast=True,
+            local_files_only=self.llm_source_is_local,
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # 2) load LLM
         self.llm, self.llm_attn_impl = self._load_llm_with_attn_fallback(
-            llm_id=llm_id,
+            llm_id=self.llm_source,
             device=device,
             llm_attn_impl=llm_attn_impl,
         )
@@ -121,6 +129,7 @@ class OpenTSLMSP(TimeSeriesLLM):
                     torch_dtype=torch.bfloat16,
                     device_map={"": device},
                     attn_implementation=candidate,
+                    local_files_only=Path(llm_id).exists(),
                 )
                 if candidate != attn_impl:
                     print(
@@ -567,6 +576,7 @@ class OpenTSLMSP(TimeSeriesLLM):
         batch: List[Dict[str, any]],
         max_new_tokens: int = 50,
         runtime_branch_mode: Optional[str] = None,
+        skip_special_tokens: bool = True,
         **generate_kwargs,
     ) -> List[str]:
         inputs_embeds, attention_mask = self.pad_and_apply_batch(
@@ -579,7 +589,7 @@ class OpenTSLMSP(TimeSeriesLLM):
             max_new_tokens=max_new_tokens,
             **generate_kwargs,
         )
-        return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+        return self.tokenizer.batch_decode(gen_ids, skip_special_tokens=skip_special_tokens)
 
     def compute_losses(
         self,
