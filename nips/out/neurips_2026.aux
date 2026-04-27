@@ -14,14 +14,14 @@
 \fi}
 \global\let\hyper@last\relax 
 \gdef\HyperFirstAtBeginDocument#1{#1}
-\providecommand*\HyPL@Entry[1]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
 \citation{ismail2019deep}
 \citation{tang2020interpretable}
 \citation{pan2024review}
 \citation{barreda2024cosco,tang2020interpretable,yang2022spectral}
 \citation{zhang2024large,jin2024time,cheng2024advancing}
 \citation{zhang2024large,jin2024time,cheng2024advancing}
-\HyPL@Entry{0<</S/D>>}
 \@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
 \citation{ni2025harnessing,liu2025picture}
 \citation{chang2025llm4ts,cheng2024advancing}
@@ -42,33 +42,46 @@
 \citation{ni2025harnessing}
 \citation{liu2025picture}
 \citation{roschmann2025time}
+\citation{raffel2020exploring}
+\citation{hokamp2017lexically,koo2024automata}
 \@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{3}{section.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Few-shot time series classification.}{3}{section*.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{LLMs and foundation models for time series.}{3}{section*.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Vision-based representations for time series.}{3}{section*.3}\protected@file@percent }
-\citation{raffel2020exploring}
-\citation{hokamp2017lexically,koo2024automata}
 \@writefile{toc}{\contentsline {paragraph}{Generative classification and constrained decoding.}{4}{section*.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}Method}{4}{section.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Problem Setup and Unified Time-Series-to-Language Formulation}{4}{subsection.3.1}\protected@file@percent }
 \newlabel{sec:unified-formulation}{{3.1}{4}{Problem Setup and Unified Time-Series-to-Language Formulation}{subsection.3.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Dual-View Native Time-Series Prompting}{4}{subsection.3.2}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces  Overview of the proposed framework. Given a raw time series, we construct dual-view native time-series prompts using a temporal branch and a visual branch. The fused soft tokens are projected into the hidden space of a frozen LLM and combined with textual prompts for autoregressive generation. Training proceeds in three stages: dual-view self-supervised representation learning, generative transfer via time-series question answering, and semantic bridging with captioning and attribute supervision. For downstream few-shot classification, we introduce dataset-specific class tokens and perform constrained decoding in the label subspace. }}{5}{figure.1}\protected@file@percent }
-\newlabel{fig:overview}{{1}{5}{Overview of the proposed framework. Given a raw time series, we construct dual-view native time-series prompts using a temporal branch and a visual branch. The fused soft tokens are projected into the hidden space of a frozen LLM and combined with textual prompts for autoregressive generation. Training proceeds in three stages: dual-view self-supervised representation learning, generative transfer via time-series question answering, and semantic bridging with captioning and attribute supervision. For downstream few-shot classification, we introduce dataset-specific class tokens and perform constrained decoding in the label subspace}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces  Overview of the proposed framework. Given a raw time series, we construct dual-view native time-series prompts using a temporal branch and a visual branch. The fused soft tokens are projected into the hidden space of a pretrained causal LLM and combined with textual prompts for autoregressive generation; during few-shot adaptation, the language side can be lightly updated with LoRA adapters. Training proceeds through Stage I dual-view self-supervised representation learning and Stage II time-series question answering transfer, with an optional Stage III semantic-bridging and caption-specialization continuation. For downstream few-shot classification, we introduce dataset-specific class tokens and score candidate label sequences in the label subspace. }}{5}{figure.1}\protected@file@percent }
+\newlabel{fig:overview}{{1}{5}{Overview of the proposed framework. Given a raw time series, we construct dual-view native time-series prompts using a temporal branch and a visual branch. The fused soft tokens are projected into the hidden space of a pretrained causal LLM and combined with textual prompts for autoregressive generation; during few-shot adaptation, the language side can be lightly updated with LoRA adapters. Training proceeds through Stage I dual-view self-supervised representation learning and Stage II time-series question answering transfer, with an optional Stage III semantic-bridging and caption-specialization continuation. For downstream few-shot classification, we introduce dataset-specific class tokens and score candidate label sequences in the label subspace}{figure.1}{}}
 \@writefile{toc}{\contentsline {paragraph}{Temporal branch.}{5}{section*.5}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Visual branch.}{5}{section*.6}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Curriculum Bridging from Time Series to Language}{6}{subsection.3.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.1}Stage I: Dual-view Self-Supervised Representation Learning}{6}{subsubsection.3.3.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.2}Stage II: Generative Transfer via Time-Series Question Answering}{6}{subsubsection.3.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.3}Stage III: Semantic Bridging with Captioning and Attribute Supervision}{6}{subsubsection.3.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Few-Shot Classification as Constrained Generative Label Selection}{7}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.3}Stage III: Optional Semantic Bridging and Caption Specialization}{7}{subsubsection.3.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Few-Shot Classification as Candidate Label-Sequence Scoring}{7}{subsection.3.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Downstream Adaptation}{7}{subsection.3.5}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Few-shot classification accuracy (\%) on 128 shared UCR datasets. We report the mean over 5 runs. Best is bold and second-best is underlined.}}{8}{table.1}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-fewshot-main}{{1}{8}{Few-shot classification accuracy (\%) on 128 shared UCR datasets. We report the mean over 5 runs. Best is bold and second-best is underlined}{table.1}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {4}Experiments}{8}{section.4}\protected@file@percent }
 \newlabel{sec:experiments}{{4}{8}{Experiments}{section.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Experimental Setup}{8}{subsection.4.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Main Results}{8}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Protocol.}{8}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Pretraining data and default initialization.}{8}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Baselines and metrics.}{8}{section*.9}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Few-shot classification accuracy (\%) on 128 shared UCR datasets. We report the mean over 5 runs. \texttt  {Avg} and \texttt  {AvgRank} average the four shot-specific mean accuracies and average ranks, respectively. Best is bold and second-best is underlined.}}{9}{table.1}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-fewshot-main}{{1}{9}{Few-shot classification accuracy (\%) on 128 shared UCR datasets. We report the mean over 5 runs. \texttt {Avg} and \texttt {AvgRank} average the four shot-specific mean accuracies and average ranks, respectively. Best is bold and second-best is underlined}{table.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Fairness and training details.}{9}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Implementation details.}{9}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Main Results}{9}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Benchmark-level comparison.}{9}{section*.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Dataset-level robustness.}{9}{section*.13}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Summary of top-level ablations on the 128 shared UCR datasets under the current few-shot protocol. Each value is mean accuracy (\%) over five runs. Best is bold, and the best ablated variant in each column is underlined.}}{10}{table.2}\protected@file@percent }
+\newlabel{tab:ablation-summary}{{2}{10}{Summary of top-level ablations on the 128 shared UCR datasets under the current few-shot protocol. Each value is mean accuracy (\%) over five runs. Best is bold, and the best ablated variant in each column is underlined}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Ablation Studies}{10}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Effect of curriculum pretraining.}{10}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Effect of dual-view native prompting.}{10}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Effect of candidate label scoring.}{10}{section*.16}\protected@file@percent }
 \bibstyle{abbrvnat}
 \bibdata{references}
 \bibcite{barreda2024cosco}{{1}{2024}{{Barreda et~al.}}{{Barreda, Gomez, Puga, Zhou, and Zhang}}}
@@ -85,8 +98,6 @@
 \bibcite{narwariya2020meta}{{12}{2020}{{Narwariya et~al.}}{{Narwariya, Malhotra, Vig, Shroff, and Vishnu}}}
 \bibcite{ni2025harnessing}{{13}{2025}{{Ni et~al.}}{{Ni, Zhao, Shen, Tong, Song, Cheng, Luo, and Chen}}}
 \bibcite{nietime}{{14}{2022}{{Nie et~al.}}{{Nie, Nguyen, Sinthong, and Kalagnanam}}}
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Win/Tie/Loss of Ours against selected baselines on 128 shared UCR datasets.}}{9}{table.2}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-paper-wtl}{{2}{9}{Win/Tie/Loss of Ours against selected baselines on 128 shared UCR datasets}{table.2}{}}
 \bibcite{pan2024review}{{15}{2024{a}}{{Pan et~al.}}{{Pan, Luo, Chua, Pugalenthi, and Yapp}}}
 \bibcite{pan2024s}{{16}{2024{b}}{{Pan et~al.}}{{Pan, Jiang, Garg, Schneider, Nevmyvaka, and Song}}}
 \bibcite{raffel2020exploring}{{17}{2020}{{Raffel et~al.}}{{Raffel, Shazeer, Roberts, Lee, Narang, Matena, Zhou, Li, and Liu}}}
@@ -99,8 +110,8 @@
 \bibcite{yang2022spectral}{{24}{2022}{{Yang et~al.}}{{Yang, Hong, and Zhang}}}
 \bibcite{ye2024survey}{{25}{2024}{{Ye et~al.}}{{Ye, Zhang, Yi, Yu, Li, Li, and Tsung}}}
 \bibcite{zhang2024large}{{26}{2024}{{Zhang et~al.}}{{Zhang, Chowdhury, Gupta, and Shang}}}
-\@writefile{toc}{\contentsline {section}{\numberline {A}Full UCR Benchmark Results}{10}{appendix.A}\protected@file@percent }
-\newlabel{app:full-ucr-results}{{A}{10}{Full UCR Benchmark Results}{appendix.A}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Full UCR Benchmark Results}{12}{appendix.A}\protected@file@percent }
+\newlabel{app:full-ucr-results}{{A}{12}{Full UCR Benchmark Results}{appendix.A}{}}
 \gdef \LT@i {\LT@entry 
     {5}{86.65912pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
@@ -115,8 +126,8 @@
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}}
-\@writefile{lot}{\contentsline {table}{\numberline {3}{Per-dataset 1-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{11}{table.3}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-paper-shot-1}{{3}{11}{Per-dataset 1-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{Per-dataset 1-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{13}{table.3}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-1}{{3}{13}{Per-dataset 1-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.3}{}}
 \gdef \LT@ii {\LT@entry 
     {5}{86.65912pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
@@ -131,8 +142,8 @@
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}}
-\@writefile{lot}{\contentsline {table}{\numberline {4}{Per-dataset 2-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{14}{table.4}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-paper-shot-2}{{4}{14}{Per-dataset 2-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{Per-dataset 2-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{16}{table.4}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-2}{{4}{16}{Per-dataset 2-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.4}{}}
 \gdef \LT@iii {\LT@entry 
     {5}{86.65912pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
@@ -147,8 +158,8 @@
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}}
-\@writefile{lot}{\contentsline {table}{\numberline {5}{Per-dataset 5-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{17}{table.5}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-paper-shot-5}{{5}{17}{Per-dataset 5-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{Per-dataset 5-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{19}{table.5}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-5}{{5}{19}{Per-dataset 5-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.5}{}}
 \gdef \LT@iv {\LT@entry 
     {5}{86.65912pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
@@ -163,14 +174,34 @@
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}\LT@entry 
     {5}{37.77774pt}}
-\@writefile{lot}{\contentsline {table}{\numberline {6}{Per-dataset 10-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{20}{table.6}\protected@file@percent }
-\newlabel{tab:ucr_fewshot_paper_current-paper-shot-10}{{6}{20}{Per-dataset 10-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.6}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Key few-shot adaptation settings for DuoTSP.}}{23}{table.7}\protected@file@percent }
-\newlabel{tab:duotsp-appendix-details}{{7}{23}{Key few-shot adaptation settings for DuoTSP}{table.7}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {B}Additional Experimental Details}{23}{appendix.B}\protected@file@percent }
-\newlabel{app:details}{{B}{23}{Additional Experimental Details}{appendix.B}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {C}Additional Plots and Future Ablations}{23}{appendix.C}\protected@file@percent }
-\newlabel{app:plots-and-future-ablations}{{C}{23}{Additional Plots and Future Ablations}{appendix.C}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Shot-scaling trend on the 128 shared UCR datasets. Each point reports the mean accuracy over five runs. DuoTSP remains the strongest method across all four shot settings.}}{24}{figure.2}\protected@file@percent }
-\newlabel{fig:fewshot-trend}{{2}{24}{Shot-scaling trend on the 128 shared UCR datasets. Each point reports the mean accuracy over five runs. DuoTSP remains the strongest method across all four shot settings}{figure.2}{}}
-\gdef \@abspage@last{31}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{Per-dataset 10-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{22}{table.6}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-10}{{6}{22}{Per-dataset 10-shot classification results on 128 shared UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Key few-shot adaptation settings for DuoTSP.}}{25}{table.7}\protected@file@percent }
+\newlabel{tab:duotsp-appendix-details}{{7}{25}{Key few-shot adaptation settings for DuoTSP}{table.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}Additional Experimental Details}{25}{appendix.B}\protected@file@percent }
+\newlabel{app:details}{{B}{25}{Additional Experimental Details}{appendix.B}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.1}Pretraining Stages and Data Sources}{25}{subsection.B.1}\protected@file@percent }
+\newlabel{app:pretrain-details}{{B.1}{25}{Pretraining Stages and Data Sources}{subsection.B.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.2}Baseline Training Recipes and Hyperparameters}{25}{subsection.B.2}\protected@file@percent }
+\newlabel{app:baseline-details}{{B.2}{25}{Baseline Training Recipes and Hyperparameters}{subsection.B.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {C}Additional Plot}{25}{appendix.C}\protected@file@percent }
+\newlabel{app:plots}{{C}{25}{Additional Plot}{appendix.C}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Stage-wise data sources and roles for DuoTSP.}}{26}{table.8}\protected@file@percent }
+\newlabel{tab:duotsp-pretrain-stages}{{8}{26}{Stage-wise data sources and roles for DuoTSP}{table.8}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Shot-scaling trend on the 128 shared UCR datasets. Each point reports the mean accuracy over five runs. DuoTSP remains the strongest method across all four shot settings.}}{26}{figure.2}\protected@file@percent }
+\newlabel{fig:fewshot-trend}{{2}{26}{Shot-scaling trend on the 128 shared UCR datasets. Each point reports the mean accuracy over five runs. DuoTSP remains the strongest method across all four shot settings}{figure.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Few-shot training recipes for DuoTSP and the reported baseline families. All methods use the same sampled support sets within each run and evaluate on the official TEST split restricted to the sampled class set.}}{27}{table.9}\protected@file@percent }
+\newlabel{tab:baseline-training-recipes}{{9}{27}{Few-shot training recipes for DuoTSP and the reported baseline families. All methods use the same sampled support sets within each run and evaluate on the official TEST split restricted to the sampled class set}{table.9}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Win/Tie/Loss of DuoTSP against selected baselines on 128 shared UCR datasets.}}{28}{table.10}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-wtl}{{10}{28}{Win/Tie/Loss of DuoTSP against selected baselines on 128 shared UCR datasets}{table.10}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {D}Dataset-Level Win/Tie/Loss Summary}{28}{appendix.D}\protected@file@percent }
+\newlabel{app:wtl}{{D}{28}{Dataset-Level Win/Tie/Loss Summary}{appendix.D}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces Ablation of aggregate curriculum pretraining on the 128 shared UCR datasets under the same few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model.}}{29}{table.11}\protected@file@percent }
+\newlabel{tab:ablation-pretrain}{{11}{29}{Ablation of aggregate curriculum pretraining on the 128 shared UCR datasets under the same few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model}{table.11}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {E}Ablation Tables}{29}{appendix.E}\protected@file@percent }
+\newlabel{app:ablation-tables}{{E}{29}{Ablation Tables}{appendix.E}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {12}{\ignorespaces Ablation of dual-view native prompting on the 128 shared UCR datasets under the same few-shot protocol as the main results. These comparisons assess the effect of removing one top-level view at a time. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model.}}{30}{table.12}\protected@file@percent }
+\newlabel{tab:ablation-dual-view}{{12}{30}{Ablation of dual-view native prompting on the 128 shared UCR datasets under the same few-shot protocol as the main results. These comparisons assess the effect of removing one top-level view at a time. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model}{table.12}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {13}{\ignorespaces Ablation of candidate label scoring on the 128 shared UCR datasets under the same few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model.}}{31}{table.13}\protected@file@percent }
+\newlabel{tab:ablation-decoding}{{13}{31}{Ablation of candidate label scoring on the 128 shared UCR datasets under the same few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full DuoTSP model}{table.13}{}}
+\gdef \@abspage@last{37}

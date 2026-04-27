@@ -259,7 +259,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--llm_attn_impl",
         type=str,
-        default="flash_attention_2",
+        default="sdpa",
         choices=["sdpa", "eager", "flash_attention_2"],
         help="Attention implementation for the LLM backbone.",
     )
