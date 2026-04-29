@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .SleepEDFClassificationDataset import SleepEDFClassificationDataset
-from .SleepEDFCoTQADataset import SleepEDFCoTQADataset
+from .MITBIHClassificationDataset import MITBIHClassificationDataset
 
-__all__ = ["SleepEDFClassificationDataset", "SleepEDFCoTQADataset"]
+__all__ = ["MITBIHClassificationDataset"]

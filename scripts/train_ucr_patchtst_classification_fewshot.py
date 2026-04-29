@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Strict few-shot UCR classification with Hugging Face PatchTSTForClassification.
+Strict few-shot univariate classification with Hugging Face PatchTSTForClassification.
 
 Protocol lock:
 - support-set sampling per shot/run
@@ -45,9 +45,7 @@ from opentslm.model.PatchTSTClassifier import (  # noqa: E402
     PatchTSTClassifierAdapter,
     prepare_patchtst_classification_batch,
 )
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import (  # noqa: E402
-    UCRClassificationDataset,
-)
+from opentslm.time_series_datasets.univariate_fewshot import load_univariate_fewshot_bundle  # noqa: E402
 
 ShotType = Union[int, Literal["full"]]
 STRICT_FEWSHOT_EPOCHS = 100
@@ -58,7 +56,7 @@ DEFAULT_FULL_SAVE_DIR = "results/patchtst_ucr_full"
 def parse_args(argv=None):
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="Strict few-shot supervised UCR classification with PatchTST"
+        description="Strict few-shot supervised univariate classification with PatchTST"
     )
 
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot", "full"])
@@ -77,7 +75,20 @@ def parse_args(argv=None):
     parser.add_argument("--epochs", type=int, default=STRICT_FEWSHOT_EPOCHS)
     parser.add_argument("--phase1_epochs", type=int, default=5)
 
-    parser.add_argument("--dataset", type=str, default="CricketZ")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
     parser.add_argument("--data_path", type=str, default="./data")
     parser.add_argument("--pad_mode", type=str, default="last", choices=["last", "repeat", "zero"])
 
@@ -1009,6 +1020,20 @@ def main():
 
         set_seed(args.seed)
 
+        dataset_eos = "<eos>"
+        dataset_bundle = load_univariate_fewshot_bundle(args, eos_token=dataset_eos)
+        args.dataset_family = dataset_bundle.dataset_family
+        args.dataset = dataset_bundle.dataset_name
+        args.split_protocol = dataset_bundle.split_protocol
+        train_dataset = dataset_bundle.train_dataset
+        test_dataset = dataset_bundle.test_dataset
+
+        num_classes = dataset_bundle.num_classes
+        label_mapping = dataset_bundle.label_mapping
+        label_to_indices = build_label_to_indices(train_dataset)
+        test_label_to_indices = build_label_to_indices(test_dataset)
+        context_length = args.context_length or infer_context_length(train_dataset)
+
         save_root = os.path.join(args.save_dir, args.dataset)
         if rank == 0:
             os.makedirs(save_root, exist_ok=True)
@@ -1016,10 +1041,12 @@ def main():
                 json.dump(vars(args), f, indent=2)
 
             print("=" * 80)
-            print("PatchTST: Strict Few-shot Supervised Protocol")
+            print("PatchTST: Strict Few-shot Univariate Protocol")
             print("=" * 80)
             print(f"time: {datetime.datetime.now()}")
+            print(f"dataset_family: {args.dataset_family}")
             print(f"dataset: {args.dataset}")
+            print(f"split_protocol: {args.split_protocol}")
             print(f"protocol: {args.protocol}")
             print(f"way: {args.way if args.way is not None else 'all'}")
             print(f"shots: {[shot_to_name(s) for s in shots]}")
@@ -1032,26 +1059,6 @@ def main():
 
         if world_size > 1:
             dist.barrier()
-
-        dataset_eos = "<eos>"
-        train_dataset = UCRClassificationDataset(
-            split="train",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
-        test_dataset = UCRClassificationDataset(
-            split="test",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
-
-        num_classes = UCRClassificationDataset.get_num_classes()
-        label_mapping = UCRClassificationDataset.get_label_mapping()
-        label_to_indices = build_label_to_indices(train_dataset)
-        test_label_to_indices = build_label_to_indices(test_dataset)
-        context_length = args.context_length or infer_context_length(train_dataset)
 
         if args.way is not None and args.way > num_classes:
             raise ValueError(f"--way ({args.way}) cannot exceed num_classes ({num_classes})")

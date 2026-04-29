@@ -72,6 +72,7 @@ STUB_TRAINER = textwrap.dedent(
         "started_at": start,
         "finished_at": finished,
         "pid": os.getpid(),
+        "argv": sys.argv,
         "env": {
             "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
@@ -326,6 +327,45 @@ class UCRBatchRunnerTest(unittest.TestCase):
                     ("Gamma", "1", "success"),
                 ],
             )
+
+    def test_external_dataset_family_uses_registered_external_dataset_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            trainer = tmp_path / "stub_trainer.py"
+            _write_stub_trainer(trainer)
+            entry = self._make_entry(trainer)
+
+            args = [
+                "--experiment",
+                "demo_exp",
+                "--protocol",
+                "fewshot",
+                "--job-name",
+                "external_family_job",
+                "--data-path",
+                str(tmp_path / "data"),
+                "--shots",
+                "1",
+                "--dataset_family",
+                "mitbih",
+            ]
+
+            with self._patch_runner(tmp_path, entry):
+                self.assertEqual(run_ucr_batch_main(args), 0)
+
+            job_root = tmp_path / "results" / "ucr_batches" / "demo_exp" / "fewshot" / "external_family_job"
+            rows = _read_results(job_root / "results.txt")
+            self.assertEqual(
+                [(row["dataset"], row["shot"], row["status"]) for row in rows],
+                [("MITBIHArrhythmia", "1", "success")],
+            )
+
+            run_payload = json.loads(
+                (job_root / "datasets" / "MITBIHArrhythmia" / "run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(run_payload["dataset"], "MITBIHArrhythmia")
+            self.assertIn("--dataset_family", run_payload["argv"])
+            self.assertIn("mitbih", run_payload["argv"])
 
     def test_job_lock_blocks_second_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

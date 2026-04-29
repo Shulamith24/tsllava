@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Few-shot UCR classification with the COSCO ResNet training recipe.
+Few-shot univariate classification with the COSCO ResNet training recipe.
 
 Protocol:
 - official TRAIN split is the support pool
@@ -51,6 +51,7 @@ from fewshot_utils import (  # noqa: E402
     shot_to_name,
     write_json,
 )
+from ucr_fewshot_baseline_utils import load_univariate_arrays  # noqa: E402
 
 
 def _load_python_module(module_name: str, file_path: Path):
@@ -162,7 +163,7 @@ def cli_flag_was_provided(argv: Optional[Sequence[str]], flag_name: str) -> bool
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="Few-shot UCR classification with the COSCO ResNet recipe"
+        description="Few-shot univariate classification with the COSCO ResNet recipe"
     )
 
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot"], help=argparse.SUPPRESS)
@@ -171,12 +172,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
 
-    parser.add_argument("--dataset", type=str, required=True, help="UCR dataset name, e.g. ECG200.")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name within the selected family.")
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
     parser.add_argument(
         "--data_path",
         type=str,
         default=DEFAULT_DATA_PATH,
-        help="Base path containing UCRArchive_2018. Defaults to the repo's ./data directory.",
+        help="Base path containing the selected dataset family. Defaults to the repo's ./data directory.",
     )
     parser.add_argument(
         "--cosco_root",
@@ -709,11 +723,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     set_seed(args.seed)
     device = resolve_device(args.device)
 
-    data_bundle = load_ucr_arrays(
+    data_bundle = load_univariate_arrays(
         args.dataset,
         data_path=args.data_path,
         normalize=bool(args.normalize),
+        dataset_family=args.dataset_family,
+        split_protocol=args.split_protocol,
     )
+    args.dataset_family = str(data_bundle["dataset_family"])
+    args.dataset = str(data_bundle["dataset_name"])
+    args.split_protocol = str(data_bundle["split_protocol"])
     train_features = data_bundle["train_features"]
     test_features = data_bundle["test_features"]
     train_labels = data_bundle["train_labels"]
@@ -743,10 +762,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
 
     print("=" * 80)
-    print("COSCO ResNet: Few-shot UCR Classification")
+    print("COSCO ResNet: Few-shot Univariate Classification")
     print("=" * 80)
     print(f"time: {datetime.datetime.now()}")
+    print(f"dataset_family: {args.dataset_family}")
     print(f"dataset: {args.dataset}")
+    print(f"split_protocol: {args.split_protocol}")
     print(f"data_source: {Path(args.data_path).resolve()}")
     print(f"cosco_source: {cosco_root}")
     print(f"protocol: {args.protocol}")

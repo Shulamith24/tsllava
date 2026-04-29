@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Unified few-shot UCR evaluation entrypoint for selected TSLib classifiers.
+"""Unified few-shot univariate evaluation entrypoint for selected TSLib classifiers.
 example usage:
 uv run python scripts/experiments/ucr_batch/run_ucr_batch.py \
   --experiment tslib_autoformer \
@@ -48,9 +48,7 @@ from opentslm.model.TSLibClassification import (  # noqa: E402
     prepare_tslib_classification_batch,
     resolve_model_profile,
 )
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import (  # noqa: E402
-    UCRClassificationDataset,
-)
+from opentslm.time_series_datasets.univariate_fewshot import load_univariate_fewshot_bundle  # noqa: E402
 
 from fewshot_utils import (  # noqa: E402
     ShotType,
@@ -94,7 +92,7 @@ def parse_model_list(value: str) -> List[str]:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="Unified few-shot UCR evaluation for selected TSLib classification models"
+        description="Unified few-shot univariate evaluation for selected TSLib classification models"
     )
 
     model_group = parser.add_mutually_exclusive_group(required=True)
@@ -112,7 +110,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
 
-    parser.add_argument("--dataset", type=str, default="CricketZ")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
     parser.add_argument("--data_path", type=str, default=str(PROJECT_ROOT / "data"))
 
     parser.add_argument("--context_length", type=int, default=None)
@@ -759,20 +770,14 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     set_seed(args.seed)
 
-    train_dataset = UCRClassificationDataset(
-        split="train",
-        EOS_TOKEN="<eos>",
-        dataset_name=args.dataset,
-        raw_data_path=args.data_path,
-    )
-    test_dataset = UCRClassificationDataset(
-        split="test",
-        EOS_TOKEN="<eos>",
-        dataset_name=args.dataset,
-        raw_data_path=args.data_path,
-    )
+    dataset_bundle = load_univariate_fewshot_bundle(args, eos_token="<eos>")
+    args.dataset_family = dataset_bundle.dataset_family
+    args.dataset = dataset_bundle.dataset_name
+    args.split_protocol = dataset_bundle.split_protocol
+    train_dataset = dataset_bundle.train_dataset
+    test_dataset = dataset_bundle.test_dataset
 
-    num_classes = UCRClassificationDataset.get_num_classes()
+    num_classes = dataset_bundle.num_classes
     label_to_indices = build_label_to_indices(train_dataset)
     test_label_to_indices = build_label_to_indices(test_dataset)
     if args.way is not None and args.way > num_classes:
@@ -781,10 +786,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     context_length = resolve_context_length(args, train_dataset, test_dataset)
 
     print("=" * 80)
-    print("TSLib UCR Few-shot Comparison")
+    print("TSLib Univariate Few-shot Comparison")
     print("=" * 80)
     print(f"time: {datetime.datetime.now()}")
+    print(f"dataset_family: {args.dataset_family}")
     print(f"dataset: {args.dataset}")
+    print(f"split_protocol: {args.split_protocol}")
     print(f"models: {requested_models}")
     print(f"protocol: {args.protocol}")
     print(f"way: {args.way if args.way is not None else 'all'}")

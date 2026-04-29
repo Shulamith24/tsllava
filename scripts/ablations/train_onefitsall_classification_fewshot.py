@@ -120,6 +120,7 @@ from fewshot_utils import (  # noqa: E402
     shot_to_name,
     write_json,
 )
+from ucr_fewshot_baseline_utils import load_univariate_arrays  # noqa: E402
 
 
 def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
@@ -140,7 +141,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
 
-    parser.add_argument("--dataset", type=str, default=None, help="UCR dataset name, e.g. AllGestureWiimoteX.")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name within the selected family.")
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
     parser.add_argument("--data_dir", type=str, default=None, help="Directory containing official TRAIN/TEST files.")
     parser.add_argument(
         "--data_path",
@@ -365,7 +379,56 @@ def build_simple_ucr_data(
     )
 
 
+def build_simple_array_data(
+    features: np.ndarray,
+    labels: np.ndarray,
+    *,
+    class_names: List[Any],
+) -> SimpleClassificationData:
+    sample_ids = np.arange(len(labels), dtype=np.int64)
+    repeated_ids = np.repeat(sample_ids, features.shape[1])
+    feature_df = pd.DataFrame(
+        {"dim_0": np.asarray(features, dtype=np.float32).reshape(-1)},
+        index=repeated_ids,
+    )
+    labels_df = pd.DataFrame(
+        {"label": np.asarray(labels, dtype=np.int64)},
+        index=sample_ids,
+        dtype=np.int64,
+    )
+    return SimpleClassificationData(
+        feature_df=feature_df,
+        labels_df=labels_df,
+        class_names=class_names,
+    )
+
+
 def load_raw_splits(config: Dict[str, Any], args: argparse.Namespace, dataset_name: str) -> tuple[Any, Any]:
+    if args.dataset_family != "ucr":
+        data_bundle = load_univariate_arrays(
+            dataset_name,
+            data_path=args.data_path,
+            normalize=False,
+            dataset_family=args.dataset_family,
+            split_protocol=args.split_protocol,
+        )
+        ordered_indices = sorted(data_bundle["index_to_label"].keys())
+        class_names = [data_bundle["index_to_label"][idx] for idx in ordered_indices]
+        config["dataset"] = str(data_bundle["dataset_name"])
+        config["data_dir"] = str(Path(args.data_path).resolve())
+        return (
+            build_simple_array_data(
+                data_bundle["train_features"],
+                data_bundle["train_labels"],
+                class_names=class_names,
+            ),
+            build_simple_array_data(
+                data_bundle["test_features"],
+                data_bundle["test_labels"],
+                class_names=class_names,
+            ),
+        )
+
     data_format = infer_data_format(args)
     if data_format == "ucr_tsv":
         dataset_dir = infer_ucr_dataset_dir(args, dataset_name)
@@ -768,7 +831,9 @@ def main() -> None:
     print("One-Fits-All: Few-shot Supervised Classification")
     print("=" * 80)
     print(f"time: {datetime.datetime.now()}")
+    print(f"dataset_family: {args.dataset_family}")
     print(f"dataset: {dataset_name}")
+    print(f"split_protocol: {args.split_protocol}")
     resolved_data_source = config.get("data_dir") or args.data_dir or args.data_path
     if resolved_data_source is not None:
         print(f"data_source: {Path(resolved_data_source).resolve()}")

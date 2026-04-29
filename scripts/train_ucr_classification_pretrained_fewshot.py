@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-M2: UCR single-dataset classification with pretrained SP models under a few-shot protocol.
+M2: Univariate classification with pretrained SP models under a few-shot protocol.
 
 This script aligns its protocol and training flow with Experiment A:
 - strict support-set sampling per shot/run
@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
+from sklearn.metrics import f1_score
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -69,7 +70,13 @@ from opentslm.model.class_token_rows import (
     save_class_token_rows_to_checkpoint,
 )
 from opentslm.model_config import ENCODER_OUTPUT_DIM, PATCH_SIZE
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
+from opentslm.time_series_datasets.classification_utils import (
+    class_token_to_index,
+    extract_class_token,
+)
+from opentslm.time_series_datasets.univariate_fewshot import (
+    load_univariate_fewshot_bundle,
+)
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
 
 ShotType = Union[int, Literal["full"]]
@@ -100,7 +107,7 @@ def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
 def parse_args(argv=None):
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
-        description="M2: few-shot UCR classification with pretrained SP models"
+        description="M2: few-shot univariate classification with pretrained SP models"
     )
 
     # Core protocol behavior
@@ -139,8 +146,21 @@ def parse_args(argv=None):
     )
 
     # Data
-    parser.add_argument("--dataset", type=str, default="CricketZ", help="UCR dataset name")
-    parser.add_argument("--data_path", type=str, default="./data", help="UCR data root")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name within the selected family")
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
+    parser.add_argument("--data_path", type=str, default="./data", help="Dataset root directory")
 
     # Model loading
     parser.add_argument(
@@ -608,6 +628,12 @@ def build_dataloader_kwargs(args) -> Dict[str, Any]:
 
 
 def build_label_to_indices(dataset: Dataset) -> Dict[int, List[int]]:
+    if hasattr(dataset, "get_int_labels"):
+        label_to_indices: Dict[int, List[int]] = defaultdict(list)
+        for idx, label in enumerate(dataset.get_int_labels()):
+            label_to_indices[int(label)].append(idx)
+        return dict(label_to_indices)
+
     label_to_indices: Dict[int, List[int]] = defaultdict(list)
     for idx in range(len(dataset)):
         label_to_indices[int(dataset[idx]["int_label"])].append(idx)
@@ -680,6 +706,16 @@ def filter_indices_by_class_ids(
     for class_id in class_ids:
         selected_indices.extend(label_to_indices.get(class_id, []))
     return sorted(selected_indices)
+
+
+def summarize_subset_class_counts(
+    label_to_indices: Dict[int, List[int]],
+    class_ids: List[int],
+) -> Dict[str, int]:
+    return {
+        str(class_id): len(label_to_indices.get(class_id, []))
+        for class_id in class_ids
+    }
 
 
 def broadcast_object_from_rank0(obj, world_size: int, rank: int):
@@ -1089,19 +1125,47 @@ def build_model(args, device: str, rank: int):
 
 
 def calculate_accuracy(predictions: List[str], labels: List[str]) -> float:
-    import re
-
     correct = 0
     for pred, label in zip(predictions, labels):
         pred_clean = pred.strip()
         label_clean = label.strip()
 
-        match = re.search(r"<c\d+>", pred_clean)
-        pred_token = match.group() if match else pred_clean
+        pred_token = extract_class_token(pred_clean) or pred_clean
         if pred_token == label_clean:
             correct += 1
 
     return correct / len(predictions) if predictions else 0.0
+
+
+def calculate_macro_f1(predictions: List[str], labels: List[str]) -> float:
+    if not predictions or not labels:
+        return 0.0
+
+    true_ids: List[int] = []
+    pred_ids: List[int] = []
+    for pred, label in zip(predictions, labels):
+        true_token = extract_class_token(label) or label.strip()
+        pred_token = extract_class_token(pred) or pred.strip()
+        true_id = class_token_to_index(true_token)
+        pred_id = class_token_to_index(pred_token)
+        if true_id is None:
+            continue
+        true_ids.append(int(true_id))
+        pred_ids.append(-1 if pred_id is None else int(pred_id))
+
+    if not true_ids:
+        return 0.0
+
+    label_space = sorted(set(true_ids))
+    return float(
+        f1_score(
+            true_ids,
+            pred_ids,
+            labels=label_space,
+            average="macro",
+            zero_division=0.0,
+        )
+    )
 
 
 def add_class_tokens_to_model(
@@ -1327,8 +1391,6 @@ def evaluate(
     desc: str = "Testing",
     rank: int = 0,
 ) -> Dict[str, Any]:
-    import re
-
     underlying_model = get_model(model)
     underlying_model.eval()
 
@@ -1362,8 +1424,7 @@ def evaluate(
             )
             predictions = []
             for pred in decoded_predictions:
-                match = re.search(r"<c\d+>", pred)
-                predictions.append(match.group() if match else pred.strip())
+                predictions.append(extract_class_token(pred) or pred.strip())
         else:
             decoded_predictions = underlying_model.generate(
                 batch,
@@ -1372,8 +1433,7 @@ def evaluate(
             )
             predictions = []
             for pred in decoded_predictions:
-                match = re.search(r"<c\d+>", pred)
-                predictions.append(match.group() if match else pred.strip())
+                predictions.append(extract_class_token(pred) or pred.strip())
 
         for sample, pred in zip(batch, predictions):
             label = sample["answer"].replace(underlying_model.get_eos_token(), "").strip()
@@ -1382,10 +1442,12 @@ def evaluate(
 
     avg_loss = total_loss / max(num_batches, 1)
     accuracy = calculate_accuracy(all_predictions, all_labels)
+    macro_f1 = calculate_macro_f1(all_predictions, all_labels)
 
     return {
         "loss": avg_loss,
         "accuracy": accuracy,
+        "macro_f1": macro_f1,
         "predictions": all_predictions,
         "labels": all_labels,
     }
@@ -1646,10 +1708,12 @@ def mean_std(values: List[float]) -> Tuple[float, float]:
 
 def aggregate_shot_results(shot: ShotType, run_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
     accs = [float(r["test_accuracy"]) for r in run_metrics]
+    macro_f1s = [float(r["test_macro_f1"]) for r in run_metrics]
     losses = [float(r["test_loss"]) for r in run_metrics]
     support_sizes = [int(r["support_size"]) for r in run_metrics]
 
     acc_mean, acc_std = mean_std(accs)
+    macro_f1_mean, macro_f1_std = mean_std(macro_f1s)
     loss_mean, loss_std = mean_std(losses)
     support_mean, support_std = mean_std([float(x) for x in support_sizes])
 
@@ -1658,6 +1722,8 @@ def aggregate_shot_results(shot: ShotType, run_metrics: List[Dict[str, Any]]) ->
         "num_runs": len(run_metrics),
         "accuracy_mean": acc_mean,
         "accuracy_std": acc_std,
+        "macro_f1_mean": macro_f1_mean,
+        "macro_f1_std": macro_f1_std,
         "loss_mean": loss_mean,
         "loss_std": loss_std,
         "support_size_mean": support_mean,
@@ -1673,6 +1739,8 @@ def save_shot_summary_csv(save_path: str, shot_summaries: List[Dict[str, Any]]):
         "num_runs",
         "accuracy_mean",
         "accuracy_std",
+        "macro_f1_mean",
+        "macro_f1_std",
         "loss_mean",
         "loss_std",
         "support_size_mean",
@@ -1756,6 +1824,8 @@ def run_single_experiment(
                 json.dump(
                     {
                         "dataset": args.dataset,
+                        "dataset_family": args.dataset_family,
+                        "split_protocol": args.split_protocol,
                         "way": support_info_rank0["way"],
                         "shot": shot_name,
                         "run_id": run_id,
@@ -1790,6 +1860,10 @@ def run_single_experiment(
         support_info["selected_class_ids"],
     )
     query_dataset = Subset(test_dataset, query_indices)
+    query_class_counts = summarize_subset_class_counts(
+        test_label_to_indices,
+        support_info["selected_class_ids"],
+    )
 
     train_batch_size, grad_acc_steps = compute_fewshot_train_hparams(
         args=args,
@@ -1927,6 +2001,8 @@ def run_single_experiment(
 
         run_metrics = {
             "dataset": args.dataset,
+            "dataset_family": args.dataset_family,
+            "split_protocol": args.split_protocol,
             "protocol": args.protocol,
             "tokenizer_training_mode": args.tokenizer_training_mode,
             "way": support_info["way"],
@@ -1939,6 +2015,8 @@ def run_single_experiment(
             "query_size": len(query_indices),
             "k_eff_per_class": support_info["k_eff_per_class"],
             "class_train_counts": support_info["class_train_counts"],
+            "support_class_counts": support_info["k_eff_per_class"],
+            "query_class_counts": query_class_counts,
             "classes_with_shortage": support_info["classes_with_shortage"],
             "any_shortage": support_info["any_shortage"],
             "phase1_epochs": phase1_epochs,
@@ -1950,6 +2028,7 @@ def run_single_experiment(
             "phase2_last_train_loss": phase2_stats["last_loss"],
             "test_loss": test_results["loss"],
             "test_accuracy": test_results["accuracy"],
+            "test_macro_f1": test_results["macro_f1"],
             "model_checkpoint": "phase2_last.pt",
         }
 
@@ -1961,6 +2040,7 @@ def run_single_experiment(
                 {
                     "predictions": test_results["predictions"],
                     "labels": test_results["labels"],
+                    "macro_f1": test_results["macro_f1"],
                 },
                 f,
                 indent=2,
@@ -1974,6 +2054,7 @@ def run_single_experiment(
 
         print(
             f"   result: test_acc={test_results['accuracy']:.4f}, "
+            f"test_macro_f1={test_results['macro_f1']:.4f}, "
             f"test_loss={test_results['loss']:.4f}"
         )
 
@@ -2016,26 +2097,19 @@ def main():
         set_seed(args.seed)
         warn_deprecated_newts_context_length(args, rank)
 
-        save_root = os.path.join(args.save_dir, args.dataset)
-
         eos_rank0 = resolve_dataset_eos_token(args) if rank == 0 else None
         dataset_eos = broadcast_object_from_rank0(eos_rank0, world_size, rank)
 
-        train_dataset = UCRClassificationDataset(
-            split="train",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
-        test_dataset = UCRClassificationDataset(
-            split="test",
-            EOS_TOKEN=dataset_eos,
-            dataset_name=args.dataset,
-            raw_data_path=args.data_path,
-        )
+        dataset_bundle = load_univariate_fewshot_bundle(args, eos_token=dataset_eos)
+        args.dataset_family = dataset_bundle.dataset_family
+        args.dataset = dataset_bundle.dataset_name
+        args.split_protocol = dataset_bundle.split_protocol
+        save_root = os.path.join(args.save_dir, args.dataset)
 
-        num_classes = UCRClassificationDataset.get_num_classes()
-        class_tokens = UCRClassificationDataset.get_class_tokens()
+        train_dataset = dataset_bundle.train_dataset
+        test_dataset = dataset_bundle.test_dataset
+        num_classes = dataset_bundle.num_classes
+        class_tokens = dataset_bundle.class_tokens
         label_to_indices = build_label_to_indices(train_dataset)
         test_label_to_indices = build_label_to_indices(test_dataset)
 
@@ -2048,10 +2122,12 @@ def main():
                 json.dump(vars(args), f, indent=2)
 
             print("=" * 80)
-            print("M2: Few-shot UCR Classification with Pretrained SP Models")
+            print("M2: Few-shot Univariate Classification with Pretrained SP Models")
             print("=" * 80)
             print(f"time: {datetime.datetime.now()}")
+            print(f"dataset_family: {args.dataset_family}")
             print(f"dataset: {args.dataset}")
+            print(f"split_protocol: {args.split_protocol}")
             print(f"protocol: {args.protocol}")
             print(f"way: {args.way if args.way is not None else 'all'}")
             print(f"shots: {[shot_to_name(s) for s in shots]}")
@@ -2123,7 +2199,8 @@ def main():
 
                 print(
                     f"[shot={shot_name}] "
-                    f"acc={shot_summary['accuracy_mean']:.4f}±{shot_summary['accuracy_std']:.4f}"
+                    f"acc={shot_summary['accuracy_mean']:.4f}±{shot_summary['accuracy_std']:.4f}, "
+                    f"macro_f1={shot_summary['macro_f1_mean']:.4f}±{shot_summary['macro_f1_std']:.4f}"
                 )
 
             if world_size > 1:
@@ -2132,6 +2209,8 @@ def main():
         if rank == 0:
             overall_summary = {
                 "dataset": args.dataset,
+                "dataset_family": args.dataset_family,
+                "split_protocol": args.split_protocol,
                 "protocol": args.protocol,
                 "way": args.way if args.way is not None else num_classes,
                 "num_classes": num_classes,

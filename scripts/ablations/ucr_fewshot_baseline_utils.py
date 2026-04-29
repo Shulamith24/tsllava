@@ -26,6 +26,16 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from fewshot_utils import write_json  # noqa: E402
+from opentslm.time_series_datasets.mitbih.mitbih_loader import (  # noqa: E402
+    load_mitbih_arrhythmia_splits,
+)
+from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (  # noqa: E402
+    load_sleepedf_classification_splits,
+)
+from opentslm.time_series_datasets.univariate_fewshot import (  # noqa: E402
+    resolve_univariate_dataset_name,
+    resolve_univariate_split_protocol,
+)
 
 
 def cli_flag_was_provided(argv: Optional[Sequence[str]], flag_name: str) -> bool:
@@ -159,6 +169,143 @@ def load_ucr_arrays(
         "series_length": int(train_features.shape[1]),
         "dataset_dir": dataset_dir,
     }
+
+
+def _extract_series_and_labels(rows: Sequence[Dict[str, Any]]) -> Tuple[np.ndarray, np.ndarray]:
+    features = np.stack(
+        [
+            np.asarray(row["time_series"], dtype=np.float32)
+            for row in rows
+        ],
+        axis=0,
+    )
+    labels = np.asarray([row["label"] for row in rows], dtype=object)
+    return features, labels
+
+
+def _load_mitbih_arrays(
+    dataset_name: str,
+    *,
+    data_path: str,
+    split_protocol: str,
+    normalize: bool,
+) -> Dict[str, Any]:
+    del dataset_name
+    train_rows, _val_rows, test_rows = load_mitbih_arrhythmia_splits(
+        raw_data_path=data_path,
+        split_protocol=split_protocol,
+    )
+    train_features, train_raw_labels = _extract_series_and_labels(train_rows)
+    test_features, test_raw_labels = _extract_series_and_labels(test_rows)
+    train_labels, test_labels, label_to_index, index_to_label = encode_labels(
+        train_raw_labels,
+        test_raw_labels,
+    )
+    train_features = maybe_normalize_series(train_features, normalize=normalize)
+    test_features = maybe_normalize_series(test_features, normalize=normalize)
+    return {
+        "train_features": train_features,
+        "test_features": test_features,
+        "train_labels": train_labels,
+        "test_labels": test_labels,
+        "label_to_index": label_to_index,
+        "index_to_label": index_to_label,
+        "series_length": int(train_features.shape[1]),
+    }
+
+
+def _load_sleepedf_arrays(
+    dataset_name: str,
+    *,
+    data_path: str,
+    split_protocol: str,
+    normalize: bool,
+) -> Dict[str, Any]:
+    del dataset_name
+    train_rows, _val_rows, test_rows = load_sleepedf_classification_splits(
+        raw_data_path=data_path,
+        split_protocol=split_protocol,
+        seed=42,
+    )
+
+    signal_cache: Dict[str, np.ndarray] = {}
+
+    def _slice_epoch(row: Dict[str, Any]) -> np.ndarray:
+        signal_path = str(row["signal_path"])
+        signal = signal_cache.get(signal_path)
+        if signal is None:
+            signal = np.load(signal_path, mmap_mode="r")
+            signal_cache[signal_path] = signal
+        start = int(row["start_sample"])
+        num_samples = int(row["num_samples"])
+        stop = start + num_samples
+        segment = np.asarray(signal[start:stop], dtype=np.float32)
+        if segment.shape[0] == num_samples:
+            return segment
+        padded = np.zeros((num_samples,), dtype=np.float32)
+        padded[: segment.shape[0]] = segment
+        return padded
+
+    train_features = np.stack([_slice_epoch(row) for row in train_rows], axis=0)
+    test_features = np.stack([_slice_epoch(row) for row in test_rows], axis=0)
+    train_raw_labels = np.asarray([row["label"] for row in train_rows], dtype=object)
+    test_raw_labels = np.asarray([row["label"] for row in test_rows], dtype=object)
+    train_labels, test_labels, label_to_index, index_to_label = encode_labels(
+        train_raw_labels,
+        test_raw_labels,
+    )
+    train_features = maybe_normalize_series(train_features, normalize=normalize)
+    test_features = maybe_normalize_series(test_features, normalize=normalize)
+    return {
+        "train_features": train_features,
+        "test_features": test_features,
+        "train_labels": train_labels,
+        "test_labels": test_labels,
+        "label_to_index": label_to_index,
+        "index_to_label": index_to_label,
+        "series_length": int(train_features.shape[1]),
+    }
+
+
+def load_univariate_arrays(
+    dataset_name: str | None,
+    *,
+    data_path: str,
+    normalize: bool,
+    dataset_family: str = "ucr",
+    split_protocol: str = "default",
+) -> Dict[str, Any]:
+    resolved_family = str(dataset_family).strip().lower()
+    resolved_name = resolve_univariate_dataset_name(resolved_family, dataset_name)
+    resolved_protocol = resolve_univariate_split_protocol(resolved_family, split_protocol)
+
+    if resolved_family == "ucr":
+        payload = load_ucr_arrays(
+            resolved_name,
+            data_path=data_path,
+            normalize=normalize,
+        )
+    elif resolved_family == "mitbih":
+        payload = _load_mitbih_arrays(
+            resolved_name,
+            data_path=data_path,
+            split_protocol=resolved_protocol,
+            normalize=normalize,
+        )
+    elif resolved_family == "sleepedf":
+        payload = _load_sleepedf_arrays(
+            resolved_name,
+            data_path=data_path,
+            split_protocol=resolved_protocol,
+            normalize=normalize,
+        )
+    else:
+        raise ValueError(f"Unsupported dataset_family: {dataset_family}")
+
+    payload["dataset_family"] = resolved_family
+    payload["dataset_name"] = resolved_name
+    payload["split_protocol"] = resolved_protocol
+    return payload
 
 
 def build_label_to_indices(labels: np.ndarray) -> Dict[int, List[int]]:

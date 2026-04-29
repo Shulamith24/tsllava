@@ -16,5 +16,6 @@ peft>=0.18.0
 requests>=2.32.5
 einops>=0.8.1
 wfdb>=4.3.0
+pyedflib>=0.1.38
 open-flamingo>=0.0.2
 -e .

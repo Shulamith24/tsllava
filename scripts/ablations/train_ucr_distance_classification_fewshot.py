@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Few-shot UCR classification with exact 1-NN distance baselines."""
+"""Few-shot univariate classification with exact 1-NN distance baselines."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from ucr_fewshot_baseline_utils import (  # noqa: E402
     DEFAULT_DATA_PATH,
     build_label_to_indices,
     cli_flag_was_provided,
-    load_ucr_arrays,
+    load_univariate_arrays,
     remap_labels_to_local,
     set_seed,
     write_support_info,
@@ -124,7 +124,7 @@ def predict_1nn(
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
-    parser = argparse.ArgumentParser(description="Few-shot UCR classification with exact 1-NN baselines")
+    parser = argparse.ArgumentParser(description="Few-shot univariate classification with exact 1-NN baselines")
 
     parser.add_argument("--metric", type=str, required=True, choices=["ed", "dtw"])
     parser.add_argument("--protocol", type=str, default="fewshot", choices=["fewshot"], help=argparse.SUPPRESS)
@@ -133,7 +133,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--fewshot_seed_base", type=int, default=3407)
 
-    parser.add_argument("--dataset", type=str, required=True, help="UCR dataset name, e.g. ECG200.")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="Univariate classification dataset family.",
+    )
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name within the selected family.")
+    parser.add_argument(
+        "--split_protocol",
+        type=str,
+        default="default",
+        help="Dataset-family-specific split protocol.",
+    )
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
     parser.add_argument(
         "--normalize",
@@ -291,7 +304,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     num_runs = max(1, args.num_runs)
 
     set_seed(args.seed)
-    data_bundle = load_ucr_arrays(args.dataset, data_path=args.data_path, normalize=bool(args.normalize))
+    data_bundle = load_univariate_arrays(
+        args.dataset,
+        data_path=args.data_path,
+        normalize=bool(args.normalize),
+        dataset_family=args.dataset_family,
+        split_protocol=args.split_protocol,
+    )
+    args.dataset_family = str(data_bundle["dataset_family"])
+    args.dataset = str(data_bundle["dataset_name"])
+    args.split_protocol = str(data_bundle["split_protocol"])
     train_features = data_bundle["train_features"]
     test_features = data_bundle["test_features"]
     train_labels = data_bundle["train_labels"]
@@ -315,15 +337,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "series_length": data_bundle["series_length"],
             "label_to_index": {str(label): index for label, index in data_bundle["label_to_index"].items()},
             "index_to_label": {str(index): label for index, label in index_to_label.items()},
-            "dataset_dir": str(data_bundle["dataset_dir"]),
+            "dataset_dir": str(data_bundle.get("dataset_dir", Path(args.data_path).resolve())),
         },
     )
 
     print("=" * 80)
-    print(f"1NN-{args.metric.upper()}: Few-shot UCR Classification")
+    print(f"1NN-{args.metric.upper()}: Few-shot Univariate Classification")
     print("=" * 80)
     print(f"time: {datetime.datetime.now()}")
+    print(f"dataset_family: {args.dataset_family}")
     print(f"dataset: {args.dataset}")
+    print(f"split_protocol: {args.split_protocol}")
     print(f"data_source: {Path(args.data_path).resolve()}")
     print(f"protocol: {args.protocol}")
     print(f"shots: {[shot_to_name(shot) for shot in shots]}")

@@ -43,6 +43,8 @@ def parse_wrapper_args(argv: Optional[List[str]] = None) -> Tuple[argparse.Names
         default=None,
         help="Path to a UCR dataset dir or a UCRArchive_2018 dir for ablation-friendly loading.",
     )
+    parser.add_argument("--dataset_family", type=str, default="ucr")
+    parser.add_argument("--split_protocol", type=str, default="default")
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
     parser.add_argument("--save_dir", type=str, default=None)
@@ -109,13 +111,19 @@ def build_forwarded_argv(
     remaining_argv: List[str],
 ) -> List[str]:
     protocol = parse_protocol_from_argv(remaining_argv)
-    effective_dataset, effective_data_path = resolve_ucr_source(
-        data_dir=wrapper_args.data_dir,
-        dataset=wrapper_args.dataset,
-        data_path=wrapper_args.data_path,
-    )
+    if str(wrapper_args.dataset_family).strip().lower() == "ucr":
+        effective_dataset, effective_data_path = resolve_ucr_source(
+            data_dir=wrapper_args.data_dir,
+            dataset=wrapper_args.dataset,
+            data_path=wrapper_args.data_path,
+        )
+    else:
+        effective_dataset = wrapper_args.dataset
+        effective_data_path = wrapper_args.data_path
 
     forwarded = list(remaining_argv)
+    forwarded.extend(["--dataset_family", wrapper_args.dataset_family])
+    forwarded.extend(["--split_protocol", wrapper_args.split_protocol])
     if effective_dataset is not None:
         forwarded.extend(["--dataset", effective_dataset])
     if effective_data_path is not None:

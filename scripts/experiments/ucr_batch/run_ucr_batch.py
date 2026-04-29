@@ -68,6 +68,11 @@ DDP_ENV_VARS = (
     "MASTER_PORT",
 )
 
+EXTERNAL_DATASETS = {
+    "mitbih": ["MITBIHArrhythmia"],
+    "sleepedf": ["SleepEDFCassette"],
+}
+
 
 @dataclass(frozen=True)
 class WorkerMessage:
@@ -136,6 +141,10 @@ def cli_option_value(argv: Sequence[str], flag_name: str) -> str | None:
         if token.startswith(f"{flag_name}="):
             return token.split("=", 1)[1]
     return None
+
+
+def resolve_dataset_family(forward_args: Sequence[str]) -> str:
+    return (cli_option_value(forward_args, "--dataset_family") or "ucr").strip().lower()
 
 
 def validate_forward_args(forward_args: Sequence[str], blocked_flags: Iterable[str]) -> None:
@@ -405,9 +414,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, forward_args = parse_args(argv)
     entry = get_entry(args.experiment, args.protocol)
     validate_forward_args(forward_args, entry.blocked_forward_args)
-
-    ucr_archive_dir = resolve_ucr_archive(args.data_path)
-    discovered = discover_datasets(ucr_archive_dir)
+    dataset_family = resolve_dataset_family(forward_args)
+    if dataset_family == "ucr":
+        ucr_archive_dir = resolve_ucr_archive(args.data_path)
+        discovered = discover_datasets(ucr_archive_dir)
+    elif dataset_family in EXTERNAL_DATASETS:
+        discovered = list(EXTERNAL_DATASETS[dataset_family])
+    else:
+        raise ValueError(
+            f"Unsupported --dataset_family for batch runner: {dataset_family}. "
+            f"Expected one of: ucr, {', '.join(sorted(EXTERNAL_DATASETS))}"
+        )
     selected_datasets = dedupe_preserve_order(
         filter_datasets(
             discovered,

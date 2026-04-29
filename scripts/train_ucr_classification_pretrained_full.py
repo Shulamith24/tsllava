@@ -72,7 +72,7 @@ from opentslm.model.class_token_rows import (
     sanitize_class_token_optimizer_state,
     save_class_token_rows_to_checkpoint,
 )
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
+from opentslm.time_series_datasets.univariate_fewshot import load_univariate_fewshot_bundle
 from opentslm.time_series_datasets.util import extend_time_series_to_match_patch_size_and_aggregate
 from opentslm.model_config import PATCH_SIZE, ENCODER_OUTPUT_DIM
 
@@ -100,7 +100,7 @@ def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:
 
 def parse_args(argv=None):
     provided_argv = list(argv) if argv is not None else sys.argv[1:]
-    parser = argparse.ArgumentParser(description="M2: UCR单数据集分类训练（基于Stage2预训练模型）")
+    parser = argparse.ArgumentParser(description="M2: 单变量数据集分类训练（基于Stage2预训练模型）")
 
     parser.add_argument("--gradient_checkpointing", action="store_true", help="启用梯度检查点")
     parser.add_argument("--freeze_encoder", action="store_true", help="冻结编码器参数")
@@ -112,8 +112,16 @@ def parse_args(argv=None):
         help="Dual-branch checkpoint runtime masking mode.",
     )
 
-    parser.add_argument("--dataset", type=str, default="CricketZ", help="UCR数据集名称")
-    parser.add_argument("--data_path", type=str, default="./data", help="UCR数据根目录")
+    parser.add_argument(
+        "--dataset_family",
+        type=str,
+        default="ucr",
+        choices=["ucr", "mitbih", "sleepedf"],
+        help="单变量分类数据集族",
+    )
+    parser.add_argument("--dataset", type=str, default=None, help="数据集名称")
+    parser.add_argument("--split_protocol", type=str, default="default", help="数据集划分协议")
+    parser.add_argument("--data_path", type=str, default="./data", help="数据根目录")
 
     parser.add_argument(
         "--pretrained_model",
@@ -1000,27 +1008,13 @@ class IndexedDataset(torch.utils.data.Dataset):
 
 def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0):
     """创建数据加载器"""
-    # 创建数据集
-    train_dataset = UCRClassificationDataset(
-        split="train",
-        EOS_TOKEN=eos_token,
-        dataset_name=args.dataset,
-        raw_data_path=args.data_path,
-    )
-    
-    val_dataset = UCRClassificationDataset(
-        split="validation",
-        EOS_TOKEN=eos_token,
-        dataset_name=args.dataset,
-        raw_data_path=args.data_path,
-    )
-    
-    test_dataset = UCRClassificationDataset(
-        split="test",
-        EOS_TOKEN=eos_token,
-        dataset_name=args.dataset,
-        raw_data_path=args.data_path,
-    )
+    dataset_bundle = load_univariate_fewshot_bundle(args, eos_token=eos_token)
+    args.dataset_family = dataset_bundle.dataset_family
+    args.dataset = dataset_bundle.dataset_name
+    args.split_protocol = dataset_bundle.split_protocol
+    train_dataset = dataset_bundle.train_dataset
+    val_dataset = dataset_bundle.val_dataset
+    test_dataset = dataset_bundle.test_dataset
     
     # 用IndexedDataset包装评估数据集，为每个样本添加索引
     indexed_val_dataset = IndexedDataset(val_dataset)
@@ -1085,6 +1079,7 @@ def create_data_loaders(args, eos_token: str, world_size: int = 1, rank: int = 0
         len(val_dataset),
         len(test_dataset),
         train_dataset,
+        dataset_bundle,
     )
 
 
@@ -1420,10 +1415,12 @@ def main():
             val_size,
             test_size,
             train_dataset,
+            dataset_bundle,
         ) = create_data_loaders(args, dataset_eos, world_size, rank)
 
         save_dir = os.path.join(args.save_dir, args.dataset)
-        num_classes = UCRClassificationDataset.get_num_classes()
+        num_classes = dataset_bundle.num_classes
+        class_tokens = dataset_bundle.class_tokens
 
         if rank == 0:
             os.makedirs(save_dir, exist_ok=True)
@@ -1431,10 +1428,12 @@ def main():
                 json.dump(vars(args), f, indent=2)
 
             print("=" * 60)
-            print("M2: UCR单数据集分类训练（基于Stage2预训练模型）")
+            print("M2: 单变量分类训练（基于Stage2预训练模型）")
             print("=" * 60)
             print(f"时间: {datetime.datetime.now()}")
+            print(f"dataset_family: {args.dataset_family}")
             print(f"数据集: {args.dataset}")
+            print(f"split_protocol: {args.split_protocol}")
             print(f"预训练模型: {args.pretrained_model}")
             print(f"本地checkpoint: {args.local_checkpoint}")
             print(f"编码器类型: {args.encoder_type}")
@@ -1477,7 +1476,7 @@ def main():
         underlying_model = get_model(model)
         class_token_ids = [
             underlying_model.tokenizer.convert_tokens_to_ids(token)
-            for token in UCRClassificationDataset.get_class_tokens()
+            for token in class_tokens
         ]
 
         if rank == 0:
