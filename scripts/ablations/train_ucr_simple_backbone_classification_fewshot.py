@@ -541,6 +541,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     save_root = Path(args.save_dir) / args.dataset
     save_root.mkdir(parents=True, exist_ok=True)
+    dataset_dir = data_bundle.get("dataset_dir", Path(args.data_path).resolve())
     write_json(
         save_root / "config.json",
         {
@@ -559,7 +560,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             },
             "label_to_index": {str(label): index for label, index in data_bundle["label_to_index"].items()},
             "index_to_label": {str(index): label for index, label in index_to_label.items()},
-            "dataset_dir": str(data_bundle["dataset_dir"]),
+            "dataset_dir": str(dataset_dir),
         },
     )
 

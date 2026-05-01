@@ -27,6 +27,7 @@ import json
 import math
 import os
 import random
+import shutil
 import statistics
 import sys
 from collections import defaultdict
@@ -332,6 +333,14 @@ def parse_args(argv=None):
         "--cleanup_checkpoints",
         action="store_true",
         help="每个 few-shot run 结束并写出结果后删除 phase checkpoint 以节省磁盘空间",
+    )
+    parser.add_argument(
+        "--skip_phase_checkpoints",
+        action="store_true",
+        help=(
+            "Do not write phase1/phase2 checkpoint .pt files. "
+            "The final in-memory model is evaluated directly. Incompatible with --resume."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -793,6 +802,8 @@ def validate_args(args):
 
     if args.pretrained_model and getattr(args, "encoder_type_explicit", False):
         raise ValueError("--pretrained_model and --encoder_type cannot be specified together")
+    if args.resume and args.skip_phase_checkpoints:
+        raise ValueError("--resume cannot be used with --skip_phase_checkpoints")
 
     encoder_type = getattr(args, "encoder_type", None)
     if encoder_type is None:
@@ -1492,7 +1503,43 @@ def save_checkpoint(
     )
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save(checkpoint, save_path)
+    try:
+        torch.save(checkpoint, save_path)
+    except (OSError, RuntimeError) as exc:
+        message = str(exc)
+        is_write_failure = (
+            "PytorchStreamWriter failed writing file" in message
+            or "unexpected pos" in message
+            or "No space left on device" in message
+        )
+        partial_size = os.path.getsize(save_path) if os.path.exists(save_path) else 0
+        try:
+            free_bytes = shutil.disk_usage(os.path.dirname(save_path)).free
+        except OSError:
+            free_bytes = None
+
+        if is_write_failure and os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+
+        if is_write_failure:
+            free_text = "unknown" if free_bytes is None else f"{free_bytes / (1024 ** 3):.2f} GiB"
+            partial_text = (
+                f"{partial_size / (1024 ** 2):.2f} MiB"
+                if partial_size > 0
+                else "0 MiB"
+            )
+            raise RuntimeError(
+                "Checkpoint save failed while writing "
+                f"{save_path}. This usually means the destination disk is full. "
+                f"Free space before the failure: {free_text}; partial checkpoint size: {partial_text}. "
+                "The incomplete checkpoint file has been removed when possible. "
+                "If you only need evaluation metrics, rerun with --skip_phase_checkpoints."
+            ) from exc
+
+        raise
 
 
 def load_checkpoint(
@@ -1778,6 +1825,7 @@ def run_single_experiment(
     support_info_path = os.path.join(run_dir, "fewshot_indices.json")
     phase1_ckpt_path = os.path.join(run_dir, "phase1_last.pt")
     phase2_ckpt_path = os.path.join(run_dir, "phase2_last.pt")
+    save_phase_checkpoints = not args.skip_phase_checkpoints
 
     if rank == 0:
         os.makedirs(run_dir, exist_ok=True)
@@ -1943,6 +1991,8 @@ def run_single_experiment(
             f"   phase split: phase1={phase1_epochs} (warm-up), "
             f"phase2={phase2_epochs} (joint)"
         )
+        if not save_phase_checkpoints:
+            print("   checkpointing: disabled (--skip_phase_checkpoints); evaluation will use in-memory weights")
         if args.model_select_metric != "last":
             print("   note: model_select_metric is forced by design to phase2 last checkpoint.")
 
@@ -1958,7 +2008,7 @@ def run_single_experiment(
         epoch_offset=0,
         rank=rank,
         device=device,
-        ckpt_path=phase1_ckpt_path,
+        ckpt_path=phase1_ckpt_path if save_phase_checkpoints else None,
         resume=args.resume,
     )
 
@@ -1974,7 +2024,7 @@ def run_single_experiment(
         epoch_offset=phase1_epochs,
         rank=rank,
         device=device,
-        ckpt_path=phase2_ckpt_path,
+        ckpt_path=phase2_ckpt_path if save_phase_checkpoints else None,
         resume=args.resume,
     )
 
@@ -1983,12 +2033,13 @@ def run_single_experiment(
 
     run_metrics = None
     if rank == 0:
-        load_checkpoint(
-            model=model,
-            checkpoint_path=phase2_ckpt_path,
-            device=device,
-            tokenizer_training_mode=args.tokenizer_training_mode,
-        )
+        if save_phase_checkpoints:
+            load_checkpoint(
+                model=model,
+                checkpoint_path=phase2_ckpt_path,
+                device=device,
+                tokenizer_training_mode=args.tokenizer_training_mode,
+            )
         test_results = evaluate(
             model=model,
             data_loader=test_loader,
@@ -2029,7 +2080,7 @@ def run_single_experiment(
             "test_loss": test_results["loss"],
             "test_accuracy": test_results["accuracy"],
             "test_macro_f1": test_results["macro_f1"],
-            "model_checkpoint": "phase2_last.pt",
+            "model_checkpoint": "phase2_last.pt" if save_phase_checkpoints else None,
         }
 
         with open(run_metrics_path, "w") as f:
@@ -2046,7 +2097,7 @@ def run_single_experiment(
                 indent=2,
             )
 
-        if args.cleanup_checkpoints:
+        if save_phase_checkpoints and args.cleanup_checkpoints:
             cleanup_checkpoint_files(
                 [phase1_ckpt_path, phase2_ckpt_path],
                 rank=rank,

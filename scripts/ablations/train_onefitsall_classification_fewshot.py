@@ -39,7 +39,23 @@ ONEFITSALL_SRC = PROJECT_ROOT / "temp" / "NeurIPS2023-One-Fits-All" / "Classific
 DEFAULT_DATA_PATH = str(PROJECT_ROOT / "data")
 DEFAULT_FEWSHOT_SAVE_DIR = "results/ablations/onefitsall_fewshot"
 DEFAULT_FULL_SAVE_DIR = "results/ablations/onefitsall_full"
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from opentslm.time_series_datasets.ucr.ucr_loader import load_ucr_dataset  # noqa: E402
+
+from fewshot_utils import (  # noqa: E402
+    ShotType,
+    aggregate_shot_results,
+    build_label_to_indices,
+    filter_indices_by_class_ids,
+    parse_shots,
+    sample_support_info,
+    save_shot_summary_csv,
+    shot_to_name,
+    write_json,
+)
+from ucr_fewshot_baseline_utils import load_univariate_arrays  # noqa: E402
 
 
 def bootstrap_sktime_compat() -> None:
@@ -107,20 +123,6 @@ from models.loss import get_loss_module  # type: ignore  # noqa: E402
 from optimizers import get_optimizer  # type: ignore  # noqa: E402
 from running import SupervisedRunner  # type: ignore  # noqa: E402
 from utils import utils as onefitsall_utils  # type: ignore  # noqa: E402
-from opentslm.time_series_datasets.ucr.ucr_loader import load_ucr_dataset  # noqa: E402
-
-from fewshot_utils import (  # noqa: E402
-    ShotType,
-    aggregate_shot_results,
-    build_label_to_indices,
-    filter_indices_by_class_ids,
-    parse_shots,
-    sample_support_info,
-    save_shot_summary_csv,
-    shot_to_name,
-    write_json,
-)
-from ucr_fewshot_baseline_utils import load_univariate_arrays  # noqa: E402
 
 
 def cli_flag_was_provided(argv: Optional[List[str]], flag_name: str) -> bool:

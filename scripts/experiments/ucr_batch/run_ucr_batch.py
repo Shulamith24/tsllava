@@ -318,6 +318,41 @@ def run_dataset(command: Sequence[str], log_path: Path, env: dict[str, str] | No
     return completed.returncode
 
 
+def describe_lock_owner(lock_path: Path) -> str | None:
+    try:
+        raw_pid = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw_pid:
+        return None
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        return f"lock file contains non-numeric owner marker {raw_pid!r}"
+
+    status_path = Path("/proc") / str(pid) / "status"
+    if not status_path.is_file():
+        return f"lock file recorded pid={pid}"
+
+    name = None
+    state = None
+    try:
+        for line in status_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("State:"):
+                state = line.split(":", 1)[1].strip()
+    except OSError:
+        return f"lock file recorded pid={pid}"
+
+    details = [f"pid={pid}"]
+    if name:
+        details.append(f"name={name}")
+    if state:
+        details.append(f"state={state}")
+    return ", ".join(details)
+
+
 @contextmanager
 def acquire_job_lock(job_root: Path):
     job_root.mkdir(parents=True, exist_ok=True)
@@ -326,8 +361,10 @@ def acquire_job_lock(job_root: Path):
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
+            owner = describe_lock_owner(lock_path)
+            suffix = f" ({owner})" if owner else ""
             raise RuntimeError(
-                f"Another batch run is already using job-name '{job_root.name}': {job_root}"
+                f"Another batch run is already using job-name '{job_root.name}': {job_root}{suffix}"
             ) from exc
         lock_file.seek(0)
         lock_file.truncate()

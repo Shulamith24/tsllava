@@ -11,6 +11,7 @@ from opentslm.time_series_datasets.mitbih.mitbih_loader import (
     map_mitbih_symbol_to_aami,
 )
 from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (
+    _normalize_sleepedf_channel_label,
     expand_sleep_stage_annotations,
     extract_sleepedf_subject_id,
     normalize_sleep_stage,
@@ -75,6 +76,11 @@ class ExternalUnivariateDatasetHelpersTest(unittest.TestCase):
         self.assertEqual([row["label"] for row in rows], ["N2", "N2", "REM"])
         self.assertEqual([row["start_sample"] for row in rows], [0, 3000, 12000])
         self.assertTrue(all(row["num_samples"] == 3000 for row in rows))
+
+    def test_sleepedf_channel_normalization_handles_eeg_prefix(self) -> None:
+        self.assertEqual(_normalize_sleepedf_channel_label("Fpz-Cz"), "fpz-cz")
+        self.assertEqual(_normalize_sleepedf_channel_label("EEG Fpz-Cz"), "fpz-cz")
+        self.assertEqual(_normalize_sleepedf_channel_label(" EEG   Fpz - Cz "), "fpz-cz")
 
     def test_sleepedf_subject_split_keeps_groups_together(self) -> None:
         subject_ids = [

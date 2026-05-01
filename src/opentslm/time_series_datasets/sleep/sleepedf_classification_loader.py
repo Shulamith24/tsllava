@@ -247,17 +247,24 @@ def discover_sleepedf_cassette_pairs(cassette_dir: str) -> list[tuple[str, str]]
     return pairs
 
 
+def _normalize_sleepedf_channel_label(label: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(label).strip().lower())
+    normalized = re.sub(r"\s*-\s*", "-", normalized)
+    normalized = re.sub(r"^(eeg)\s+", "", normalized)
+    return normalized
+
+
 def _load_sleepedf_signal_channel(psg_path: str, *, channel: str) -> tuple[np.ndarray, float]:
     pyedflib = _require_pyedflib()
     with pyedflib.EdfReader(psg_path) as reader:
         signal_labels = [str(label).strip() for label in reader.getSignalLabels()]
-        lowered = [label.lower() for label in signal_labels]
-        target = channel.strip().lower()
-        if target not in lowered:
+        normalized_labels = [_normalize_sleepedf_channel_label(label) for label in signal_labels]
+        target = _normalize_sleepedf_channel_label(channel)
+        if target not in normalized_labels:
             raise ValueError(
                 f"Channel {channel!r} not found in {psg_path}. Available labels: {signal_labels}"
             )
-        signal_index = lowered.index(target)
+        signal_index = normalized_labels.index(target)
         signal = np.asarray(reader.readSignal(signal_index), dtype=np.float32)
         sample_rate = float(reader.samplefrequency(signal_index))
     signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)

@@ -157,6 +157,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--resume", action="store_true", help="Reuse completed run outputs when available.")
+    parser.add_argument(
+        "--cleanup_checkpoints",
+        action="store_true",
+        help="Accepted for batch-runner compatibility; this baseline does not write checkpoints.",
+    )
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args(argv)
