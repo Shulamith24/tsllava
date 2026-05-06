@@ -71,6 +71,8 @@ DDP_ENV_VARS = (
 EXTERNAL_DATASETS = {
     "mitbih": ["MITBIHArrhythmia"],
     "sleepedf": ["SleepEDFCassette"],
+    "cinc2017af": ["CinC2017AF"],
+    "cinc2016heart": ["CinC2016HeartSound"],
 }
 
 
@@ -229,15 +231,29 @@ def build_batch_config(args, entry, resolved_data_path: Path, forward_args: Sequ
     }
 
 
+RUNTIME_BATCH_CONFIG_KEYS = {"launcher", "gpu_ids", "worker_count"}
+
+
+def semantic_batch_config(config_payload: dict) -> dict:
+    return {
+        key: value
+        for key, value in config_payload.items()
+        if key not in RUNTIME_BATCH_CONFIG_KEYS
+    }
+
+
 def ensure_batch_config(config_path: Path, config_payload: dict) -> None:
     if config_path.exists():
         with open(config_path, "r", encoding="utf-8") as f:
             existing = json.load(f)
-        if existing != config_payload:
+        if semantic_batch_config(existing) != semantic_batch_config(config_payload):
             raise ValueError(
                 f"Existing batch config at {config_path} does not match this run. "
                 "Use a new --job-name for a different experiment configuration."
             )
+        if existing != config_payload:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_payload, f, indent=2)
         return
 
     config_path.parent.mkdir(parents=True, exist_ok=True)

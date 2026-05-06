@@ -176,7 +176,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name within the selected family.")
@@ -205,7 +205,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Apply per-sample z-normalization before training and evaluation.",
     )
 
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--rho", type=float, default=1e-1)
     parser.add_argument("--batch_size", type=int, default=128)

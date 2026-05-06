@@ -1,0 +1,17 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Compact efficiency comparison under the 10-shot UCR protocol. Runtime and memory are measured on the representative UCR runtime subset. Total parameters count the deployed model; updated parameters count downstream-adapted parameters only.}
+\label{tab:efficiency-compact}
+\begin{tabular}{lrrrr}
+\toprule
+Model & Total params & Updated params & Peak GB & Infer ms/ex. \\
+\midrule
+ChronoMorph & 1.28B & 12.3M & 13.75 & 156.85 \\
+COSCO-ResNet & 662.1K & 662.1K & 0.58 & 0.25 \\
+ResNet & 629.1K & 629.1K & 0.33 & 0.26 \\
+PatchTST & 665.4K & 598.3K & 1.54 & 0.75 \\
+GPT4TS & 82.2M & 1.1M & 0.56 & 0.86 \\
+\bottomrule
+\end{tabular}
+\end{table}

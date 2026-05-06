@@ -48,7 +48,7 @@ from opentslm.model.PatchTSTClassifier import (  # noqa: E402
 from opentslm.time_series_datasets.univariate_fewshot import load_univariate_fewshot_bundle  # noqa: E402
 
 ShotType = Union[int, Literal["full"]]
-STRICT_FEWSHOT_EPOCHS = 100
+STRICT_FEWSHOT_EPOCHS = 60
 DEFAULT_FEWSHOT_SAVE_DIR = "results/patchtst_ucr_fewshot"
 DEFAULT_FULL_SAVE_DIR = "results/patchtst_ucr_full"
 
@@ -79,7 +79,7 @@ def parse_args(argv=None):
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, default=None)

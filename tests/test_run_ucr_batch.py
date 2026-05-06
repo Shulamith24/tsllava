@@ -239,6 +239,46 @@ class UCRBatchRunnerTest(unittest.TestCase):
                 self.assertIsNone(run_payload["env"]["MASTER_ADDR"])
                 self.assertIsNone(run_payload["env"]["MASTER_PORT"])
 
+    def test_existing_batch_config_allows_runtime_gpu_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _write_ucr_archive(tmp_path, ["Alpha"])
+            trainer = tmp_path / "stub_trainer.py"
+            _write_stub_trainer(trainer)
+            entry = self._make_entry(trainer)
+
+            base_args = [
+                "--experiment",
+                "demo_exp",
+                "--protocol",
+                "fewshot",
+                "--job-name",
+                "same_semantics_job",
+                "--data-path",
+                str(archive.parent),
+                "--datasets",
+                "Alpha",
+                "--shots",
+                "1",
+            ]
+
+            with self._patch_runner(tmp_path, entry):
+                self.assertEqual(run_ucr_batch_main([*base_args, "--gpu-ids", "1", "--dry-run"]), 0)
+                self.assertEqual(run_ucr_batch_main([*base_args, "--gpu-ids", "2"]), 0)
+
+            config_path = (
+                tmp_path
+                / "results"
+                / "ucr_batches"
+                / "demo_exp"
+                / "fewshot"
+                / "same_semantics_job"
+                / "batch_config.json"
+            )
+            with open(config_path, "r", encoding="utf-8") as handle:
+                batch_config = json.load(handle)
+            self.assertEqual(batch_config["gpu_ids"], ["2"])
+
     def test_resume_skips_completed_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -366,6 +406,43 @@ class UCRBatchRunnerTest(unittest.TestCase):
             self.assertEqual(run_payload["dataset"], "MITBIHArrhythmia")
             self.assertIn("--dataset_family", run_payload["argv"])
             self.assertIn("mitbih", run_payload["argv"])
+
+    def test_new_external_dataset_families_are_registered(self) -> None:
+        families = {
+            "cinc2017af": "CinC2017AF",
+            "cinc2016heart": "CinC2016HeartSound",
+        }
+        for family, dataset_name in families.items():
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                trainer = tmp_path / "stub_trainer.py"
+                _write_stub_trainer(trainer)
+                entry = self._make_entry(trainer)
+
+                args = [
+                    "--experiment",
+                    "demo_exp",
+                    "--protocol",
+                    "fewshot",
+                    "--job-name",
+                    f"{family}_job",
+                    "--data-path",
+                    str(tmp_path / "data"),
+                    "--shots",
+                    "1",
+                    "--dataset_family",
+                    family,
+                ]
+
+                with self._patch_runner(tmp_path, entry):
+                    self.assertEqual(run_ucr_batch_main(args), 0)
+
+                job_root = tmp_path / "results" / "ucr_batches" / "demo_exp" / "fewshot" / f"{family}_job"
+                rows = _read_results(job_root / "results.txt")
+                self.assertEqual(
+                    [(row["dataset"], row["shot"], row["status"]) for row in rows],
+                    [(dataset_name, "1", "success")],
+                )
 
     def test_job_lock_blocks_second_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

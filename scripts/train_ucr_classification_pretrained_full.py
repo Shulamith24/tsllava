@@ -116,7 +116,7 @@ def parse_args(argv=None):
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="单变量分类数据集族",
     )
     parser.add_argument("--dataset", type=str, default=None, help="数据集名称")

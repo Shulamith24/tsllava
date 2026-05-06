@@ -32,6 +32,12 @@ from opentslm.time_series_datasets.mitbih.mitbih_loader import (  # noqa: E402
 from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (  # noqa: E402
     load_sleepedf_classification_splits,
 )
+from opentslm.time_series_datasets.cinc2017af.cinc2017af_loader import (  # noqa: E402
+    load_cinc2017af_splits,
+)
+from opentslm.time_series_datasets.heart_sound.heart_sound_loader import (  # noqa: E402
+    load_heart_sound_splits,
+)
 from opentslm.time_series_datasets.univariate_fewshot import (  # noqa: E402
     resolve_univariate_dataset_name,
     resolve_univariate_split_protocol,
@@ -267,6 +273,39 @@ def _load_sleepedf_arrays(
     }
 
 
+def _load_row_time_series_arrays(
+    rows_loader,
+    dataset_name: str,
+    *,
+    data_path: str,
+    split_protocol: str,
+    normalize: bool,
+) -> Dict[str, Any]:
+    del dataset_name
+    train_rows, _val_rows, test_rows = rows_loader(
+        raw_data_path=data_path,
+        split_protocol=split_protocol,
+        seed=42,
+    )
+    train_features, train_raw_labels = _extract_series_and_labels(train_rows)
+    test_features, test_raw_labels = _extract_series_and_labels(test_rows)
+    train_labels, test_labels, label_to_index, index_to_label = encode_labels(
+        train_raw_labels,
+        test_raw_labels,
+    )
+    train_features = maybe_normalize_series(train_features, normalize=normalize)
+    test_features = maybe_normalize_series(test_features, normalize=normalize)
+    return {
+        "train_features": train_features,
+        "test_features": test_features,
+        "train_labels": train_labels,
+        "test_labels": test_labels,
+        "label_to_index": label_to_index,
+        "index_to_label": index_to_label,
+        "series_length": int(train_features.shape[1]),
+    }
+
+
 def load_univariate_arrays(
     dataset_name: str | None,
     *,
@@ -294,6 +333,22 @@ def load_univariate_arrays(
         )
     elif resolved_family == "sleepedf":
         payload = _load_sleepedf_arrays(
+            resolved_name,
+            data_path=data_path,
+            split_protocol=resolved_protocol,
+            normalize=normalize,
+        )
+    elif resolved_family == "cinc2017af":
+        payload = _load_row_time_series_arrays(
+            load_cinc2017af_splits,
+            resolved_name,
+            data_path=data_path,
+            split_protocol=resolved_protocol,
+            normalize=normalize,
+        )
+    elif resolved_family == "cinc2016heart":
+        payload = _load_row_time_series_arrays(
+            load_heart_sound_splits,
             resolved_name,
             data_path=data_path,
             split_protocol=resolved_protocol,

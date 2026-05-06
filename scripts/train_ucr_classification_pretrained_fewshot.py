@@ -38,6 +38,7 @@ import numpy as np
 from sklearn.metrics import f1_score
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
@@ -151,7 +152,7 @@ def parse_args(argv=None):
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name within the selected family")
@@ -162,6 +163,79 @@ def parse_args(argv=None):
         help="Dataset-family-specific split protocol.",
     )
     parser.add_argument("--data_path", type=str, default="./data", help="Dataset root directory")
+    parser.add_argument(
+        "--label_interface",
+        type=str,
+        default="anonymous",
+        choices=["anonymous", "semantic"],
+        help="Use anonymous class tokens or natural-language label verbalizers.",
+    )
+    parser.add_argument(
+        "--verbalizer_set",
+        type=str,
+        default="canonical",
+        choices=["canonical"],
+        help="Label verbalizer set used when --label_interface=semantic.",
+    )
+    parser.add_argument(
+        "--verbalizer_mode",
+        type=str,
+        default="multi",
+        choices=["canonical", "multi"],
+        help="Use one canonical label phrase or a multi-verbalizer label-card prototype.",
+    )
+    parser.add_argument(
+        "--semantic_target_mode",
+        type=str,
+        default="class_token",
+        choices=["class_token", "phrase"],
+        help=(
+            "In semantic label mode, train single class tokens by default; "
+            "use 'phrase' only for the legacy pure phrase-likelihood diagnostic."
+        ),
+    )
+    parser.add_argument(
+        "--class_token_init",
+        type=str,
+        default="random",
+        choices=["random", "semantic"],
+        help="Initialize class-token rows randomly or from label-verbalizer prototypes.",
+    )
+    parser.add_argument(
+        "--label_proto_source",
+        type=str,
+        default="token_mean",
+        choices=["token_mean", "contextual_lm", "sentence_encoder"],
+        help="Prototype source for semantic class-token priors. Only token_mean is implemented.",
+    )
+    parser.add_argument(
+        "--semantic_row_reg_weight",
+        type=float,
+        default=None,
+        help=(
+            "Weight for class-token row-to-label-prototype regularization. "
+            "Defaults to 0.01 for semantic class-token initialization and 0 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--semantic_row_reg_type",
+        type=str,
+        default="cosine",
+        choices=["cosine", "l2"],
+        help="Distance used by semantic row regularization.",
+    )
+    parser.add_argument(
+        "--semantic_decision_reg_weight",
+        type=float,
+        default=0.0,
+        help="Optional decision-state-to-label-prototype contrastive regularization weight.",
+    )
+    parser.add_argument(
+        "--semantic_decision_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for optional decision-state semantic contrastive regularization.",
+    )
 
     # Model loading
     parser.add_argument(
@@ -270,6 +344,30 @@ def parse_args(argv=None):
     # Optimization
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument(
+        "--eval_max_samples_per_class",
+        type=int,
+        default=0,
+        help=(
+            "Pilot-mode evaluation cap: sample at most this many TEST examples per selected class. "
+            "0 keeps the full query set."
+        ),
+    )
+    parser.add_argument(
+        "--eval_max_total_samples",
+        type=int,
+        default=0,
+        help=(
+            "Pilot-mode evaluation cap over the whole query set after per-class capping. "
+            "0 keeps all selected query examples."
+        ),
+    )
+    parser.add_argument(
+        "--eval_subset_seed_offset",
+        type=int,
+        default=91000,
+        help="Seed offset used for deterministic pilot evaluation subset sampling.",
+    )
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--lr_encoder", type=float, default=2e-4)
     parser.add_argument("--lr_projector", type=float, default=1e-4)
@@ -308,6 +406,48 @@ def parse_args(argv=None):
 
     # Generation / eval
     parser.add_argument("--max_new_tokens", type=int, default=2, help="Class token + EOS")
+    parser.add_argument(
+        "--eval_decode_mode",
+        type=str,
+        default="generate",
+        choices=["generate", "logits", "phrase_likelihood"],
+        help=(
+            "Evaluation prediction mode. 'generate' preserves the legacy constrained "
+            "decoding path; 'logits' scores class tokens with one forward pass; "
+            "'phrase_likelihood' scores semantic label verbalizers."
+        ),
+    )
+    parser.add_argument(
+        "--semantic_score_mode",
+        type=str,
+        default="calibrated",
+        choices=["raw", "calibrated", "zero_cal", "support_cal"],
+        help="Semantic phrase likelihood scoring mode.",
+    )
+    parser.add_argument(
+        "--phrase_diag_score",
+        type=str,
+        default="raw",
+        choices=["raw", "zero_cal", "support_cal"],
+        help="Phrase-likelihood diagnostic calibration mode.",
+    )
+    parser.add_argument(
+        "--phrase_diag_use_eos",
+        action="store_true",
+        help="Include EOS in phrase diagnostic scoring (disabled by default).",
+    )
+    parser.add_argument(
+        "--label_shuffle_control",
+        action="store_true",
+        help="Shuffle phrase diagnostic label-to-class mapping as a control.",
+    )
+    parser.add_argument(
+        "--prompt_label_order",
+        type=str,
+        default="fixed",
+        choices=["fixed", "random"],
+        help="Prompt label-card order. Random mode is reserved for diagnostic runs.",
+    )
     parser.add_argument(
         "--disable_constrained_decoding",
         action="store_true",
@@ -359,6 +499,24 @@ def parse_args(argv=None):
     args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
     args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
     args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
+    args.eval_decode_mode_explicit = cli_flag_was_provided(provided_argv, "--eval_decode_mode")
+    args.phrase_diag_score_explicit = cli_flag_was_provided(provided_argv, "--phrase_diag_score")
+    args.semantic_row_reg_weight_explicit = cli_flag_was_provided(
+        provided_argv,
+        "--semantic_row_reg_weight",
+    )
+    if args.label_interface == "semantic" and not args.eval_decode_mode_explicit:
+        args.eval_decode_mode = "logits" if args.semantic_target_mode == "class_token" else "phrase_likelihood"
+    if args.semantic_row_reg_weight is None:
+        args.semantic_row_reg_weight = (
+            0.01
+            if args.label_interface == "semantic"
+            and args.semantic_target_mode == "class_token"
+            and args.class_token_init == "semantic"
+            else 0.0
+        )
+    if args.eval_decode_mode == "phrase_likelihood" and args.phrase_diag_score_explicit:
+        args.semantic_score_mode = args.phrase_diag_score
     args.constrained_decoding = not args.disable_constrained_decoding
     return args
 
@@ -478,8 +636,43 @@ def get_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def use_anonymous_label_interface(args) -> bool:
+    return getattr(args, "label_interface", "anonymous") == "anonymous"
+
+
+def use_class_token_label_interface(args) -> bool:
+    if use_anonymous_label_interface(args):
+        return True
+    return (
+        getattr(args, "label_interface", "anonymous") == "semantic"
+        and getattr(args, "semantic_target_mode", "class_token") == "class_token"
+    )
+
+
+def use_phrase_label_interface(args) -> bool:
+    return (
+        getattr(args, "label_interface", "anonymous") == "semantic"
+        and getattr(args, "semantic_target_mode", "class_token") == "phrase"
+    )
+
+
 def use_class_token_row_training(args) -> bool:
-    return getattr(args, "tokenizer_training_mode", "class_rows") == "class_rows"
+    return (
+        use_class_token_label_interface(args)
+        and getattr(args, "tokenizer_training_mode", "class_rows") == "class_rows"
+    )
+
+
+def should_save_tokenizer_training_state(args) -> bool:
+    return use_class_token_label_interface(args)
+
+
+def semantic_priors_requested(args) -> bool:
+    return (
+        getattr(args, "class_token_init", "random") == "semantic"
+        or float(getattr(args, "semantic_row_reg_weight", 0.0) or 0.0) > 0.0
+        or float(getattr(args, "semantic_decision_reg_weight", 0.0) or 0.0) > 0.0
+    )
 
 
 def get_checkpoint_tokenizer_training_mode(checkpoint: Dict[str, Any]) -> str:
@@ -717,6 +910,46 @@ def filter_indices_by_class_ids(
     return sorted(selected_indices)
 
 
+def sample_query_indices_for_fast_eval(
+    label_to_indices: Dict[int, List[int]],
+    class_ids: List[int],
+    *,
+    max_samples_per_class: int = 0,
+    max_total_samples: int = 0,
+    seed: int = 0,
+) -> Tuple[List[int], Dict[str, Any]]:
+    rng = random.Random(seed)
+    selected_by_class: Dict[int, List[int]] = {}
+    for class_id in class_ids:
+        indices = sorted(label_to_indices.get(class_id, []))
+        if max_samples_per_class and len(indices) > max_samples_per_class:
+            indices = sorted(rng.sample(indices, max_samples_per_class))
+        selected_by_class[int(class_id)] = indices
+
+    flattened = sorted(
+        index
+        for indices in selected_by_class.values()
+        for index in indices
+    )
+    if max_total_samples and len(flattened) > max_total_samples:
+        flattened = sorted(rng.sample(flattened, max_total_samples))
+
+    selected_set = set(flattened)
+    counts = {
+        str(class_id): sum(1 for index in indices if index in selected_set)
+        for class_id, indices in selected_by_class.items()
+    }
+    metadata = {
+        "enabled": bool(max_samples_per_class or max_total_samples),
+        "max_samples_per_class": int(max_samples_per_class),
+        "max_total_samples": int(max_total_samples),
+        "seed": int(seed),
+        "class_counts": counts,
+        "selected_indices": flattened,
+    }
+    return flattened, metadata
+
+
 def summarize_subset_class_counts(
     label_to_indices: Dict[int, List[int]],
     class_ids: List[int],
@@ -799,11 +1032,51 @@ def validate_args(args):
         raise ValueError("--aug_scaling_min must be <= --aug_scaling_max")
     if args.dataloader_num_workers < 0:
         raise ValueError("--dataloader_num_workers must be >= 0")
+    if args.eval_max_samples_per_class < 0:
+        raise ValueError("--eval_max_samples_per_class must be >= 0")
+    if args.eval_max_total_samples < 0:
+        raise ValueError("--eval_max_total_samples must be >= 0")
+    if args.semantic_row_reg_weight < 0:
+        raise ValueError("--semantic_row_reg_weight must be >= 0")
+    if args.semantic_decision_reg_weight < 0:
+        raise ValueError("--semantic_decision_reg_weight must be >= 0")
+    if args.semantic_decision_temperature <= 0:
+        raise ValueError("--semantic_decision_temperature must be > 0")
+    if args.class_token_init == "semantic" and args.label_proto_source != "token_mean":
+        raise NotImplementedError(
+            "Only --label_proto_source token_mean is currently implemented for semantic class-token initialization."
+        )
+    if args.semantic_row_reg_weight > 0 and args.label_proto_source != "token_mean":
+        raise NotImplementedError(
+            "Only --label_proto_source token_mean is currently implemented for semantic row regularization."
+        )
+    if args.phrase_diag_use_eos:
+        raise NotImplementedError("--phrase_diag_use_eos is reserved for a future diagnostic implementation.")
 
     if args.pretrained_model and getattr(args, "encoder_type_explicit", False):
         raise ValueError("--pretrained_model and --encoder_type cannot be specified together")
     if args.resume and args.skip_phase_checkpoints:
         raise ValueError("--resume cannot be used with --skip_phase_checkpoints")
+    if args.label_interface == "semantic":
+        if args.dataset_family not in {"mitbih", "sleepedf", "cinc2017af"}:
+            raise ValueError(
+                "--label_interface semantic is supported only for mitbih, sleepedf, and cinc2017af"
+            )
+        if args.semantic_target_mode == "phrase" and args.eval_decode_mode != "phrase_likelihood":
+            raise ValueError(
+                "--semantic_target_mode phrase requires --eval_decode_mode phrase_likelihood"
+            )
+        if args.semantic_target_mode == "class_token" and args.eval_decode_mode == "phrase_likelihood":
+            # Supported as a diagnostic: train class tokens, evaluate phrase likelihood.
+            pass
+        if args.tokenizer_training_mode == "class_rows":
+            # In semantic class-token mode this restricts adaptation to the label rows.
+            # In phrase mode no rows are registered; the flag remains in the config for compatibility.
+            pass
+    elif args.eval_decode_mode == "phrase_likelihood":
+        raise ValueError("--eval_decode_mode phrase_likelihood requires --label_interface semantic")
+    if args.prompt_label_order == "random":
+        raise NotImplementedError("--prompt_label_order random is reserved for prompt-order diagnostics.")
 
     encoder_type = getattr(args, "encoder_type", None)
     if encoder_type is None:
@@ -1135,20 +1408,40 @@ def build_model(args, device: str, rank: int):
     return model
 
 
-def calculate_accuracy(predictions: List[str], labels: List[str]) -> float:
+def _normalize_label_text(text: str) -> str:
+    return str(text).strip()
+
+
+def calculate_accuracy(
+    predictions: List[str],
+    labels: List[str],
+    label_to_class_id: Optional[Dict[str, int]] = None,
+) -> float:
     correct = 0
     for pred, label in zip(predictions, labels):
-        pred_clean = pred.strip()
-        label_clean = label.strip()
+        pred_clean = _normalize_label_text(pred)
+        label_clean = _normalize_label_text(label)
 
-        pred_token = extract_class_token(pred_clean) or pred_clean
-        if pred_token == label_clean:
-            correct += 1
+        if label_to_class_id:
+            pred_key = extract_class_token(pred_clean) or pred_clean
+            label_key = extract_class_token(label_clean) or label_clean
+            label_id = label_to_class_id.get(label_key)
+            pred_id = label_to_class_id.get(pred_key)
+            if label_id is not None and pred_id == label_id:
+                correct += 1
+        else:
+            pred_token = extract_class_token(pred_clean) or pred_clean
+            if pred_token == label_clean:
+                correct += 1
 
     return correct / len(predictions) if predictions else 0.0
 
 
-def calculate_macro_f1(predictions: List[str], labels: List[str]) -> float:
+def calculate_macro_f1(
+    predictions: List[str],
+    labels: List[str],
+    label_to_class_id: Optional[Dict[str, int]] = None,
+) -> float:
     if not predictions or not labels:
         return 0.0
 
@@ -1157,8 +1450,12 @@ def calculate_macro_f1(predictions: List[str], labels: List[str]) -> float:
     for pred, label in zip(predictions, labels):
         true_token = extract_class_token(label) or label.strip()
         pred_token = extract_class_token(pred) or pred.strip()
-        true_id = class_token_to_index(true_token)
-        pred_id = class_token_to_index(pred_token)
+        if label_to_class_id:
+            true_id = label_to_class_id.get(true_token)
+            pred_id = label_to_class_id.get(pred_token)
+        else:
+            true_id = class_token_to_index(true_token)
+            pred_id = class_token_to_index(pred_token)
         if true_id is None:
             continue
         true_ids.append(int(true_id))
@@ -1239,6 +1536,232 @@ def add_class_tokens_to_model(
             print("   Enabled full embedding/lm_head training (legacy behavior)")
 
     return class_tokens, class_token_ids
+
+
+def _mean_vocab_embedding_norm(
+    embedding_weight: torch.Tensor,
+    excluded_token_ids: List[int],
+) -> torch.Tensor:
+    if not excluded_token_ids:
+        return embedding_weight.norm(dim=-1).mean()
+    mask = torch.ones(
+        embedding_weight.shape[0],
+        device=embedding_weight.device,
+        dtype=torch.bool,
+    )
+    valid_ids = [
+        int(token_id)
+        for token_id in excluded_token_ids
+        if 0 <= int(token_id) < embedding_weight.shape[0]
+    ]
+    if valid_ids:
+        mask[torch.tensor(valid_ids, device=embedding_weight.device, dtype=torch.long)] = False
+    return embedding_weight[mask].norm(dim=-1).mean()
+
+
+def build_token_mean_label_prototypes(
+    model,
+    *,
+    label_verbalizers: Dict[int, List[str]],
+    class_token_ids: List[int],
+) -> Tuple[List[int], torch.Tensor]:
+    embedding = model.llm.get_input_embeddings()
+    embedding_weight = embedding.weight.detach()
+    target_norm = _mean_vocab_embedding_norm(embedding_weight, class_token_ids)
+
+    class_ids: List[int] = []
+    prototypes: List[torch.Tensor] = []
+    for class_id in sorted(label_verbalizers.keys()):
+        if class_id >= len(class_token_ids):
+            continue
+        phrase_vectors: List[torch.Tensor] = []
+        for verbalizer in label_verbalizers[class_id]:
+            token_ids = model.tokenizer.encode(
+                str(verbalizer).strip(),
+                add_special_tokens=False,
+            )
+            token_ids = [
+                int(token_id)
+                for token_id in token_ids
+                if 0 <= int(token_id) < embedding_weight.shape[0]
+            ]
+            if not token_ids:
+                continue
+            token_tensor = torch.tensor(
+                token_ids,
+                device=embedding_weight.device,
+                dtype=torch.long,
+            )
+            phrase_vectors.append(embedding_weight.index_select(0, token_tensor).mean(dim=0))
+        if not phrase_vectors:
+            continue
+        prototype = torch.stack(phrase_vectors, dim=0).mean(dim=0)
+        prototype = prototype * (target_norm / prototype.norm().clamp_min(1e-6))
+        class_ids.append(int(class_id))
+        prototypes.append(prototype)
+
+    if not prototypes:
+        raise ValueError("No semantic label prototypes could be built from label_verbalizers.")
+    return class_ids, torch.stack(prototypes, dim=0).detach()
+
+
+def configure_semantic_label_priors(
+    model,
+    *,
+    args,
+    class_token_ids: List[int],
+    label_verbalizers: Dict[int, List[str]],
+    selected_class_ids: List[int],
+    rank: int = 0,
+) -> Dict[str, Any]:
+    if not use_class_token_label_interface(args) or not semantic_priors_requested(args):
+        return {}
+    if not label_verbalizers:
+        raise ValueError("Semantic class-token priors require non-empty label_verbalizers.")
+    if args.label_proto_source != "token_mean":
+        raise NotImplementedError("Only token_mean label prototypes are implemented.")
+
+    all_class_ids, all_prototypes = build_token_mean_label_prototypes(
+        model,
+        label_verbalizers=label_verbalizers,
+        class_token_ids=class_token_ids,
+    )
+    class_id_to_proto = {
+        class_id: all_prototypes[index]
+        for index, class_id in enumerate(all_class_ids)
+    }
+    usable_selected_class_ids = [
+        int(class_id)
+        for class_id in selected_class_ids
+        if int(class_id) in class_id_to_proto and int(class_id) < len(class_token_ids)
+    ]
+    if not usable_selected_class_ids:
+        raise ValueError("No selected classes have semantic prototypes.")
+
+    selected_prototypes = torch.stack(
+        [class_id_to_proto[class_id] for class_id in usable_selected_class_ids],
+        dim=0,
+    ).to(device=model.llm.get_input_embeddings().weight.device)
+    selected_token_ids = [int(class_token_ids[class_id]) for class_id in usable_selected_class_ids]
+
+    if args.class_token_init == "semantic":
+        row_index = torch.tensor(
+            [int(class_token_ids[class_id]) for class_id in all_class_ids],
+            device=model.llm.get_input_embeddings().weight.device,
+            dtype=torch.long,
+        )
+        init_rows = all_prototypes.to(
+            device=model.llm.get_input_embeddings().weight.device,
+            dtype=model.llm.get_input_embeddings().weight.dtype,
+        )
+        with torch.no_grad():
+            input_weight = model.llm.get_input_embeddings().weight
+            input_weight.index_copy_(0, row_index, init_rows.to(dtype=input_weight.dtype))
+            lm_head_weight = model.llm.lm_head.weight
+            if lm_head_weight.data_ptr() != input_weight.data_ptr():
+                lm_head_weight.index_copy_(0, row_index, init_rows.to(dtype=lm_head_weight.dtype))
+        if rank == 0:
+            print(
+                f"   Initialized {len(all_class_ids)} class tokens from "
+                f"{args.verbalizer_mode} label prototypes"
+            )
+
+    setattr(model, "_semantic_prior_class_ids", tuple(usable_selected_class_ids))
+    setattr(model, "_semantic_prior_token_ids", tuple(selected_token_ids))
+    setattr(model, "_semantic_prior_prototypes", selected_prototypes.detach())
+    setattr(
+        model,
+        "_semantic_prior_class_id_to_position",
+        {class_id: index for index, class_id in enumerate(usable_selected_class_ids)},
+    )
+    metadata = {
+        "enabled": True,
+        "class_token_init": args.class_token_init,
+        "label_proto_source": args.label_proto_source,
+        "verbalizer_mode": args.verbalizer_mode,
+        "selected_class_ids": usable_selected_class_ids,
+        "semantic_row_reg_weight": float(args.semantic_row_reg_weight),
+        "semantic_row_reg_type": args.semantic_row_reg_type,
+        "semantic_decision_reg_weight": float(args.semantic_decision_reg_weight),
+        "semantic_decision_temperature": float(args.semantic_decision_temperature),
+    }
+    setattr(model, "_semantic_prior_metadata", metadata)
+    return metadata
+
+
+def compute_semantic_row_regularization(model, args) -> torch.Tensor:
+    prototypes = getattr(model, "_semantic_prior_prototypes", None)
+    token_ids = getattr(model, "_semantic_prior_token_ids", None)
+    weight = float(getattr(args, "semantic_row_reg_weight", 0.0) or 0.0)
+    if weight <= 0.0 or prototypes is None or not token_ids:
+        return torch.zeros((), device=model.device)
+
+    token_tensor = torch.tensor(
+        list(token_ids),
+        device=model.llm.get_input_embeddings().weight.device,
+        dtype=torch.long,
+    )
+    prototypes = prototypes.to(
+        device=token_tensor.device,
+        dtype=model.llm.get_input_embeddings().weight.dtype,
+    )
+    input_rows = model.llm.get_input_embeddings().weight.index_select(0, token_tensor)
+    row_reg_type = getattr(args, "semantic_row_reg_type", "cosine")
+    if row_reg_type == "cosine":
+        loss = (1.0 - F.cosine_similarity(input_rows.float(), prototypes.float(), dim=-1)).mean()
+    elif row_reg_type == "l2":
+        loss = F.mse_loss(input_rows.float(), prototypes.float())
+    else:
+        raise ValueError(f"Unsupported semantic_row_reg_type: {row_reg_type}")
+
+    lm_head_weight = model.llm.lm_head.weight
+    if lm_head_weight.data_ptr() != model.llm.get_input_embeddings().weight.data_ptr():
+        head_rows = lm_head_weight.index_select(0, token_tensor)
+        head_prototypes = prototypes.to(dtype=head_rows.dtype)
+        if row_reg_type == "cosine":
+            loss = loss + (
+                1.0 - F.cosine_similarity(head_rows.float(), head_prototypes.float(), dim=-1)
+            ).mean()
+        else:
+            loss = loss + F.mse_loss(head_rows.float(), head_prototypes.float())
+    return loss.to(device=model.device) * weight
+
+
+def compute_semantic_decision_regularization(
+    model,
+    batch: List[Dict[str, Any]],
+    args,
+) -> torch.Tensor:
+    prototypes = getattr(model, "_semantic_prior_prototypes", None)
+    class_id_to_position = getattr(model, "_semantic_prior_class_id_to_position", None)
+    weight = float(getattr(args, "semantic_decision_reg_weight", 0.0) or 0.0)
+    if weight <= 0.0 or prototypes is None or not class_id_to_position:
+        return torch.zeros((), device=model.device)
+
+    target_positions: List[int] = []
+    for sample in batch:
+        class_id = int(sample["int_label"])
+        if class_id not in class_id_to_position:
+            return torch.zeros((), device=model.device)
+        target_positions.append(int(class_id_to_position[class_id]))
+
+    inputs_embeds, attention_mask = model.pad_and_apply_batch(batch)
+    outputs = model.llm(
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+        return_dict=True,
+    )
+    last_positions = attention_mask.to(outputs.hidden_states[-1].device).long().sum(dim=1) - 1
+    batch_indices = torch.arange(outputs.hidden_states[-1].size(0), device=last_positions.device)
+    decision_states = outputs.hidden_states[-1][batch_indices, last_positions, :].float()
+    proto = prototypes.to(device=decision_states.device, dtype=decision_states.dtype)
+    logits = torch.matmul(
+        F.normalize(decision_states, dim=-1),
+        F.normalize(proto, dim=-1).transpose(0, 1),
+    ) / float(args.semantic_decision_temperature)
+    targets = torch.tensor(target_positions, device=logits.device, dtype=torch.long)
+    return F.cross_entropy(logits, targets) * weight
 
 
 class AllowedTokensLogitsProcessor(LogitsProcessor):
@@ -1343,6 +1866,180 @@ def build_optimizer_scheduler(
     return optimizer, scheduler, total_steps, warmup_steps
 
 
+def answer_token_nll_from_prompt(
+    underlying_model,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    answers: List[str],
+) -> torch.Tensor:
+    B, L, _H = inputs_embeds.size()
+    ans_tok = underlying_model.tokenizer(
+        answers,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        add_special_tokens=False,
+    )
+    ans_ids = ans_tok.input_ids.to(underlying_model.device, non_blocking=True)
+    ans_mask = ans_tok.attention_mask.to(underlying_model.device, non_blocking=True)
+    ans_emb = underlying_model.llm.get_input_embeddings()(ans_ids)
+
+    full_inputs_embeds = torch.cat([inputs_embeds, ans_emb], dim=1)
+    full_attention_mask = torch.cat([attention_mask, ans_mask], dim=1)
+
+    labels = torch.full(
+        (B, full_attention_mask.size(1)),
+        -100,
+        device=underlying_model.device,
+        dtype=torch.long,
+    )
+    labels[:, L:] = torch.where(
+        ans_mask.bool(),
+        ans_ids,
+        torch.full_like(ans_ids, -100),
+    )
+
+    outputs = underlying_model.llm(
+        inputs_embeds=full_inputs_embeds,
+        attention_mask=full_attention_mask,
+        return_dict=True,
+    )
+    shift_logits = outputs.logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    valid_mask = shift_labels.ne(-100)
+    safe_labels = shift_labels.masked_fill(~valid_mask, 0)
+    token_losses = F.cross_entropy(
+        shift_logits.float().reshape(-1, shift_logits.size(-1)),
+        safe_labels.reshape(-1),
+        reduction="none",
+    ).view(B, -1)
+    token_counts = valid_mask.sum(dim=1).clamp_min(1)
+    return (token_losses * valid_mask).sum(dim=1) / token_counts
+
+
+def compute_training_loss(model, batch: List[Dict[str, Any]], args) -> torch.Tensor:
+    loss = model(batch)
+    underlying_model = get_model(model)
+    row_reg = compute_semantic_row_regularization(underlying_model, args)
+    decision_reg = compute_semantic_decision_regularization(underlying_model, batch, args)
+    return loss + row_reg + decision_reg
+
+
+def score_phrase_batch(
+    underlying_model,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    phrase: str,
+) -> torch.Tensor:
+    batch_size = inputs_embeds.size(0)
+    nll = answer_token_nll_from_prompt(
+        underlying_model,
+        inputs_embeds,
+        attention_mask,
+        [phrase] * batch_size,
+    )
+    return -nll
+
+
+def score_candidate_verbalizers(
+    underlying_model,
+    batch: List[Dict[str, Any]],
+    candidate_verbalizers: List[List[str]],
+) -> torch.Tensor:
+    if not candidate_verbalizers:
+        raise ValueError("candidate_verbalizers must not be empty")
+
+    inputs_embeds, attention_mask = underlying_model.pad_and_apply_batch(batch)
+    class_scores: List[torch.Tensor] = []
+    for verbalizers in candidate_verbalizers:
+        if not verbalizers:
+            raise ValueError("Each candidate class must have at least one verbalizer")
+        verbalizer_scores = torch.stack(
+            [
+                score_phrase_batch(
+                    underlying_model,
+                    inputs_embeds,
+                    attention_mask,
+                    verbalizer,
+                )
+                for verbalizer in verbalizers
+            ],
+            dim=1,
+        )
+        class_scores.append(
+            torch.logsumexp(verbalizer_scores, dim=1) - math.log(len(verbalizers))
+        )
+    return torch.stack(class_scores, dim=1)
+
+
+def build_null_time_series_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    null_batch: List[Dict[str, Any]] = []
+    for sample in batch:
+        null_sample = dict(sample)
+        null_sample["time_series"] = [
+            torch.zeros_like(torch.as_tensor(series)) for series in sample["time_series"]
+        ]
+        null_batch.append(null_sample)
+    return null_batch
+
+
+def score_semantic_candidates(
+    underlying_model,
+    batch: List[Dict[str, Any]],
+    candidate_verbalizers: List[List[str]],
+    semantic_score_mode: str,
+    support_calibration_scores: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    raw_scores = score_candidate_verbalizers(
+        underlying_model,
+        batch,
+        candidate_verbalizers,
+    )
+    if semantic_score_mode == "raw":
+        return raw_scores
+    if semantic_score_mode in {"support_cal"}:
+        if support_calibration_scores is None:
+            raise ValueError("support_cal scoring requires support_calibration_scores")
+        return raw_scores - support_calibration_scores.to(
+            device=raw_scores.device,
+            dtype=raw_scores.dtype,
+        ).unsqueeze(0)
+    if semantic_score_mode in {"calibrated", "zero_cal"}:
+        null_scores = score_candidate_verbalizers(
+            underlying_model,
+            build_null_time_series_batch(batch),
+            candidate_verbalizers,
+        )
+        return raw_scores - null_scores
+    raise ValueError(f"Unsupported semantic_score_mode: {semantic_score_mode}")
+
+
+@torch.no_grad()
+def estimate_support_phrase_calibration(
+    model,
+    data_loader: DataLoader,
+    candidate_verbalizers: List[List[str]],
+    *,
+    rank: int = 0,
+) -> torch.Tensor:
+    underlying_model = get_model(model)
+    underlying_model.eval()
+    score_sum: Optional[torch.Tensor] = None
+    sample_count = 0
+    for batch in tqdm(data_loader, desc="Estimating support phrase bias", disable=(rank != 0)):
+        scores = score_candidate_verbalizers(
+            underlying_model,
+            batch,
+            candidate_verbalizers,
+        )
+        batch_sum = scores.detach().float().sum(dim=0)
+        score_sum = batch_sum if score_sum is None else score_sum + batch_sum
+        sample_count += scores.size(0)
+    if score_sum is None or sample_count == 0:
+        raise ValueError("Cannot estimate support phrase calibration from an empty support loader")
+    return score_sum / float(sample_count)
+
+
 def train_one_epoch(
     model,
     train_loader: DataLoader,
@@ -1352,6 +2049,7 @@ def train_one_epoch(
     epoch_idx: int,
     epoch_total: int,
     gradient_accumulation_steps: int,
+    args,
     rank: int,
     phase_name: str,
 ) -> float:
@@ -1362,7 +2060,7 @@ def train_one_epoch(
 
     pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch_idx}/{epoch_total}", disable=(rank != 0))
     for step, batch in enumerate(pbar):
-        loss = model(batch)
+        loss = compute_training_loss(model, batch, args)
         loss = loss / gradient_accumulation_steps
         loss.backward()
 
@@ -1399,6 +2097,12 @@ def evaluate(
     max_new_tokens: int,
     class_token_ids: Optional[List[int]] = None,
     disable_constrained_decoding: bool = False,
+    eval_decode_mode: str = "generate",
+    label_verbalizers: Optional[Dict[int, List[str]]] = None,
+    selected_class_ids: Optional[List[int]] = None,
+    semantic_score_mode: str = "raw",
+    support_calibration_scores: Optional[torch.Tensor] = None,
+    label_to_class_id: Optional[Dict[str, int]] = None,
     desc: str = "Testing",
     rank: int = 0,
 ) -> Dict[str, Any]:
@@ -1406,57 +2110,168 @@ def evaluate(
     underlying_model.eval()
 
     total_loss = 0.0
-    num_batches = 0
+    loss_denominator = 0
     all_predictions: List[str] = []
     all_labels: List[str] = []
+    eval_decode_mode = str(eval_decode_mode).lower()
+    if eval_decode_mode not in {"generate", "logits", "phrase_likelihood"}:
+        raise ValueError(f"Unsupported eval_decode_mode: {eval_decode_mode}")
+    if eval_decode_mode == "logits" and not class_token_ids:
+        raise ValueError("eval_decode_mode='logits' requires non-empty class_token_ids")
+    if eval_decode_mode == "phrase_likelihood":
+        if not label_verbalizers:
+            raise ValueError("eval_decode_mode='phrase_likelihood' requires label_verbalizers")
+        if not label_to_class_id:
+            raise ValueError("eval_decode_mode='phrase_likelihood' requires label_to_class_id")
+    eval_loss_type = {
+        "logits": "class_token_ce",
+        "phrase_likelihood": f"semantic_phrase_{semantic_score_mode}_ce",
+    }.get(eval_decode_mode, "lm_answer_ce")
+
+    candidate_class_ids: List[int] = []
+    candidate_verbalizers: List[List[str]] = []
+    if eval_decode_mode == "phrase_likelihood":
+        assert label_verbalizers is not None
+        candidate_class_ids = list(selected_class_ids or sorted(label_verbalizers.keys()))
+        candidate_verbalizers = [label_verbalizers[class_id] for class_id in candidate_class_ids]
+        if any(not verbalizers for verbalizers in candidate_verbalizers):
+            raise ValueError("Every selected class must have at least one label verbalizer")
 
     logits_processor = None
-    if class_token_ids is not None and not disable_constrained_decoding:
+    if (
+        eval_decode_mode == "generate"
+        and class_token_ids is not None
+        and not disable_constrained_decoding
+    ):
         eos_token_id = underlying_model.tokenizer.eos_token_id
         allowed_ids = class_token_ids + [eos_token_id]
         logits_processor = LogitsProcessorList([AllowedTokensLogitsProcessor(allowed_ids)])
 
     for batch in tqdm(data_loader, desc=desc, disable=(rank != 0)):
-        loss = underlying_model.compute_loss(batch)
-        total_loss += loss.item()
-        num_batches += 1
+        labels = [
+            sample["answer"].replace(underlying_model.get_eos_token(), "").strip()
+            for sample in batch
+        ]
 
-        if logits_processor is not None:
+        if eval_decode_mode == "phrase_likelihood":
+            scores = score_semantic_candidates(
+                underlying_model,
+                batch,
+                candidate_verbalizers,
+                semantic_score_mode=semantic_score_mode,
+                support_calibration_scores=support_calibration_scores,
+            )
+            class_id_to_position = {
+                class_id: position for position, class_id in enumerate(candidate_class_ids)
+            }
+            target_positions = []
+            for label in labels:
+                label_key = extract_class_token(label) or label.strip()
+                class_id = label_to_class_id.get(label_key) if label_to_class_id else None
+                if class_id is None or class_id not in class_id_to_position:
+                    raise ValueError(
+                        f"Label {label_key!r} cannot be mapped to a selected semantic class"
+                    )
+                target_positions.append(class_id_to_position[class_id])
+            targets = torch.tensor(
+                target_positions,
+                device=scores.device,
+                dtype=torch.long,
+            )
+            loss = F.cross_entropy(scores.float(), targets)
+            total_loss += loss.item() * len(batch)
+            loss_denominator += len(batch)
+
+            pred_positions = scores.argmax(dim=-1).detach().cpu().tolist()
+            predictions = [
+                candidate_verbalizers[int(position)][0] for position in pred_positions
+            ]
+        elif eval_decode_mode == "logits":
             inputs_embeds, attention_mask = underlying_model.pad_and_apply_batch(batch)
-            gen_ids = underlying_model.llm.generate(
+            outputs = underlying_model.llm(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                logits_processor=logits_processor,
-                do_sample=False,
+                return_dict=True,
             )
-            decoded_predictions = underlying_model.tokenizer.batch_decode(
-                gen_ids, skip_special_tokens=False
+            class_token_tensor = torch.tensor(
+                class_token_ids,
+                device=outputs.logits.device,
+                dtype=torch.long,
             )
-            predictions = []
-            for pred in decoded_predictions:
-                predictions.append(extract_class_token(pred) or pred.strip())
-        else:
-            decoded_predictions = underlying_model.generate(
-                batch,
-                max_new_tokens=max_new_tokens,
-                skip_special_tokens=False,
-            )
-            predictions = []
-            for pred in decoded_predictions:
-                predictions.append(extract_class_token(pred) or pred.strip())
+            last_token_positions = attention_mask.to(outputs.logits.device).long().sum(dim=1) - 1
+            batch_indices = torch.arange(outputs.logits.size(0), device=outputs.logits.device)
+            next_token_logits = outputs.logits[batch_indices, last_token_positions, :]
+            class_logits = next_token_logits.index_select(dim=-1, index=class_token_tensor)
 
-        for sample, pred in zip(batch, predictions):
-            label = sample["answer"].replace(underlying_model.get_eos_token(), "").strip()
+            token_id_to_position = {
+                int(token_id): position for position, token_id in enumerate(class_token_ids)
+            }
+            target_positions: List[int] = []
+            for label in labels:
+                label_token = extract_class_token(label) or label.strip()
+                label_token_id = int(underlying_model.tokenizer.convert_tokens_to_ids(label_token))
+                if label_token_id not in token_id_to_position:
+                    raise ValueError(
+                        f"Label token {label_token!r} is not in selected class_token_ids"
+                    )
+                target_positions.append(token_id_to_position[label_token_id])
+            targets = torch.tensor(
+                target_positions,
+                device=class_logits.device,
+                dtype=torch.long,
+            )
+            loss = F.cross_entropy(class_logits.float(), targets)
+            total_loss += loss.item() * len(batch)
+            loss_denominator += len(batch)
+
+            pred_positions = class_logits.argmax(dim=-1)
+            pred_token_ids = class_token_tensor[pred_positions].detach().cpu().tolist()
+            predictions = underlying_model.tokenizer.convert_ids_to_tokens(pred_token_ids)
+            if isinstance(predictions, str):
+                predictions = [predictions]
+        else:
+            loss = underlying_model.compute_loss(batch)
+            total_loss += loss.item()
+            loss_denominator += 1
+
+            if logits_processor is not None:
+                inputs_embeds, attention_mask = underlying_model.pad_and_apply_batch(batch)
+                gen_ids = underlying_model.llm.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    logits_processor=logits_processor,
+                    do_sample=False,
+                )
+                decoded_predictions = underlying_model.tokenizer.batch_decode(
+                    gen_ids, skip_special_tokens=False
+                )
+                predictions = []
+                for pred in decoded_predictions:
+                    predictions.append(extract_class_token(pred) or pred.strip())
+            else:
+                decoded_predictions = underlying_model.generate(
+                    batch,
+                    max_new_tokens=max_new_tokens,
+                    skip_special_tokens=False,
+                )
+                predictions = []
+                for pred in decoded_predictions:
+                    predictions.append(extract_class_token(pred) or pred.strip())
+
+        for label, pred in zip(labels, predictions):
             all_predictions.append(pred)
             all_labels.append(label)
 
-    avg_loss = total_loss / max(num_batches, 1)
-    accuracy = calculate_accuracy(all_predictions, all_labels)
-    macro_f1 = calculate_macro_f1(all_predictions, all_labels)
+    avg_loss = total_loss / max(loss_denominator, 1)
+    accuracy = calculate_accuracy(all_predictions, all_labels, label_to_class_id=label_to_class_id)
+    macro_f1 = calculate_macro_f1(all_predictions, all_labels, label_to_class_id=label_to_class_id)
 
     return {
         "loss": avg_loss,
+        "eval_decode_mode": eval_decode_mode,
+        "eval_loss_type": eval_loss_type,
+        "semantic_score_mode": semantic_score_mode if eval_decode_mode == "phrase_likelihood" else None,
         "accuracy": accuracy,
         "macro_f1": macro_f1,
         "predictions": all_predictions,
@@ -1496,11 +2311,12 @@ def save_checkpoint(
     if extra_state:
         checkpoint.update(extra_state)
     underlying_model.save_lora_state_to_checkpoint(checkpoint)
-    save_tokenizer_training_state(
-        underlying_model,
-        checkpoint,
-        args.tokenizer_training_mode,
-    )
+    if should_save_tokenizer_training_state(args):
+        save_tokenizer_training_state(
+            underlying_model,
+            checkpoint,
+            args.tokenizer_training_mode,
+        )
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     try:
@@ -1547,32 +2363,37 @@ def load_checkpoint(
     checkpoint_path: str,
     device: str,
     tokenizer_training_mode: str,
+    label_interface: str = "anonymous",
+    semantic_target_mode: str = "class_token",
     optimizer=None,
     scheduler=None,
 ):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     underlying_model = get_model(model)
-    checkpoint_mode = get_checkpoint_tokenizer_training_mode(checkpoint)
-    if checkpoint_mode != tokenizer_training_mode:
-        raise ValueError(
-            "Checkpoint tokenizer_training_mode mismatch: "
-            f"expected {tokenizer_training_mode}, got {checkpoint_mode}. "
-            "Please resume/evaluate with the matching --tokenizer_training_mode."
-        )
+    uses_class_tokens = label_interface == "anonymous" or semantic_target_mode == "class_token"
+    if uses_class_tokens:
+        checkpoint_mode = get_checkpoint_tokenizer_training_mode(checkpoint)
+        if checkpoint_mode != tokenizer_training_mode:
+            raise ValueError(
+                "Checkpoint tokenizer_training_mode mismatch: "
+                f"expected {tokenizer_training_mode}, got {checkpoint_mode}. "
+                "Please resume/evaluate with the matching --tokenizer_training_mode."
+            )
 
     underlying_model.encoder.load_state_dict(checkpoint["encoder_state"])
     underlying_model.projector.load_state_dict(checkpoint["projector_state"])
     underlying_model.load_lora_state_from_checkpoint(checkpoint, allow_missing=True)
-    if tokenizer_training_mode == "class_rows":
-        load_class_token_rows_from_checkpoint(underlying_model, checkpoint, device=device)
-    elif not load_full_tokenizer_weights_from_checkpoint(underlying_model, checkpoint, device=device):
-        raise ValueError(
-            f"Checkpoint {checkpoint_path} does not contain full embedding/lm_head weights."
-        )
+    if uses_class_tokens:
+        if tokenizer_training_mode == "class_rows":
+            load_class_token_rows_from_checkpoint(underlying_model, checkpoint, device=device)
+        elif not load_full_tokenizer_weights_from_checkpoint(underlying_model, checkpoint, device=device):
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} does not contain full embedding/lm_head weights."
+            )
 
     if optimizer is not None and checkpoint.get("optimizer_state") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
-        if tokenizer_training_mode == "class_rows":
+        if uses_class_tokens and tokenizer_training_mode == "class_rows":
             sanitize_class_token_optimizer_state(optimizer, underlying_model)
     if scheduler is not None and checkpoint.get("scheduler_state") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state"])
@@ -1669,6 +2490,8 @@ def train_phase(
             checkpoint_path=ckpt_path,
             device=device,
             tokenizer_training_mode=args.tokenizer_training_mode,
+            label_interface=args.label_interface,
+            semantic_target_mode=args.semantic_target_mode,
             optimizer=optimizer,
             scheduler=scheduler,
         )
@@ -1705,6 +2528,7 @@ def train_phase(
             epoch_idx=local_epoch,
             epoch_total=phase_epochs,
             gradient_accumulation_steps=grad_acc_steps,
+            args=args,
             rank=rank,
             phase_name=phase_name,
         )
@@ -1814,6 +2638,9 @@ def run_single_experiment(
     test_label_to_indices: Dict[int, List[int]],
     num_classes: int,
     expected_class_tokens: List[str],
+    label_verbalizers: Dict[int, List[str]],
+    label_to_class_id: Dict[str, int],
+    label_cards: Dict[int, Dict[str, Any]],
     local_rank: int,
     world_size: int,
     rank: int,
@@ -1873,6 +2700,7 @@ def run_single_experiment(
                     {
                         "dataset": args.dataset,
                         "dataset_family": args.dataset_family,
+                        "label_interface": args.label_interface,
                         "split_protocol": args.split_protocol,
                         "way": support_info_rank0["way"],
                         "shot": shot_name,
@@ -1907,11 +2735,28 @@ def run_single_experiment(
         test_label_to_indices,
         support_info["selected_class_ids"],
     )
+    full_query_indices = list(query_indices)
+    query_eval_subset = {
+        "enabled": False,
+        "max_samples_per_class": int(args.eval_max_samples_per_class),
+        "max_total_samples": int(args.eval_max_total_samples),
+        "seed": None,
+        "class_counts": summarize_subset_class_counts(
+            test_label_to_indices,
+            support_info["selected_class_ids"],
+        ),
+        "selected_indices": list(query_indices),
+    }
+    if args.eval_max_samples_per_class or args.eval_max_total_samples:
+        query_indices, query_eval_subset = sample_query_indices_for_fast_eval(
+            test_label_to_indices,
+            support_info["selected_class_ids"],
+            max_samples_per_class=args.eval_max_samples_per_class,
+            max_total_samples=args.eval_max_total_samples,
+            seed=run_seed + int(args.eval_subset_seed_offset),
+        )
     query_dataset = Subset(test_dataset, query_indices)
-    query_class_counts = summarize_subset_class_counts(
-        test_label_to_indices,
-        support_info["selected_class_ids"],
-    )
+    query_class_counts = dict(query_eval_subset["class_counts"])
 
     train_batch_size, grad_acc_steps = compute_fewshot_train_hparams(
         args=args,
@@ -1924,8 +2769,11 @@ def run_single_experiment(
         print(
             f"[shot={shot_name} run={run_id}] seed={run_seed}, "
             f"way={support_info['way']}, support={len(support_indices)}, "
-            f"query={len(query_indices)}, batch={train_batch_size}, grad_acc={grad_acc_steps}"
+            f"query={len(query_indices)}/{len(full_query_indices)}, "
+            f"batch={train_batch_size}, grad_acc={grad_acc_steps}"
         )
+        if query_eval_subset["enabled"]:
+            print(f"   fast eval subset: {query_eval_subset}")
         print(f"   selected classes: {support_info['selected_class_ids']}")
         if support_info["any_shortage"]:
             print(f"   classes with n<K use-all behavior: {support_info['classes_with_shortage']}")
@@ -1958,21 +2806,45 @@ def run_single_experiment(
             collate_fn=make_collate_fn(args, is_train=False),
             **build_dataloader_kwargs(args),
         )
+        support_eval_loader = DataLoader(
+            support_dataset,
+            batch_size=args.eval_batch_size,
+            shuffle=False,
+            collate_fn=make_collate_fn(args, is_train=False),
+            **build_dataloader_kwargs(args),
+        )
 
     model = build_model(args=args, device=device, rank=rank)
     underlying_model = get_model(model)
-    class_tokens, class_token_ids = add_class_tokens_to_model(
-        underlying_model,
-        num_classes=num_classes,
-        tokenizer_training_mode=args.tokenizer_training_mode,
-        rank=rank,
-    )
-    selected_class_token_ids = [class_token_ids[class_id] for class_id in support_info["selected_class_ids"]]
-
-    if expected_class_tokens and class_tokens != expected_class_tokens:
-        raise RuntimeError(
-            f"Class tokens mismatch: expected {expected_class_tokens}, got {class_tokens}"
+    class_tokens: List[str] = []
+    class_token_ids: List[int] = []
+    selected_class_token_ids: List[int] = []
+    semantic_prior_metadata: Dict[str, Any] = {}
+    if use_class_token_label_interface(args):
+        class_tokens, class_token_ids = add_class_tokens_to_model(
+            underlying_model,
+            num_classes=num_classes,
+            tokenizer_training_mode=args.tokenizer_training_mode,
+            rank=rank,
         )
+        selected_class_token_ids = [
+            class_token_ids[class_id] for class_id in support_info["selected_class_ids"]
+        ]
+
+        if expected_class_tokens and class_tokens != expected_class_tokens:
+            raise RuntimeError(
+                f"Class tokens mismatch: expected {expected_class_tokens}, got {class_tokens}"
+            )
+        semantic_prior_metadata = configure_semantic_label_priors(
+            underlying_model,
+            args=args,
+            class_token_ids=class_token_ids,
+            label_verbalizers=label_verbalizers,
+            selected_class_ids=support_info["selected_class_ids"],
+            rank=rank,
+        )
+    elif rank == 0:
+        print("🏷️ Semantic phrase diagnostic: using natural-language verbalizers; no class tokens added")
 
     if world_size > 1:
         # Few-shot training dynamically toggles LoRA participation across phase1/phase2.
@@ -1991,6 +2863,16 @@ def run_single_experiment(
             f"   phase split: phase1={phase1_epochs} (warm-up), "
             f"phase2={phase2_epochs} (joint)"
         )
+        eval_loss_type = {
+            "logits": "class_token_ce",
+            "phrase_likelihood": f"semantic_phrase_{args.semantic_score_mode}_ce",
+        }.get(args.eval_decode_mode, "lm_answer_ce")
+        print(
+            f"   evaluation: decode_mode={args.eval_decode_mode}, "
+            f"loss_type={eval_loss_type}"
+        )
+        if args.eval_decode_mode == "logits" and args.disable_constrained_decoding:
+            print("   note: --disable_constrained_decoding is ignored by logits evaluation")
         if not save_phase_checkpoints:
             print("   checkpointing: disabled (--skip_phase_checkpoints); evaluation will use in-memory weights")
         if args.model_select_metric != "last":
@@ -2039,13 +2921,46 @@ def run_single_experiment(
                 checkpoint_path=phase2_ckpt_path,
                 device=device,
                 tokenizer_training_mode=args.tokenizer_training_mode,
+                label_interface=args.label_interface,
+                semantic_target_mode=args.semantic_target_mode,
             )
+        eval_label_verbalizers = label_verbalizers
+        if args.label_shuffle_control and args.eval_decode_mode == "phrase_likelihood":
+            rng = random.Random(run_seed)
+            selected_ids = list(support_info["selected_class_ids"])
+            shuffled_ids = list(selected_ids)
+            rng.shuffle(shuffled_ids)
+            eval_label_verbalizers = dict(label_verbalizers)
+            for class_id, source_class_id in zip(selected_ids, shuffled_ids):
+                eval_label_verbalizers[class_id] = list(label_verbalizers[source_class_id])
+
+        phrase_support_bias = None
+        phrase_score_mode = args.semantic_score_mode
+        if args.eval_decode_mode == "phrase_likelihood":
+            phrase_score_mode = args.phrase_diag_score if args.phrase_diag_score_explicit else args.semantic_score_mode
+            if phrase_score_mode == "support_cal":
+                candidate_verbalizers = [
+                    eval_label_verbalizers[class_id]
+                    for class_id in support_info["selected_class_ids"]
+                ]
+                phrase_support_bias = estimate_support_phrase_calibration(
+                    model,
+                    support_eval_loader,
+                    candidate_verbalizers,
+                    rank=rank,
+                )
         test_results = evaluate(
             model=model,
             data_loader=test_loader,
             max_new_tokens=args.max_new_tokens,
             class_token_ids=selected_class_token_ids,
             disable_constrained_decoding=args.disable_constrained_decoding,
+            eval_decode_mode=args.eval_decode_mode,
+            label_verbalizers=eval_label_verbalizers,
+            selected_class_ids=support_info["selected_class_ids"],
+            semantic_score_mode=phrase_score_mode,
+            support_calibration_scores=phrase_support_bias,
+            label_to_class_id=label_to_class_id,
             desc="Testing",
             rank=rank,
         )
@@ -2055,6 +2970,24 @@ def run_single_experiment(
             "dataset_family": args.dataset_family,
             "split_protocol": args.split_protocol,
             "protocol": args.protocol,
+            "label_interface": args.label_interface,
+            "verbalizer_set": args.verbalizer_set,
+            "verbalizer_mode": args.verbalizer_mode,
+            "semantic_target_mode": args.semantic_target_mode,
+            "class_token_init": args.class_token_init,
+            "label_proto_source": args.label_proto_source,
+            "semantic_row_reg_weight": args.semantic_row_reg_weight,
+            "semantic_row_reg_type": args.semantic_row_reg_type,
+            "semantic_decision_reg_weight": args.semantic_decision_reg_weight,
+            "semantic_decision_temperature": args.semantic_decision_temperature,
+            "semantic_prior": semantic_prior_metadata,
+            "label_cards": label_cards,
+            "phrase_diagnostic": {
+                "enabled": args.eval_decode_mode == "phrase_likelihood",
+                "score_mode": phrase_score_mode if args.eval_decode_mode == "phrase_likelihood" else None,
+                "use_eos": bool(args.phrase_diag_use_eos),
+                "label_shuffle_control": bool(args.label_shuffle_control),
+            },
             "tokenizer_training_mode": args.tokenizer_training_mode,
             "way": support_info["way"],
             "selected_class_ids": support_info["selected_class_ids"],
@@ -2064,6 +2997,8 @@ def run_single_experiment(
             "seed": run_seed,
             "support_size": len(support_indices),
             "query_size": len(query_indices),
+            "full_query_size": len(full_query_indices),
+            "query_eval_subset": query_eval_subset,
             "k_eff_per_class": support_info["k_eff_per_class"],
             "class_train_counts": support_info["class_train_counts"],
             "support_class_counts": support_info["k_eff_per_class"],
@@ -2075,6 +3010,9 @@ def run_single_experiment(
             "train_batch_size": train_batch_size,
             "gradient_accumulation_steps": grad_acc_steps,
             "constrained_decoding": not args.disable_constrained_decoding,
+            "eval_decode_mode": test_results["eval_decode_mode"],
+            "eval_loss_type": test_results["eval_loss_type"],
+            "semantic_score_mode": test_results["semantic_score_mode"],
             "phase1_last_train_loss": phase1_stats["last_loss"],
             "phase2_last_train_loss": phase2_stats["last_loss"],
             "test_loss": test_results["loss"],
@@ -2092,6 +3030,8 @@ def run_single_experiment(
                     "predictions": test_results["predictions"],
                     "labels": test_results["labels"],
                     "macro_f1": test_results["macro_f1"],
+                    "eval_decode_mode": test_results["eval_decode_mode"],
+                    "semantic_score_mode": test_results["semantic_score_mode"],
                 },
                 f,
                 indent=2,
@@ -2161,6 +3101,9 @@ def main():
         test_dataset = dataset_bundle.test_dataset
         num_classes = dataset_bundle.num_classes
         class_tokens = dataset_bundle.class_tokens
+        label_verbalizers = dataset_bundle.label_verbalizers
+        label_to_class_id = dataset_bundle.label_to_class_id
+        label_cards = dataset_bundle.label_cards
         label_to_indices = build_label_to_indices(train_dataset)
         test_label_to_indices = build_label_to_indices(test_dataset)
 
@@ -2188,6 +3131,13 @@ def main():
             print(f"encoder_type: {args.encoder_type}")
             print(f"llm_id: {args.llm_id}")
             print(f"use_lora: {args.use_lora}")
+            print(f"label_interface: {args.label_interface}")
+            print(f"verbalizer_set: {args.verbalizer_set}")
+            print(f"verbalizer_mode: {args.verbalizer_mode}")
+            print(f"semantic_target_mode: {args.semantic_target_mode}")
+            print(f"class_token_init: {args.class_token_init}")
+            print(f"semantic_row_reg_weight: {args.semantic_row_reg_weight}")
+            print(f"semantic_score_mode: {args.semantic_score_mode}")
             print(f"tokenizer_training_mode: {args.tokenizer_training_mode}")
             print(f"constrained_decoding: {args.constrained_decoding}")
             print(f"epochs: {args.epochs}")
@@ -2211,6 +3161,8 @@ def main():
             print(f"num_classes: {num_classes}")
             print(f"train_size: {len(train_dataset)} | test_size: {len(test_dataset)}")
             print(f"class_train_counts: {class_size_brief}")
+            if label_cards:
+                print(f"label_cards: {label_cards}")
 
         shot_summaries = []
         for shot_idx, shot in enumerate(shots):
@@ -2231,6 +3183,9 @@ def main():
                     test_label_to_indices=test_label_to_indices,
                     num_classes=num_classes,
                     expected_class_tokens=class_tokens,
+                    label_verbalizers=label_verbalizers,
+                    label_to_class_id=label_to_class_id,
+                    label_cards=label_cards,
                     local_rank=local_rank,
                     world_size=world_size,
                     rank=rank,

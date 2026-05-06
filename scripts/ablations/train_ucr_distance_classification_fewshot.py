@@ -137,7 +137,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name within the selected family.")

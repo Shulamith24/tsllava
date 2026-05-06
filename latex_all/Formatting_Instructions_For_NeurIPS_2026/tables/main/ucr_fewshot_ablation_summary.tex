@@ -1,0 +1,18 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Summary of top-level ablations on the 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs. Best is bold, and the best ablated variant in each column is underlined. Since UCR labels are anonymous, the label-space ablation isolates closed-set class-token scoring rather than semantic label priors.}
+\label{tab:ablation-summary}
+\begin{tabular}{lrrrrr}
+\toprule
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg \\
+\midrule
+ChronoMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} \\
+\midrule
+w/o Curriculum Pretraining & 44.70 & \underline{51.81} & 60.65 & \underline{66.60} & \underline{55.94} \\
+Temporal only & 43.51 & 50.55 & 58.40 & 64.39 & 54.21 \\
+Visual only & \underline{45.88} & 50.02 & \underline{60.86} & 63.58 & 55.09 \\
+w/o Class-Token Label-Space Scoring & 44.46 & 50.44 & 60.08 & 65.59 & 55.14 \\
+\bottomrule
+\end{tabular}
+\end{table}

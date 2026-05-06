@@ -65,9 +65,9 @@ class ModelDefaults:
 
 
 MODEL_DEFAULTS: Dict[str, ModelDefaults] = {
-    "resnet": ModelDefaults(epochs=100, batch_size=64, lr=1e-3, weight_decay=4e-3, dropout=0.0),
-    "tapnet": ModelDefaults(epochs=100, batch_size=16, lr=1e-3, weight_decay=1e-4, dropout=0.5),
-    "inceptiontime": ModelDefaults(epochs=100, batch_size=16, lr=1e-3, weight_decay=0.0, dropout=0.0),
+    "resnet": ModelDefaults(epochs=60, batch_size=64, lr=1e-3, weight_decay=4e-3, dropout=0.0),
+    "tapnet": ModelDefaults(epochs=60, batch_size=16, lr=1e-3, weight_decay=1e-4, dropout=0.5),
+    "inceptiontime": ModelDefaults(epochs=60, batch_size=16, lr=1e-3, weight_decay=0.0, dropout=0.0),
 }
 
 
@@ -113,7 +113,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name within the selected family.")

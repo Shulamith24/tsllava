@@ -1,0 +1,20 @@
+% Requires \usepackage{booktabs,graphicx}
+\begin{table*}[t]
+\centering
+\caption{Semantic-prior class-token ablation on three external datasets (accuracy, \%). Each cell reports mean $\pm$ standard deviation over 10 runs under the same few-shot protocol. The better variant within each dataset-shot column is bold. $\Delta$ denotes Semantic prior minus Anonymous labels.}
+\label{tab:m2-semantic-prior-ablation-accuracy}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+Variant & \multicolumn{3}{c}{MIT-BIH} & \multicolumn{3}{c}{SleepEDF} & \multicolumn{3}{c}{CinC2017} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+ & 10-shot & 20-shot & 30-shot & 10-shot & 20-shot & 30-shot & 10-shot & 20-shot & 30-shot \\
+\midrule
+Anonymous labels & 55.03 $\pm$ 9.40 & 63.95 $\pm$ 13.80 & 64.15 $\pm$ 5.32 & 37.98 $\pm$ 3.69 & 48.80 $\pm$ 2.31 & 54.69 $\pm$ 3.67 & {32.80 $\pm$ 9.08} & \textbf{36.98 $\pm$ 4.27} & 34.13 $\pm$ 9.73 \\
+Semantic prior & \textbf{57.05 $\pm$ 10.96} & \textbf{66.62 $\pm$ 6.54} & \textbf{68.87 $\pm$ 11.23} & \textbf{42.56 $\pm$ 3.24} & \textbf{52.69 $\pm$ 5.05} & \textbf{57.24 $\pm$ 4.34} & 
+\textbf{34.72 $\pm$ 3.15} & 35.24 $\pm$ 1.24 & \textbf{38.86 $\pm$ 7.00} \\
+Semantic prior $-$ Anonymous & +2.02 & +2.67 & +4.72 & +4.58 & +3.89 & +2.55 & +1.92 & -1.74 & +4.73 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}

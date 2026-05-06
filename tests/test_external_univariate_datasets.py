@@ -1,9 +1,27 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+import wave
+from pathlib import Path
 
 import numpy as np
 
+from opentslm.time_series_datasets.classification_utils import split_rows_stratified
+from opentslm.time_series_datasets.cinc2017af.cinc2017af_loader import (
+    CINC2017AF_SAMPLE_RATE,
+    CINC2017AF_SOURCE_SAMPLE_RATE,
+    CINC2017AF_TARGET_LENGTH,
+    center_crop_or_pad as center_crop_or_pad_cinc2017af,
+    normalize_cinc2017af_label,
+)
+from opentslm.time_series_datasets.heart_sound.heart_sound_loader import (
+    HEART_SOUND_TARGET_LENGTH,
+    build_heart_sound_rows,
+    normalize_heart_sound_label,
+    read_wav_mono,
+    resample_series as resample_heart_sound_series,
+)
 from opentslm.time_series_datasets.mitbih.mitbih_loader import (
     DE_CHAZAL_DS1_RECORDS,
     DE_CHAZAL_DS2_RECORDS,
@@ -18,7 +36,6 @@ from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (
     sleepedf_pair_key,
     split_sleepedf_subject_ids,
 )
-
 
 class ExternalUnivariateDatasetHelpersTest(unittest.TestCase):
     def test_mitbih_de_chazal_split_is_disjoint(self) -> None:
@@ -113,6 +130,84 @@ class ExternalUnivariateDatasetHelpersTest(unittest.TestCase):
             set(subject_ids),
         )
 
+    def test_cinc2017_af_label_normalization_is_stable(self) -> None:
+        self.assertEqual(CINC2017AF_SOURCE_SAMPLE_RATE, 300.0)
+        self.assertEqual(CINC2017AF_SAMPLE_RATE, 100.0)
+        self.assertEqual(CINC2017AF_TARGET_LENGTH, 3000)
+        self.assertEqual(normalize_cinc2017af_label("N"), "N")
+        self.assertEqual(normalize_cinc2017af_label("A"), "A")
+        self.assertEqual(normalize_cinc2017af_label("O"), "O")
+        self.assertEqual(normalize_cinc2017af_label("~"), "~")
+        self.assertIsNone(normalize_cinc2017af_label("x"))
+
+    def test_heart_sound_label_normalization_is_stable(self) -> None:
+        self.assertEqual(normalize_heart_sound_label("-1"), "normal")
+        self.assertEqual(normalize_heart_sound_label(1), "abnormal")
+        self.assertEqual(normalize_heart_sound_label("normal"), "normal")
+        self.assertEqual(normalize_heart_sound_label("abnormal"), "abnormal")
+        self.assertIsNone(normalize_heart_sound_label("0"))
+
+    def test_stratified_split_is_reproducible_and_preserves_classes(self) -> None:
+        rows = [
+            {"record_name": f"{label}_{index:02d}", "label": label}
+            for label in ("normal", "abnormal")
+            for index in range(10)
+        ]
+        first = split_rows_stratified(rows, seed=42)
+        second = split_rows_stratified(rows, seed=42)
+
+        self.assertEqual(
+            [[row["record_name"] for row in split] for split in first],
+            [[row["record_name"] for row in split] for split in second],
+        )
+        self.assertEqual([len(split) for split in first], [14, 2, 4])
+        for split in first:
+            self.assertEqual({row["label"] for row in split}, {"normal", "abnormal"})
+
+    def test_cinc2017_fixed_length_helper_pads_crops_and_cleans(self) -> None:
+        short = center_crop_or_pad_cinc2017af(np.asarray([1.0, np.nan], dtype=np.float32), target_length=4)
+        long = center_crop_or_pad_cinc2017af(np.arange(6, dtype=np.float32), target_length=4)
+
+        np.testing.assert_allclose(short, np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+        np.testing.assert_allclose(long, np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+
+    def test_heart_sound_wav_reader_and_resampler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / "sample.wav"
+            values = np.linspace(-0.5, 0.5, 2000, dtype=np.float32)
+            pcm = np.clip(values * 32767.0, -32768, 32767).astype("<i2")
+            with wave.open(str(wav_path), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(2000)
+                writer.writeframes(pcm.tobytes())
+
+            signal, sample_rate = read_wav_mono(wav_path)
+            resampled = resample_heart_sound_series(signal, source_rate=sample_rate, target_rate=500.0)
+
+            self.assertEqual(sample_rate, 2000.0)
+            self.assertEqual(signal.shape, (2000,))
+            self.assertEqual(resampled.shape, (500,))
+
+    def test_heart_sound_build_rows_from_training_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "cinc2016heart"
+            training_dir = root / "training-a"
+            training_dir.mkdir(parents=True)
+            (training_dir / "REFERENCE.csv").write_text("a0001,-1\na0002,1\n", encoding="utf-8")
+            values = np.linspace(-0.25, 0.25, 2000, dtype=np.float32)
+            pcm = np.clip(values * 32767.0, -32768, 32767).astype("<i2")
+            for record_name in ("a0001", "a0002"):
+                with wave.open(str(training_dir / f"{record_name}.wav"), "wb") as writer:
+                    writer.setnchannels(1)
+                    writer.setsampwidth(2)
+                    writer.setframerate(2000)
+                    writer.writeframes(pcm.tobytes())
+
+            rows = build_heart_sound_rows(raw_data_path=str(root))
+
+            self.assertEqual([row["label"] for row in rows], ["normal", "abnormal"])
+            self.assertTrue(all(row["time_series"].shape == (HEART_SOUND_TARGET_LENGTH,) for row in rows))
 
 if __name__ == "__main__":
     unittest.main()

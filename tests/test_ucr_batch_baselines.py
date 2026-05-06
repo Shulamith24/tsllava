@@ -4,10 +4,12 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
 
+from scripts.ablations.ucr_fewshot_baseline_utils import load_univariate_arrays
 from scripts.ablations.train_ucr_distance_classification_fewshot import (
     dtw_distance,
     predict_1nn,
@@ -91,7 +93,15 @@ class UCRBatchBaselineTest(unittest.TestCase):
 
     def test_registry_contains_new_fewshot_baselines(self) -> None:
         experiments = list_experiments()
-        for experiment in ("1nn_ed", "1nn_dtw", "resnet", "tapnet", "inceptiontime", "tslib_dlinear"):
+        for experiment in (
+            "1nn_ed",
+            "1nn_dtw",
+            "m2_no_llm_linear",
+            "resnet",
+            "tapnet",
+            "inceptiontime",
+            "tslib_dlinear",
+        ):
             self.assertIn(experiment, experiments)
 
         entry_ed = get_entry("1nn_ed", "fewshot")
@@ -101,6 +111,11 @@ class UCRBatchBaselineTest(unittest.TestCase):
 
         entry_dtw = get_entry("1nn_dtw", "fewshot")
         self.assertEqual(entry_dtw.fixed_args, ("--metric", "dtw"))
+
+        entry_m2_no_llm = get_entry("m2_no_llm_linear", "fewshot")
+        self.assertEqual(entry_m2_no_llm.default_shots, "1,2,5,10")
+        self.assertTrue(entry_m2_no_llm.script_path.name.endswith("train_m2_no_llm_linear_classification_fewshot.py"))
+        self.assertTrue(entry_m2_no_llm.supports_inner_resume)
 
         entry_resnet = get_entry("resnet", "fewshot")
         self.assertEqual(entry_resnet.fixed_args, ("--model", "resnet"))
@@ -117,6 +132,58 @@ class UCRBatchBaselineTest(unittest.TestCase):
         self.assertEqual(entry_tslib_dlinear.fixed_args, ("--model", "dlinear"))
         self.assertEqual(entry_tslib_dlinear.default_shots, "1,2,5,10,full")
         self.assertTrue(entry_tslib_dlinear.supports_inner_resume)
+
+    def test_external_fixed_length_families_load_as_baseline_arrays(self) -> None:
+        rows = (
+            [
+                {"record_name": "r1", "label": "N", "time_series": np.asarray([0.0, 1.0], dtype=np.float32)},
+                {"record_name": "r2", "label": "A", "time_series": np.asarray([1.0, 0.0], dtype=np.float32)},
+            ],
+            [],
+            [
+                {"record_name": "r3", "label": "N", "time_series": np.asarray([0.5, 1.0], dtype=np.float32)},
+                {"record_name": "r4", "label": "A", "time_series": np.asarray([1.0, 0.5], dtype=np.float32)},
+            ],
+        )
+        with mock.patch("scripts.ablations.ucr_fewshot_baseline_utils.load_cinc2017af_splits", return_value=rows):
+            payload = load_univariate_arrays(
+                "CinC2017AF",
+                data_path="./data",
+                normalize=False,
+                dataset_family="cinc2017af",
+                split_protocol="default",
+            )
+
+        self.assertEqual(payload["dataset_family"], "cinc2017af")
+        self.assertEqual(payload["dataset_name"], "CinC2017AF")
+        self.assertEqual(payload["split_protocol"], "stratified")
+        self.assertEqual(payload["train_features"].shape, (2, 2))
+        self.assertEqual(payload["test_features"].shape, (2, 2))
+
+        heart_rows = (
+            [
+                {"record_name": "a0001", "label": "normal", "time_series": np.asarray([0.0, 1.0], dtype=np.float32)},
+                {"record_name": "a0002", "label": "abnormal", "time_series": np.asarray([1.0, 0.0], dtype=np.float32)},
+            ],
+            [],
+            [
+                {"record_name": "a0003", "label": "normal", "time_series": np.asarray([0.5, 1.0], dtype=np.float32)},
+                {"record_name": "a0004", "label": "abnormal", "time_series": np.asarray([1.0, 0.5], dtype=np.float32)},
+            ],
+        )
+        with mock.patch("scripts.ablations.ucr_fewshot_baseline_utils.load_heart_sound_splits", return_value=heart_rows):
+            heart_payload = load_univariate_arrays(
+                "CinC2016HeartSound",
+                data_path="./data",
+                normalize=False,
+                dataset_family="cinc2016heart",
+                split_protocol="default",
+            )
+
+        self.assertEqual(heart_payload["dataset_family"], "cinc2016heart")
+        self.assertEqual(heart_payload["dataset_name"], "CinC2016HeartSound")
+        self.assertEqual(heart_payload["split_protocol"], "stratified")
+        self.assertEqual(heart_payload["train_features"].shape, (2, 2))
 
     def test_smoke_runs_write_fewshot_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

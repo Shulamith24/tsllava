@@ -1,0 +1,14 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Ablation of the LLM backbone on the 120 shared UCR datasets covered by both runs. Each value is benchmark-level mean accuracy (\%) over the available runs recorded in the result files. Drop denotes the average accuracy decrease relative to full ChronoMorph.}
+\label{tab:ablation-llm-backbone}
+\begin{tabular}{lrrrrrr}
+\toprule
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop \\
+\midrule
+ChronoMorph & \textbf{47.93} & \textbf{54.98} & \textbf{63.27} & \textbf{68.48} & \textbf{58.67} & -- \\
+w/o LLM Backbone & 42.95 & 48.20 & 57.06 & 61.01 & 52.31 & 6.36 \\
+\bottomrule
+\end{tabular}
+\end{table}

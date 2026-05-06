@@ -1,0 +1,24 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Average few-shot accuracy (\%) on three external datasets, computed over 10-, 20-, and 30-shot settings with 10 runs per setting. Best is bold and second-best is underlined.}
+\label{tab:external-fewshot-avg}
+\begin{tabular}{lrrrr}
+\toprule
+Model & MIT-BIH & SleepEDF & CinC2017 & Avg. \\
+\midrule
+ChronoMorph & \textbf{61.04} & 47.16 & \textbf{34.63} & \underline{47.61} \\
+ResNet & 50.23 & \textbf{66.84} & \underline{33.63} & \textbf{50.23} \\
+TapNet & 38.73 & \underline{66.70} & 31.29 & 45.57 \\
+COSCO-ResNet & 36.19 & 62.74 & 32.48 & 43.80 \\
+PatchTST & 50.46 & 28.92 & 29.21 & 36.20 \\
+OneFitsAll & 43.42 & 27.05 & 29.19 & 33.22 \\
+TimesNet & 53.79 & 23.23 & 28.36 & 35.13 \\
+DLinear & \underline{57.29} & 19.81 & 24.87 & 33.99 \\
+Autoformer & 41.64 & 26.48 & 27.45 & 31.86 \\
+Crossformer & 56.76 & 24.93 & 25.62 & 35.77 \\
+FEDformer & 56.93 & 21.79 & 25.05 & 34.59 \\
+Informer & 53.25 & 22.45 & 28.39 & 34.70 \\
+\bottomrule
+\end{tabular}
+\end{table}

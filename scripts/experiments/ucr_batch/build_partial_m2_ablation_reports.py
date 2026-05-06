@@ -121,8 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             dataset_allowlist=pretrain_allowlist,
             items=[
                 {
-                    "key": "duotsp",
-                    "label": "DuoTSP",
+                    "key": "chronomorph",
+                    "label": "ChronoMorph",
                     "results_txt": str(REFERENCE_RESULTS),
                     "primary": True,
                 },

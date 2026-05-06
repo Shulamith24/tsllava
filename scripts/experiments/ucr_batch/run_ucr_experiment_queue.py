@@ -21,6 +21,13 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from registry import REPO_ROOT, list_experiments  # noqa: E402
 
 RUN_UCR_BATCH = SCRIPT_DIR / "run_ucr_batch.py"
+SUPPORTED_DATASET_FAMILIES = (
+    "ucr",
+    "mitbih",
+    "sleepedf",
+    "cinc2017af",
+    "cinc2016heart",
+)
 BLOCKED_FORWARD_ARGS = {
     "--experiment",
     "--protocol",
@@ -35,6 +42,7 @@ BLOCKED_FORWARD_ARGS = {
 class ActiveTask:
     queue_index: int
     experiment: str
+    dataset_family: str | None
     job_name: str
     gpu_id: str
     command: list[str]
@@ -48,6 +56,7 @@ class ActiveTask:
 class TaskResult:
     queue_index: int
     experiment: str
+    dataset_family: str | None
     job_name: str
     gpu_id: str
     return_code: int
@@ -55,6 +64,13 @@ class TaskResult:
     elapsed_seconds: float
     log_path: str
     command: list[str]
+
+
+@dataclass(frozen=True)
+class QueuedTask:
+    queue_index: int
+    experiment: str
+    dataset_family: str | None
 
 
 def parse_gpu_ids(raw_value: str) -> list[str]:
@@ -88,6 +104,38 @@ def parse_experiment_list(raw_value: str) -> list[str]:
         seen.add(token)
         deduped.append(token)
     return deduped
+
+
+def parse_dataset_family_list(raw_value: str | None) -> list[str]:
+    if raw_value is None:
+        return []
+    tokens = [item.strip().lower() for item in re.split(r"[\s,]+", raw_value) if item.strip()]
+    if not tokens:
+        raise ValueError("--dataset-families must contain at least one dataset family")
+    supported = set(SUPPORTED_DATASET_FAMILIES)
+    unknown = [family for family in tokens if family not in supported]
+    if unknown:
+        raise ValueError(
+            "Unknown dataset families: " + ", ".join(unknown) + ". "
+            "Use one of: " + ", ".join(SUPPORTED_DATASET_FAMILIES)
+        )
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for family in tokens:
+        if family in seen:
+            continue
+        seen.add(family)
+        deduped.append(family)
+    return deduped
+
+
+def cli_option_value(argv: Sequence[str], flag_name: str) -> str | None:
+    for idx, token in enumerate(argv):
+        if token == flag_name and idx + 1 < len(argv):
+            return argv[idx + 1]
+        if token.startswith(f"{flag_name}="):
+            return token.split("=", 1)[1]
+    return None
 
 
 def validate_experiments(experiments: Sequence[str]) -> None:
@@ -129,9 +177,17 @@ def parse_args(argv: Sequence[str] | None = None):
         help="Whitespace/comma-separated experiment names, e.g. 'onefitsall patchtst resnet'",
     )
     parser.add_argument("--protocol", required=True, choices=["full", "fewshot"])
-    parser.add_argument("--job-name-template", default="{experiment}")
+    parser.add_argument("--job-name-template", default=None)
     parser.add_argument("--data-path", default=str(REPO_ROOT / "data"))
     parser.add_argument("--gpu-ids", required=True, help="Comma-separated physical CUDA device ids.")
+    parser.add_argument(
+        "--dataset-families",
+        default=None,
+        help=(
+            "Optional whitespace/comma-separated dataset families. "
+            "When provided, the queue runs every family x experiment pair."
+        ),
+    )
     parser.add_argument(
         "--launcher-name",
         default=None,
@@ -150,28 +206,42 @@ def parse_args(argv: Sequence[str] | None = None):
 
     args.experiments = parse_experiment_list(args.experiments)
     args.gpu_ids = parse_gpu_ids(args.gpu_ids)
+    args.dataset_families = parse_dataset_family_list(args.dataset_families)
+    if args.dataset_families and cli_option_value(forward_args, "--dataset_family") is not None:
+        raise ValueError("Use --dataset-families at the queue level instead of forwarding --dataset_family.")
+    if args.job_name_template is None:
+        args.job_name_template = "{dataset_family}_{experiment}" if args.dataset_families else "{experiment}"
     validate_experiments(args.experiments)
     validate_forward_args(forward_args)
     return args, forward_args
 
 
-def default_launcher_name(*, protocol: str, experiments: Sequence[str]) -> str:
+def default_launcher_name(*, protocol: str, experiments: Sequence[str], dataset_families: Sequence[str]) -> str:
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
-    return f"queue_{protocol}_{len(experiments)}exp_{timestamp}"
+    family_part = f"_{len(dataset_families)}fam" if dataset_families else ""
+    return f"queue_{protocol}_{len(experiments)}exp{family_part}_{timestamp}"
 
 
-def format_job_name(template: str, *, experiment: str, protocol: str, queue_index: int) -> str:
+def format_job_name(
+    template: str,
+    *,
+    experiment: str,
+    protocol: str,
+    queue_index: int,
+    dataset_family: str,
+) -> str:
     try:
         return template.format(
             experiment=experiment,
             protocol=protocol,
             index=queue_index,
+            dataset_family=dataset_family,
         )
     except KeyError as exc:
         missing = exc.args[0]
         raise ValueError(
             f"--job-name-template references unknown placeholder {{{missing}}}. "
-            "Supported placeholders: {experiment}, {protocol}, {index}"
+            "Supported placeholders: {experiment}, {protocol}, {index}, {dataset_family}"
         ) from exc
 
 
@@ -182,6 +252,7 @@ def build_command(
     job_name: str,
     data_path: str,
     gpu_id: str,
+    dataset_family: str | None,
     forward_args: Sequence[str],
     dry_run: bool,
 ) -> list[str]:
@@ -201,9 +272,13 @@ def build_command(
     ]
     if dry_run:
         command.append("--dry-run")
-    if forward_args:
+    managed_forward_args: list[str] = []
+    if dataset_family is not None:
+        managed_forward_args.extend(["--dataset_family", dataset_family])
+    managed_forward_args.extend(forward_args)
+    if managed_forward_args:
         command.append("--")
-        command.extend(forward_args)
+        command.extend(managed_forward_args)
     return command
 
 
@@ -218,6 +293,7 @@ def write_launcher_config(
         "protocol": args.protocol,
         "job_name_template": args.job_name_template,
         "data_path": str(Path(args.data_path).resolve()),
+        "dataset_families": list(args.dataset_families),
         "gpu_ids": list(args.gpu_ids),
         "poll_seconds": args.poll_seconds,
         "dry_run": bool(args.dry_run),
@@ -232,18 +308,20 @@ def write_launcher_config(
 
 def launch_task(
     *,
-    queue_index: int,
+    queued_task: QueuedTask,
     experiment: str,
     gpu_id: str,
     args,
     forward_args: Sequence[str],
     logs_dir: Path,
 ) -> ActiveTask:
+    dataset_family_for_name = queued_task.dataset_family or cli_option_value(forward_args, "--dataset_family") or "ucr"
     job_name = format_job_name(
         args.job_name_template,
         experiment=experiment,
         protocol=args.protocol,
-        queue_index=queue_index,
+        queue_index=queued_task.queue_index,
+        dataset_family=dataset_family_for_name,
     )
     command = build_command(
         experiment=experiment,
@@ -251,10 +329,12 @@ def launch_task(
         job_name=job_name,
         data_path=args.data_path,
         gpu_id=gpu_id,
+        dataset_family=queued_task.dataset_family,
         forward_args=forward_args,
         dry_run=args.dry_run,
     )
-    log_path = logs_dir / f"{queue_index:02d}_{experiment}.log"
+    family_prefix = f"{queued_task.dataset_family}_" if queued_task.dataset_family is not None else ""
+    log_path = logs_dir / f"{queued_task.queue_index:02d}_{family_prefix}{experiment}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = open(log_path, "w", encoding="utf-8")
     log_handle.write(f"GPU_ID={gpu_id}\n")
@@ -269,8 +349,9 @@ def launch_task(
         text=True,
     )
     return ActiveTask(
-        queue_index=queue_index,
+        queue_index=queued_task.queue_index,
         experiment=experiment,
+        dataset_family=queued_task.dataset_family,
         job_name=job_name,
         gpu_id=gpu_id,
         command=command,
@@ -289,6 +370,7 @@ def finalize_task(task: ActiveTask, return_code: int) -> TaskResult:
     return TaskResult(
         queue_index=task.queue_index,
         experiment=task.experiment,
+        dataset_family=task.dataset_family,
         job_name=task.job_name,
         gpu_id=task.gpu_id,
         return_code=return_code,
@@ -335,6 +417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     launcher_name = args.launcher_name or default_launcher_name(
         protocol=args.protocol,
         experiments=args.experiments,
+        dataset_families=args.dataset_families,
     )
     launcher_root = REPO_ROOT / "results" / "ucr_batches" / "_launchers" / launcher_name
     logs_dir = launcher_root / "logs"
@@ -347,7 +430,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         forward_args=forward_args,
     )
 
-    pending = deque(enumerate(args.experiments, start=1))
+    if args.dataset_families:
+        task_specs = []
+        index = 1
+        for dataset_family in args.dataset_families:
+            for experiment in args.experiments:
+                task_specs.append(
+                    QueuedTask(
+                        queue_index=index,
+                        experiment=experiment,
+                        dataset_family=dataset_family,
+                    )
+                )
+                index += 1
+    else:
+        task_specs = [
+            QueuedTask(queue_index=index, experiment=experiment, dataset_family=None)
+            for index, experiment in enumerate(args.experiments, start=1)
+        ]
+    pending = deque(task_specs)
     available_gpus = deque(args.gpu_ids)
     active_tasks: list[ActiveTask] = []
     results: list[TaskResult] = []
@@ -355,26 +456,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(
         f"Queue launcher: {launcher_name} | protocol={args.protocol} | "
-        f"experiments={len(args.experiments)} | gpus={','.join(args.gpu_ids)}"
+        f"tasks={len(task_specs)} | experiments={len(args.experiments)} | "
+        f"families={','.join(args.dataset_families) if args.dataset_families else 'forward/default'} | "
+        f"gpus={','.join(args.gpu_ids)}"
     )
     print(f"Launcher root: {launcher_root}")
 
     try:
         while pending or active_tasks:
             while pending and available_gpus:
-                queue_index, experiment = pending.popleft()
+                queued_task = pending.popleft()
                 gpu_id = available_gpus.popleft()
                 task = launch_task(
-                    queue_index=queue_index,
-                    experiment=experiment,
+                    queued_task=queued_task,
+                    experiment=queued_task.experiment,
                     gpu_id=gpu_id,
                     args=args,
                     forward_args=forward_args,
                     logs_dir=logs_dir,
                 )
                 active_tasks.append(task)
+                family_label = task.dataset_family or "forward/default"
                 print(
-                    f"[LAUNCH] gpu={gpu_id} experiment={experiment} "
+                    f"[LAUNCH] gpu={gpu_id} family={family_label} experiment={task.experiment} "
                     f"job={task.job_name} log={task.log_path}"
                 )
 
@@ -391,8 +495,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     active_tasks.pop(index)
                     available_gpus.append(task.gpu_id)
                     tag = "OK" if result.return_code == 0 else "FAILED"
+                    family_label = result.dataset_family or "forward/default"
                     print(
-                        f"[{tag}] gpu={result.gpu_id} experiment={result.experiment} "
+                        f"[{tag}] gpu={result.gpu_id} family={family_label} experiment={result.experiment} "
                         f"exit={result.return_code} elapsed={result.elapsed_seconds:.1f}s "
                         f"log={result.log_path}"
                     )
@@ -424,7 +529,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         active_tasks.clear()
     finally:
-        pending_experiments = [experiment for _idx, experiment in pending]
+        pending_experiments = [
+            f"{task.dataset_family}:{task.experiment}" if task.dataset_family else task.experiment
+            for task in pending
+        ]
         write_summary(
             summary_path=summary_path,
             results=results,

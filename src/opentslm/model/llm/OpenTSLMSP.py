@@ -602,6 +602,9 @@ class OpenTSLMSP(TimeSeriesLLM):
         answers: List[str] of length B
         """
         answers = [b["answer"] for b in batch]
+        sample_level_answer_loss = any(
+            sample.get("answer_loss_normalization") == "sample" for sample in batch
+        )
 
         encoder_outputs = None
         batch_outputs = self.pad_and_apply_batch(
@@ -630,15 +633,37 @@ class OpenTSLMSP(TimeSeriesLLM):
         # labels: only on the answer tokens
         total_len = attention_mask.size(1)
         labels = torch.full((B, total_len), -100, device=self.device, dtype=torch.long)
-        labels[:, L:] = ans_ids
-
-        outputs = self.llm(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_dict=True,
-        )
-        loss_lm = outputs.loss
+        if sample_level_answer_loss:
+            labels[:, L:] = torch.where(
+                ans_mask.bool(),
+                ans_ids,
+                torch.full_like(ans_ids, -100),
+            )
+            outputs = self.llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+            shift_logits = outputs.logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            valid_mask = shift_labels.ne(-100)
+            safe_labels = shift_labels.masked_fill(~valid_mask, 0)
+            token_losses = F.cross_entropy(
+                shift_logits.float().reshape(-1, shift_logits.size(-1)),
+                safe_labels.reshape(-1),
+                reduction="none",
+            ).view(B, -1)
+            token_counts = valid_mask.sum(dim=1).clamp_min(1)
+            loss_lm = ((token_losses * valid_mask).sum(dim=1) / token_counts).mean()
+        else:
+            labels[:, L:] = ans_ids
+            outputs = self.llm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                labels=labels,
+                return_dict=True,
+            )
+            loss_lm = outputs.loss
         loss_align = torch.zeros((), device=self.device, dtype=loss_lm.dtype)
         loss_consistency = torch.zeros((), device=self.device, dtype=loss_lm.dtype)
         loss_total = loss_lm

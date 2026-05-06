@@ -1,0 +1,16 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Semantic-prior class-token ablation on external datasets. Values are average accuracy (\%) over 10-, 20-, and 30-shot settings with 10 runs per setting. $\Delta$ denotes Semantic prior minus Anonymous labels.}
+\label{tab:semantic-prior-summary}
+\begin{tabular}{lrrrr}
+\toprule
+Variant & MIT-BIH & SleepEDF & CinC2017 & Avg. \\
+\midrule
+Anonymous class tokens & 61.04 & 47.16 & 34.63 & 47.61 \\
+Semantic-prior class tokens & \textbf{64.18} & \textbf{50.83} & \textbf{36.27} & \textbf{50.43} \\
+\midrule
+$\Delta$ & +3.14 & +3.67 & +1.64 & +2.82 \\
+\bottomrule
+\end{tabular}
+\end{table}

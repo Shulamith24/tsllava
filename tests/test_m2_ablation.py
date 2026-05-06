@@ -16,6 +16,8 @@ from scripts.experiments.ucr_batch.m2_ablation_common import (
 )
 from scripts.experiments.ucr_batch.run_m2_dual_view_ablation import main as run_dual_view_ablation_main
 import scripts.experiments.ucr_batch.run_m2_dual_view_ablation as run_dual_view_ablation
+from scripts.experiments.ucr_batch.run_m2_no_llm_backbone_ablation import main as run_no_llm_ablation_main
+import scripts.experiments.ucr_batch.run_m2_no_llm_backbone_ablation as run_no_llm_ablation
 
 
 LEDGER_FIELDS = [
@@ -310,6 +312,85 @@ class M2AblationTest(unittest.TestCase):
             self.assertEqual(config["items"][0]["job_dir"], str(reference_job.resolve()))
             subset_manifest = json.loads((report_dir / "subset_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(subset_manifest["selected_dataset_count"], 2)
+
+    def test_no_llm_launcher_runs_linear_variant_and_writes_report_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = _write_ucr_archive(
+                tmp_path,
+                {
+                    "Alpha": (6, 6, 12, 2),
+                    "Beta": (8, 6, 16, 3),
+                    "Gamma": (10, 8, 20, 4),
+                },
+            )
+            forward_args = [
+                "--local_checkpoint",
+                "/old/checkpoint.pt",
+                "--epochs",
+                "60",
+                "--num_runs",
+                "5",
+                "--shots",
+                "1,2,5,10",
+                "--resume",
+            ]
+            reference_job = _write_job_dir(tmp_path / "reference_job", _complete_rows(["Alpha", "Beta", "Gamma"]), forward_args=forward_args)
+            comparison_job = _write_job_dir(tmp_path / "comparison_job", _complete_rows(["Alpha", "Beta", "Gamma"]))
+
+            captured_argvs: list[list[str]] = []
+
+            def _fake_run_ucr_batch(argv):
+                captured_argvs.append(list(argv))
+                return 0
+
+            report_root = tmp_path / "reports"
+            with mock.patch.object(run_no_llm_ablation, "run_ucr_batch_main", side_effect=_fake_run_ucr_batch), mock.patch.object(
+                run_no_llm_ablation,
+                "default_report_dir",
+                side_effect=lambda report_name: report_root / report_name.replace(" ", "_"),
+            ):
+                exit_code = run_no_llm_ablation_main(
+                    [
+                        "--local_checkpoint",
+                        "/new/checkpoint.pt",
+                        "--data_path",
+                        str(archive.parent),
+                        "--reference_job_dir",
+                        str(reference_job),
+                        "--comparison_job_dir",
+                        str(comparison_job),
+                        "--num_datasets",
+                        "2",
+                        "--sampling_seed",
+                        "11",
+                        "--report_name",
+                        "no_llm_test",
+                        "--start_from",
+                        "Beta",
+                        "--dry_run",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(captured_argvs), 1)
+            argv = captured_argvs[0]
+            self.assertIn("m2_no_llm_linear", argv)
+            self.assertIn("/new/checkpoint.pt", argv)
+            self.assertNotIn("/old/checkpoint.pt", argv)
+            self.assertIn("1,2,5,10", argv)
+            self.assertEqual(argv[argv.index("--start-from") + 1], "Beta")
+
+            report_dir = report_root / "no_llm_test"
+            config = json.loads((report_dir / "report_config.generated.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["family_label"], "Effect of LLM Backbone")
+            self.assertEqual(config["reference_key"], "m2_llm")
+            self.assertEqual([item["key"] for item in config["items"]], ["m2_llm", "no_llm_linear"])
+            self.assertEqual(config["items"][0]["job_dir"], str(reference_job.resolve()))
+            subset_manifest = json.loads((report_dir / "subset_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(subset_manifest["selected_dataset_count"], 2)
+            request_payload = json.loads((report_dir / "ablation_request.json").read_text(encoding="utf-8"))
+            self.assertEqual(request_payload["start_from"], "Beta")
 
     def test_pretrain_builder_auto_falls_back_to_two_way(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

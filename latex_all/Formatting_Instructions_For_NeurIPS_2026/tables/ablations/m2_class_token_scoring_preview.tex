@@ -1,0 +1,14 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Ablation of closed-set class-token label-space scoring on the 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full ChronoMorph model. Since UCR labels are anonymous, this ablation does not evaluate semantic label priors.}
+\label{tab:ablation-decoding}
+\begin{tabular}{lrrrrrr}
+\toprule
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop \\
+\midrule
+w/o Class-Token Label-Space Scoring & 44.46 & 50.44 & 60.08 & 65.59 & 55.14 & 4.15 \\
+ChronoMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

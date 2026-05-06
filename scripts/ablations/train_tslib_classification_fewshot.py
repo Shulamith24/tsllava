@@ -114,7 +114,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--dataset_family",
         type=str,
         default="ucr",
-        choices=["ucr", "mitbih", "sleepedf"],
+        choices=["ucr", "mitbih", "sleepedf", "cinc2017af", "cinc2016heart"],
         help="Univariate classification dataset family.",
     )
     parser.add_argument("--dataset", type=str, default=None)
@@ -128,7 +128,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     parser.add_argument("--context_length", type=int, default=None)
     parser.add_argument("--pad_mode", type=str, default="zero", choices=["zero", "last", "repeat"])
-    parser.add_argument("--train_epochs", type=int, default=None)
+    parser.add_argument("--train_epochs", "--epochs", dest="train_epochs", type=int, default=60)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--eval_batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=None)

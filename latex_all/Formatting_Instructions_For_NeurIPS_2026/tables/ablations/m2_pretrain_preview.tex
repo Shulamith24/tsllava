@@ -1,0 +1,14 @@
+% Requires \usepackage{booktabs}
+\begin{table}[t]
+\centering
+\caption{Ablation of aggregate curriculum pretraining on the 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full ChronoMorph model.}
+\label{tab:ablation-pretrain}
+\begin{tabular}{lrrrrrr}
+\toprule
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop \\
+\midrule
+w/o Curriculum Pretraining & 44.70 & 51.81 & 60.65 & 66.60 & 55.94 & 3.35 \\
+ChronoMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}

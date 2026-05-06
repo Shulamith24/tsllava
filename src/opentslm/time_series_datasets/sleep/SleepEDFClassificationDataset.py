@@ -12,7 +12,12 @@ import torch
 
 from opentslm.prompt.text_time_series_prompt import TextTimeSeriesPrompt
 from opentslm.time_series_datasets.LazyQADataset import LazyQADataset
-from opentslm.time_series_datasets.classification_utils import build_label_token_mapping
+from opentslm.time_series_datasets.classification_utils import (
+    build_label_interface_mapping,
+    build_label_token_mapping,
+    format_label_card_options,
+    format_label_verbalizer_options,
+)
 from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (
     SLEEPEDF_DEFAULT_CHANNEL,
     SLEEPEDF_DEFAULT_EPOCH_SECONDS,
@@ -27,6 +32,10 @@ class SleepEDFClassificationDataset(LazyQADataset):
     _dataset_name: ClassVar[str | None] = None
     _label_to_token: ClassVar[dict[str, str] | None] = None
     _token_to_label: ClassVar[dict[str, str] | None] = None
+    _label_mapping: ClassVar[dict[str, str] | None] = None
+    _label_verbalizers: ClassVar[dict[str, list[str]] | None] = None
+    _label_cards: ClassVar[dict[str, dict[str, Any]] | None] = None
+    _label_interface: ClassVar[str] = "anonymous"
     _num_classes: ClassVar[int | None] = None
     _class_tokens: ClassVar[List[str] | None] = None
     _ordered_labels: ClassVar[List[str] | None] = None
@@ -41,6 +50,10 @@ class SleepEDFClassificationDataset(LazyQADataset):
         split_seed: int = 42,
         channel: str = SLEEPEDF_DEFAULT_CHANNEL,
         epoch_seconds: int = SLEEPEDF_DEFAULT_EPOCH_SECONDS,
+        label_interface: str = "anonymous",
+        verbalizer_set: str = "canonical",
+        verbalizer_mode: str = "canonical",
+        semantic_target_mode: str = "class_token",
         format_sample_str: bool = False,
         time_series_format_function=None,
     ):
@@ -50,6 +63,10 @@ class SleepEDFClassificationDataset(LazyQADataset):
         self._instance_split_seed = int(split_seed)
         self._instance_channel = channel
         self._instance_epoch_seconds = int(epoch_seconds)
+        self._instance_label_interface = label_interface
+        self._instance_verbalizer_set = verbalizer_set
+        self._instance_verbalizer_mode = verbalizer_mode
+        self._instance_semantic_target_mode = semantic_target_mode
         super().__init__(
             split,
             EOS_TOKEN,
@@ -93,12 +110,41 @@ class SleepEDFClassificationDataset(LazyQADataset):
             }
             self.__class__._cache[cache_key] = payload
 
+        (
+            interface,
+            label_mapping,
+            label_verbalizers,
+            class_tokens,
+            label_cards,
+        ) = build_label_interface_mapping(
+            dataset_family="sleepedf",
+            ordered_labels=payload["ordered_labels"],
+            label_to_token=payload["label_to_token"],
+            class_tokens=payload["class_tokens"],
+            label_interface=self._instance_label_interface,
+            verbalizer_set=self._instance_verbalizer_set,
+            verbalizer_mode=self._instance_verbalizer_mode,
+            semantic_target_mode=self._instance_semantic_target_mode,
+        )
+
+        self._instance_ordered_labels = list(payload["ordered_labels"])
+        self._instance_label_to_token = dict(payload["label_to_token"])
+        self._instance_label_mapping = dict(label_mapping)
+        self._instance_label_verbalizers = dict(label_verbalizers)
+        self._instance_label_cards = dict(label_cards)
+        self._instance_class_tokens = list(class_tokens)
+        self._instance_label_interface = interface
+
         self.__class__._dataset_name = self._instance_dataset_name
-        self.__class__._ordered_labels = list(payload["ordered_labels"])
+        self.__class__._ordered_labels = list(self._instance_ordered_labels)
         self.__class__._label_to_token = dict(payload["label_to_token"])
         self.__class__._token_to_label = dict(payload["token_to_label"])
-        self.__class__._class_tokens = list(payload["class_tokens"])
-        self.__class__._num_classes = len(payload["class_tokens"])
+        self.__class__._label_mapping = dict(label_mapping)
+        self.__class__._label_verbalizers = dict(label_verbalizers)
+        self.__class__._label_cards = dict(label_cards)
+        self.__class__._label_interface = interface
+        self.__class__._class_tokens = list(class_tokens)
+        self.__class__._num_classes = len(self._instance_ordered_labels)
         return payload["train"], payload["validation"], payload["test"]
 
     @classmethod
@@ -123,19 +169,42 @@ class SleepEDFClassificationDataset(LazyQADataset):
 
     def _get_pre_prompt(self, row) -> str:
         del row
-        num_classes = self.get_num_classes()
+        num_classes = len(self._instance_ordered_labels)
+        if self._instance_label_interface == "semantic":
+            if self._instance_semantic_target_mode == "phrase":
+                options = format_label_verbalizer_options(
+                    self._instance_ordered_labels,
+                    self._instance_label_verbalizers,
+                )
+                output_instruction = "Output exactly one label phrase from the list."
+            else:
+                options = format_label_card_options(
+                    self._instance_ordered_labels,
+                    self._instance_label_cards,
+                )
+                output_instruction = "Output exactly one class token from the list."
+            return (
+                f"Classify the sleep EEG epoch into one of the following sleep stage labels:\n"
+                f"{options}\n\n"
+                f"{output_instruction}\n\n"
+                "EEG time series:"
+            )
+        class_list = ", ".join(self._instance_class_tokens)
         return (
             f"Classify the sleep EEG epoch into one of {num_classes} sleep stages.\n"
+            f"Choose exactly one label from: {class_list}.\n"
             "Output only the class token.\n\n"
             "EEG time series:"
         )
 
     def _get_post_prompt(self, row) -> str:
         del row
+        if self._instance_label_interface == "semantic" and self._instance_semantic_target_mode == "phrase":
+            return "\nLabel:"
         return "\nClass:"
 
     def _get_answer(self, row) -> str:
-        return self.get_label_mapping()[row["label"]]
+        return self._instance_label_mapping[row["label"]]
 
     def _get_text_time_series_prompt_list(self, row) -> List[TextTimeSeriesPrompt]:
         tensor = torch.as_tensor(self._slice_epoch(row), dtype=torch.float32)
@@ -154,7 +223,16 @@ class SleepEDFClassificationDataset(LazyQADataset):
     def _format_sample(self, row):
         sample = super()._format_sample(row)
         sample["original_label"] = row["label"]
-        sample["class_token"] = self.get_label_mapping()[row["label"]]
+        sample["class_token"] = self._instance_label_to_token[row["label"]]
+        sample["label_answer"] = self._instance_label_mapping[row["label"]]
+        sample["label_interface"] = self._instance_label_interface
+        sample["semantic_target_mode"] = self._instance_semantic_target_mode
+        if self._instance_label_interface == "semantic" and self._instance_semantic_target_mode == "phrase":
+            sample["answer_loss_normalization"] = "sample"
+        if row["label"] in self._instance_label_verbalizers:
+            sample["label_verbalizers"] = self._instance_label_verbalizers[row["label"]]
+        if row["label"] in self._instance_label_cards:
+            sample["label_card"] = dict(self._instance_label_cards[row["label"]])
         sample["int_label"] = int(row["int_label"])
         sample["record_name"] = row["record_name"]
         sample["subject_id"] = row["subject_id"]
@@ -178,8 +256,16 @@ class SleepEDFClassificationDataset(LazyQADataset):
 
     @classmethod
     def get_label_mapping(cls) -> dict[str, str]:
-        return dict(cls._label_to_token or {})
+        return dict(cls._label_mapping or cls._label_to_token or {})
 
     @classmethod
     def get_ordered_labels(cls) -> list[str]:
         return list(cls._ordered_labels or [])
+
+    @classmethod
+    def get_label_verbalizers(cls) -> dict[str, list[str]]:
+        return dict(cls._label_verbalizers or {})
+
+    @classmethod
+    def get_label_cards(cls) -> dict[str, dict[str, Any]]:
+        return dict(cls._label_cards or {})
