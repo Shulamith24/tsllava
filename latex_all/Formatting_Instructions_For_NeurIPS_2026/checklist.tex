@@ -113,7 +113,7 @@
 \item {\bf Experiments compute resources}
     \item[] Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce the experiments?
     \item[] Answer: \answerYes{}.
-    \item[] Justification: The paper reports the GPU type for runtime measurements and provides memory, latency, throughput, updated-parameter counts, and efficiency-probe details in Section~\ref{sec:efficiency} and Appendix~\ref{app:efficiency-summary}. A complete project-level compute budget for pretraining, main UCR runs, external runs, and ablations should be filled in Appendix~\ref{app:compute-budget} before final submission.
+    \item[] Justification: The paper reports the local compute environment, GPU type, worker setup, and project-level GPU-hour budget for the main UCR benchmark, baseline runs, external-dataset runs, ablations, and efficiency probe in Appendix~\ref{app:compute-budget}. Section~\ref{sec:efficiency} and Appendix~\ref{app:efficiency-summary} additionally provide peak memory, latency, throughput, updated-parameter counts, and per-dataset runtime details for the efficiency measurements.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the paper does not include experiments.

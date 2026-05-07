@@ -474,7 +474,32 @@ Python ML libraries, including PyTorch, Transformers, PEFT, NumPy, pandas, sciki
 \subsection{Computational Resource Reporting}
 \label{app:compute-budget}
 
-The current draft reports detailed runtime and memory measurements for the efficiency probe in Appendix~\ref{app:efficiency-summary}, including a single RTX 3090 setup, batch size 8, peak memory, train-step latency, inference latency, throughput, total parameters, and downstream-updated parameters. To fully satisfy the NeurIPS compute-resource checklist item for every experiment, the final version should additionally report the project-level compute budget for Stage I--II pretraining, optional Stage III enrichment, the main UCR benchmark, external-dataset runs, ablations, and baseline runs. This information should include the GPU type, number of GPUs, approximate wall-clock time or GPU-hours, and whether exploratory or failed runs required additional compute.
+All reported downstream experiments were run on a local server with six NVIDIA GeForce RTX 3090 GPUs (24GB each), two Intel Xeon Silver 4314 CPUs, and 251GiB system memory. Unless otherwise stated, each training job used one GPU, and the batch launchers executed up to six single-GPU workers in parallel. Table~\ref{tab:compute-budget} summarizes the compute used by the main experiment groups. GPU-hours are summed over single-GPU jobs; wall-clock time can be lower when multiple workers run concurrently. The efficiency measurements in Appendix~\ref{app:efficiency-summary} additionally report peak memory, train-step latency, inference latency, throughput, total parameters, and downstream-updated parameters on the representative runtime subset.
+
+\begin{table}[t]
+\centering
+\caption{Compute-resource budget for the reported experiment groups. Downstream jobs use single RTX 3090 workers unless noted otherwise.}
+\label{tab:compute-budget}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{3.0cm}p{5.2cm}p{2.6cm}p{2.2cm}p{2.1cm}p{3.3cm}}
+\toprule
+Experiment group & Scope & Compute workers & Mean per run & Total GPU-hours & Notes \\
+\midrule
+Stage I--II pretraining & Curriculum pretraining checkpoint used to initialize downstream adaptation & RTX 3090 workers & -- & -- & Uses the same local GPU server; stage-wise timing is recorded with the pretraining checkpoint logs. \\
+Optional Stage III enrichment & Semantic-enrichment training used outside the default UCR results & RTX 3090 workers & -- & -- & Not used for the default UCR benchmark. \\
+ChronoMorph main UCR benchmark & 128 UCR datasets, 1/2/5/10-shot, five runs per setting; 2,507 completed downstream runs & 6 single-GPU workers & 0.67 GPU-h/run & 1,677 & Batch size 8, gradient accumulation 4, 60 downstream epochs. \\
+UCR baseline runs & ResNet, TapNet, COSCO-ResNet, PatchTST, GPT4TS, and TSLib-family baselines under the same few-shot protocol & 6 single-GPU workers & 0.40--0.49 GPU-h/run & 10,937 & Includes the retained main UCR baseline logs; GPT4TS coverage is reported for the completed 60-dataset run. \\
+External-dataset ChronoMorph runs & MIT-BIH, SleepEDF, and CinC2017 under 10/20/30-shot protocols & single-GPU workers & 1.69 GPU-h/run & 153 & Same downstream adaptation recipe as the external few-shot experiments. \\
+External-dataset baseline runs & Reported baseline families on MIT-BIH, SleepEDF, and CinC2017 & single-GPU workers & 0.68 GPU-h/job & 22 & Launcher jobs cover all three external datasets and baseline families. \\
+Top-level ablations & No-pretraining, temporal-only, visual-only, class-token decoding, and no-LLM backbone ablations & 6 single-GPU workers & 1.67 GPU-h/run & 3,895 & Includes the two retained no-LLM linear runs added together. \\
+Semantic-prior ablation & External semantic-label interface runs & single-GPU workers & 1.69 GPU-h/run & 31 & Uses the same 10/20/30-shot external evaluation protocol. \\
+Efficiency probe & Representative UCR runtime subset with parameter, memory, latency, and throughput measurements & one RTX 3090 & -- & -- & Detailed runtime and memory values are reported in Tables~\ref{tab:efficiency-compact}, \ref{tab:computational-efficiency}, and \ref{tab:computational-efficiency-details}. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Retained launcher summaries also include failed or exploratory jobs. These runs account for less than 2 additional GPU-hours in the preserved logs, and dry-run checks add a negligible amount of compute.
 
 \subsection{External Dataset Results}
 \label{app:external-results}
