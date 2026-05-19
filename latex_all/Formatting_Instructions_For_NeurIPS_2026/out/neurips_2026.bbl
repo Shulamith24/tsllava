@@ -1,4 +1,4 @@
-\begin{thebibliography}{38}
+\begin{thebibliography}{32}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -32,22 +32,6 @@ Y.~Chen, Z.~Li, C.~Yang, X.~Wang, and G.~Xu.
   classifiers.
 \newblock \emph{Data Mining and Knowledge Discovery}, 39\penalty0 (5):\penalty0
   66, 2025.
-
-\bibitem[Clifford et~al.(2017)Clifford, Liu, Moody, Lehman, Silva, Li, Johnson,
-  and Mark]{clifford2017af}
-G.~D. Clifford, C.~Liu, B.~Moody, L.-W.~H. Lehman, I.~Silva, Q.~Li, A.~E.~W.
-  Johnson, and R.~G. Mark.
-\newblock {AF} classification from a short single lead {ECG} recording: The
-  {PhysioNet}/computing in cardiology challenge 2017.
-\newblock In \emph{Computing in Cardiology}, pages 1--4, 2017.
-
-\bibitem[Dau et~al.(2019)Dau, Bagnall, Kamgar, Yeh, Zhu, Gharghabi,
-  Ratanamahatana, and Keogh]{dau2019ucr}
-H.~A. Dau, A.~Bagnall, K.~Kamgar, C.-C.~M. Yeh, Y.~Zhu, S.~Gharghabi, C.~A.
-  Ratanamahatana, and E.~Keogh.
-\newblock The ucr time series archive.
-\newblock \emph{IEEE/CAA Journal of Automatica Sinica}, 6\penalty0
-  (6):\penalty0 1293--1305, 2019.
 
 \bibitem[Dempster et~al.(2020)Dempster, Petitjean, and
   Webb]{dempster2020rocket}
@@ -101,14 +85,6 @@ M.~Jin, S.~Wang, L.~Ma, Z.~Chu, J.~Zhang, X.~Shi, P.-Y. Chen, Y.~Liang, Y.-f.
   models.
 \newblock In \emph{International Conference on Learning Representations}, 2024.
 
-\bibitem[Kemp et~al.(2000)Kemp, Zwinderman, Tuk, Kamphuisen, and
-  Oberye]{kemp2000analysis}
-B.~Kemp, A.~H. Zwinderman, B.~Tuk, H.~A.~C. Kamphuisen, and J.~J.~L. Oberye.
-\newblock Analysis of a sleep-dependent neuronal feedback loop: the slow-wave
-  microcontinuity of the {EEG}.
-\newblock \emph{IEEE Transactions on Biomedical Engineering}, 47\penalty0
-  (9):\penalty0 1185--1194, 2000.
-
 \bibitem[Koo et~al.(2024)Koo, Liu, and He]{koo2024automata}
 T.~Koo, F.~Liu, and L.~He.
 \newblock Automata-based constraints for language model decoding.
@@ -129,19 +105,6 @@ H.~Liu, C.~Liu, and B.~A. Prakash.
 \newblock In \emph{Proceedings of the 2025 Conference of the Nations of the
   Americas Chapter of the Association for Computational Linguistics: Human
   Language Technologies (Volume 1: Long Papers)}, pages 7486--7518, 2025.
-
-\bibitem[Makridakis et~al.(2020)Makridakis, Spiliotis, and
-  Assimakopoulos]{makridakis2020m4}
-S.~Makridakis, E.~Spiliotis, and V.~Assimakopoulos.
-\newblock The {M4} competition: 100,000 time series and 61 forecasting methods.
-\newblock \emph{International Journal of Forecasting}, 36\penalty0
-  (1):\penalty0 54--74, 2020.
-
-\bibitem[Moody and Mark(2001)]{moody2001impact}
-G.~B. Moody and R.~G. Mark.
-\newblock The impact of the {MIT-BIH} arrhythmia database.
-\newblock \emph{IEEE Engineering in Medicine and Biology Magazine}, 20\penalty0
-  (3):\penalty0 45--50, 2001.
 
 \bibitem[Nie et~al.(2022)Nie, Nguyen, Sinthong, and Kalagnanam]{nietime}
 Y.~Nie, N.~H. Nguyen, P.~Sinthong, and J.~Kalagnanam.
@@ -197,13 +160,6 @@ W.~Tang, L.~Liu, and G.~Long.
 \newblock In \emph{2020 International joint conference on neural networks
   (IJCNN)}, pages 1--8. IEEE, 2020.
 
-\bibitem[Wang et~al.(2025)Wang, Qi, Wang, Sun, Zhuang, Wu, Zhang, and
-  Liao]{wang2025chattime}
-C.~Wang, Q.~Qi, J.~Wang, H.~Sun, Z.~Zhuang, J.~Wu, L.~Zhang, and J.~Liao.
-\newblock {ChatTime}: A unified multimodal time series foundation model
-  bridging numerical and textual data.
-\newblock In \emph{AAAI Conference on Artificial Intelligence}, 2025.
-
 \bibitem[Wang and Oates(2015{\natexlab{a}})]{wang2015encoding}
 Z.~Wang and T.~Oates.
 \newblock Encoding time series as images for visual inspection and
@@ -243,7 +199,7 @@ L.~Ye and E.~Keogh.
 
 \bibitem[Zhang et~al.(2020)Zhang, Gao, Lin, and Lu]{tapnet}
 X.~Zhang, Y.~Gao, J.~Lin, and C.-T. Lu.
-\newblock {TapNet}: Multivariate time series classification with attentional
+\newblock Tapnet: Multivariate time series classification with attentional
   prototypical network.
 \newblock In \emph{Proceedings of the AAAI Conference on Artificial
   Intelligence}, volume~34, pages 6845--6852, 2020.

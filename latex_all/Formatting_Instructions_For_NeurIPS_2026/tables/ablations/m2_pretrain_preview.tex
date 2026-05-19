@@ -1,14 +1,14 @@
 % Requires \usepackage{booktabs}
-\begin{table}[t]
+\begin{table*}[t]
 \centering
-\caption{Ablation of aggregate curriculum pretraining on the 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full ChronoMorph model.}
-\label{tab:ablation-pretrain}
-\begin{tabular}{lrrrrrr}
+\caption{Ablation results for Effect of Pretraining on UCR few-shot classification (\%). Positive delta means improvement over the reference. Preview uses the 84 datasets currently available. Blank cells indicate missing shot coverage, and averages/deltas are computed from the available cells only.}
+\label{tab:m2_pretrain_ablation_partial_preview-ablation-main}
+\begin{tabular}{lrrrrrrr}
 \toprule
-Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop \\
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Delta vs Ref & W/T/L \\
 \midrule
-w/o Curriculum Pretraining & 44.70 & 51.81 & 60.65 & 66.60 & 55.94 & 3.35 \\
-ChronoMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- \\
+DuoTSP & \textbf{47.75} & \textbf{53.96} & \textbf{63.46} & \underline{69.26} & \underline{58.61} & -0.48 & 73/4/91 \\
+Without Pretrain & \underline{46.14} &  &  & \textbf{71.82} & \textbf{58.98} & -- & -- \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}

@@ -11,6 +11,9 @@ import pandas as pd
 from scripts.experiments.ucr_batch.reporting.config import load_report_config
 from scripts.experiments.ucr_batch.reporting.latex import render_main_table
 from scripts.experiments.ucr_batch.reporting.pipeline import generate_report
+from scripts.paper_plots.ablation_drops import load_ablation_drop_data, plot_ablation_drops
+from scripts.paper_plots.fewshot_scaling import load_fewshot_curve_data, plot_fewshot_scaling
+from scripts.paper_plots.wtl_heatmap import load_wtl_matrix, plot_wtl_heatmap
 
 
 LEDGER_FIELDS = [
@@ -906,6 +909,56 @@ class UCRReportingTest(unittest.TestCase):
             variant = summary[summary["model_key"] == "variant"].iloc[0]
             self.assertTrue(pd.isna(variant["shot_5_accuracy_pct"]))
             self.assertAlmostEqual(float(variant["delta_vs_reference_pct"]), 2.5, places=6)
+
+    def test_paper_figures_helpers_render(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            summary = pd.DataFrame(
+                [
+                    {"model_key": "m2_pretrained", "shot": "1", "accuracy_mean_pct": 48.31},
+                    {"model_key": "m2_pretrained", "shot": "2", "accuracy_mean_pct": 55.55},
+                    {"model_key": "cosco_resnet", "shot": "1", "accuracy_mean_pct": 47.88},
+                    {"model_key": "cosco_resnet", "shot": "2", "accuracy_mean_pct": 54.95},
+                    {"model_key": "resnet", "shot": "1", "accuracy_mean_pct": 47.79},
+                    {"model_key": "resnet", "shot": "2", "accuracy_mean_pct": 53.98},
+                ]
+            )
+            merged = pd.DataFrame(
+                [
+                    {"model_key": "m2_pretrained", "shot": "1", "accuracy_std": 0.10},
+                    {"model_key": "m2_pretrained", "shot": "2", "accuracy_std": 0.12},
+                    {"model_key": "cosco_resnet", "shot": "1", "accuracy_std": 0.11},
+                    {"model_key": "cosco_resnet", "shot": "2", "accuracy_std": 0.13},
+                    {"model_key": "resnet", "shot": "1", "accuracy_std": 0.09},
+                    {"model_key": "resnet", "shot": "2", "accuracy_std": 0.08},
+                ]
+            )
+            summary_path = tmp_path / "summary.csv"
+            merged_path = tmp_path / "merged.csv"
+            summary.to_csv(summary_path, index=False)
+            merged.to_csv(merged_path, index=False)
+
+            curve = load_fewshot_curve_data(summary_path, merged_path)
+            self.assertEqual(curve["model_key"].unique().tolist(), ["m2_pretrained", "cosco_resnet", "resnet"])
+            self.assertEqual(curve[curve["model_key"] == "m2_pretrained"]["shot"].tolist(), ["1", "2"])
+            fewshot_artifacts = plot_fewshot_scaling(summary_csv=summary_path, merged_results_csv=merged_path, output_dir=tmp_path)
+            self.assertTrue(Path(fewshot_artifacts["pdf"]).exists())
+            self.assertTrue(Path(fewshot_artifacts["png"]).exists())
+
+            panel_a, panel_b = load_ablation_drop_data()
+            self.assertGreaterEqual(len(panel_a), 5)
+            self.assertIn("Avg", panel_b["dataset"].tolist())
+            ablation_artifacts = plot_ablation_drops(output_dir=tmp_path)
+            self.assertTrue(Path(ablation_artifacts["pdf"]).exists())
+            self.assertTrue(Path(ablation_artifacts["png"]).exists())
+
+            wtl = load_wtl_matrix()
+            self.assertIn("baseline", wtl.columns)
+            self.assertIn("margin", wtl.columns)
+            wtl_artifacts = plot_wtl_heatmap(output_dir=tmp_path)
+            self.assertTrue(Path(wtl_artifacts["pdf"]).exists())
+            self.assertTrue(Path(wtl_artifacts["png"]).exists())
 
 
 if __name__ == "__main__":

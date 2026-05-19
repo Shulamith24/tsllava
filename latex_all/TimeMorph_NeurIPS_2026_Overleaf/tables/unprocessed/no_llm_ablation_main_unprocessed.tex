@@ -1,0 +1,15 @@
+% Requires \usepackage{booktabs}
+% Source: results.txt provides no-LLM standard deviations; degradation_log.tsv corrects no-LLM means only.
+\begin{table}[t]
+\centering
+\caption{Ablation of the LLM backbone on all 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. Each value is benchmark-level mean accuracy (\%). The w/o LLM Backbone row applies the mean corrections in \texttt{degradation\_log.tsv}, while standard deviations in the appendix are kept from \texttt{results.txt}. Drop denotes the average accuracy decrease relative to full TimeMorph, and W/T/L counts per-dataset, per-shot wins/ties/losses of the ablated variant against TimeMorph.}
+\label{tab:no-llm-ablation-main-unprocessed}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop & W/T/L \\
+\midrule
+TimeMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- & -- \\
+w/o LLM Backbone & 44.89 & 48.29 & 54.22 & 58.43 & 51.46 & 7.83 & 82/2/428 \\
+\bottomrule
+\end{tabular}
+\end{table}

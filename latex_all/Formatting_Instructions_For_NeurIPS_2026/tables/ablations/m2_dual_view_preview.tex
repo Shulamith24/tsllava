@@ -1,15 +1,15 @@
 % Requires \usepackage{booktabs}
-\begin{table}[t]
+\begin{table*}[t]
 \centering
-\caption{Ablation of dual-view time-series-to-language modeling on the 128 UCR datasets under the same five-run full-label-space few-shot protocol as the main results. These comparisons assess the effect of removing one top-level view at a time. Each value is mean accuracy (\%) over five runs, and Drop denotes the average accuracy decrease relative to the full ChronoMorph model.}
-\label{tab:ablation-dual-view}
-\begin{tabular}{lrrrrrr}
+\caption{Ablation results for Effect of Dual-view Prompting on UCR few-shot classification (\%). Positive delta means improvement over the reference. Preview uses the 107 datasets currently available. Blank cells indicate missing shot coverage, and averages/deltas are computed from the available cells only.}
+\label{tab:m2_dual_view_ablation_partial_preview-ablation-main}
+\begin{tabular}{lrrrrrrr}
 \toprule
-Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Drop \\
+Variant & 1-shot & 2-shot & 5-shot & 10-shot & Avg & Delta vs Ref & W/T/L \\
 \midrule
-Temporal only & 43.51 & 50.55 & 58.40 & 64.39 & 54.21 & 5.08 \\
-Visual only & 45.88 & 50.02 & 60.86 & 63.58 & 55.09 & 4.20 \\
-ChronoMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- \\
+Dual-view & \textbf{47.33} & \textbf{54.25} & \textbf{63.26} & \textbf{68.39} & \textbf{58.31} & -- & -- \\
+TS-only & 42.63 &  &  & \underline{63.67} & 53.15 & -4.19 & 76/4/124 \\
+Vision-only & \underline{44.95} &  &  & 62.87 & \underline{53.91} & -3.02 & 67/2/133 \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}

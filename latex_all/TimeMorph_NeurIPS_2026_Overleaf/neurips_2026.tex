@@ -1,0 +1,840 @@
+\documentclass{article}
+
+\usepackage{neurips_2026}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{pdflscape}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\title{TimeMorph: Dual-view LLM-based Few-Shot Time Series Classification}
+
+\author{%
+  Anonymous Authors\\
+  Paper under double-blind review
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  Few-shot time series classification (TSC) is challenging due to scarce labeled sequences. Reliable predictions require capturing both temporal dynamics and waveform morphology, reflecting how humans interpret sequential data by tracking numeric trends and recognizing overall shape patterns. Pretrained LLMs offer few-shot generative interfaces, but directly applying them is challenging: continuous time-series features are not naturally aligned with language embeddings, and predictions must be restricted to a fixed set of target classes. Therefore, we propose TimeMorph, a dual-view framework that extracts temporal dynamics via a temporal branch and waveform morphology via a morphology branch. To bridge time-series features and language embeddings, we employ stage-wise pretraining to project the fused tokens into a pretrained causal LLM. Extensive few-shot experiments on the UCR benchmark and additional external datasets show that TimeMorph consistently outperforms strong task-specific, Transformer-style, and LLM-style baselines. Further analyses validate the contributions of dual-view modeling, stage-wise pretraining, and class-token scoring.
+\end{abstract}
+
+\section{Introduction}
+
+Time series classification (TSC) is challenging when labeled sequences are scarce in healthcare monitoring, industrial diagnosis, sensor analytics, and related domains \citep{ismail2019deep}. In many practical scenarios, collecting labels requires domain expertise, new categories may appear with only a few examples, and class distributions can be highly imbalanced. Reliable few-shot TSC therefore requires more than fitting a classifier on a small support set. A successful model should capture transferable evidence from both temporal dynamics and waveform morphology, reflecting how humans naturally interpret sequences by tracking numerical evolution while recognizing shape-level patterns.
+
+Discriminative evidence in time series is inherently heterogeneous. Some classes are distinguished by chronological dynamics, such as local trends, amplitudes, phase shifts, and long-range evolution, while others depend more strongly on waveform morphology, such as recurring peaks, valleys, cycles, motifs, and discriminative subsequences \citep{tang2020interpretable,ye2009time,dempster2020rocket,fawaz2020inceptiontime,wang2015encoding}. This dual-view observation suggests that effective few-shot TSC models should extract and combine both temporal and morphological features. However, many existing methods emphasize one dominant form of evidence. CNNs and Transformer-based models can achieve strong performance when abundant labeled training data are available, but they may overfit to unstable cues and generalize poorly under few-shot supervision \citep{fawaz2020inceptiontime,dempster2020rocket,dyformer}. Prototype-based methods are more data-efficient, yet they still do not fully resolve the need to jointly preserve temporal and morphological evidence \citep{snell2017prototypical,tapnet,tang2020interpretable}. In particular, models that mainly operate on ordered numerical trends can overlook the intuitive visual structure of the waveform, while purely shape-oriented representations may miss chronological dependencies needed for fine-grained discrimination.
+
+Recently, pretrained large language models (LLMs) have become appealing for few-shot learning because they provide reusable pretrained computation, conditional-generation objectives, and token-level scoring interfaces \citep{brown2020language,raffel2020exploring}. Time-series-specific adaptation work has explored numerical serialization, reprogramming, embedding alignment, and semantic anchors, but many of these methods focus on forecasting, representation learning, or open-ended generation rather than closed-set classification \citep{gruver2023large,zhou2023one,jin2024time,sun2023test,chang2025llm4ts,zhang2024large,jiang2024empowering,langer2025opentslm,tan2024language,zheng2024revisited}. Few-shot time-series classification with LLMs has only recently started to emerge \citep{chen2025large}. These properties make LLMs a promising backbone for few-shot TSC, where supervised labels are limited but transferable computation and flexible decision interfaces are valuable. However, directly applying LLMs to time series remains challenging. Time-series observations are continuous, domain-specific, and structurally different from the discrete token sequences on which language models are pretrained. Moreover, few-shot TSC requires reliable closed-set discrimination over dataset-specific labels.
+
+To make pretrained LLMs effective for dual-view few-shot TSC, three core challenges must be addressed. First, the representation should preserve both chronological dynamics and morphology-oriented cues, since either view may contain the decisive class signal. Second, fused continuous time-series features must be aligned with the pretrained LLM input space before downstream adaptation. Third, prediction should be restricted to valid class candidates instead of relying on unconstrained text generation, which may produce invalid labels and introduce tokenization or label-length bias \citep{raffel2020exploring,hokamp2017lexically,koo2024automata}. Without such an interface, the language model may become only a loosely connected generative component rather than a reliable few-shot classifier.
+
+We propose \textbf{TimeMorph}, a dual-view time-series-to-language framework for few-shot TSC. For each sequence, TimeMorph constructs two complementary views: a temporal branch that models ordered local relations and long-range dynamics, and a morphology branch that transforms the waveform into a two-dimensional morphology map so that shape-level structure can be extracted by a frozen vision encoder. The two views are fused into continuous tokens and projected into a pretrained causal LLM through stage-wise pretraining, reducing the mismatch between time-series representations and the language-model embedding space. For downstream classification, TimeMorph replaces unconstrained decoding with supervised class-token scoring over dataset-specific class tokens, turning the generative interface into a discriminative closed-set classifier. When class names carry meaningful semantics, label verbalizers further initialize and regularize the corresponding class-token embeddings without requiring multi-token phrase decoding.
+
+Our contributions are summarized as follows. First, we formulate LLM-based few-shot TSC as an interface-design problem that jointly considers complementary time-series evidence, continuous-to-language alignment, and closed-set prediction. Second, we introduce a dual-view time-series-to-language encoder that preserves chronological and morphology-oriented evidence before transferring continuous tokens into a pretrained causal LLM through stage-wise pretraining. Third, we propose supervised class-token scoring over valid labels, and extend it with label-verbalizer initialization and regularization when semantic label names are available. Across 128 UCR datasets, TimeMorph achieves the best average accuracy and average rank under 1-, 2-, 5-, and 10-shot settings, while additional external experiments and ablation studies validate the roles of dual-view modeling, stage-wise pretraining, and closed-set class-token scoring.
+
+
+\section{Related Work}
+\paragraph{LLMs and foundation models for time series.}
+Recent surveys show that foundation-model research for time series has expanded from adapting pretrained language models to building native temporal foundation models \cite{zhang2024large,jiang2024empowering,ye2024survey,shi2025large}. Representative adaptation-based methods include TEST \cite{sun2023test}, which aligns time-series embeddings with the LLM embedding space through instance-, feature-, and text-prototype-aware contrastive learning; Time-LLM \cite{jin2024time}, which reprograms time-series patches into a frozen LLM via text prototypes; and LLM4TS \cite{chang2025llm4ts}, which uses a two-stage alignment-and-task fine-tuning strategy. OpenTSLM \cite{langer2025opentslm} moves toward time-series language models that treat time series as a native modality through soft-prompt or cross-attention interfaces. At the same time, recent ablation studies caution that LLM components do not automatically improve time-series performance when the modality interface is poorly designed \cite{tan2024language,zheng2024revisited}. The closest few-shot classification line is LLMFew \cite{chen2025large}, which introduces a patch-wise temporal convolution encoder and LoRA-tuned decoder for few-shot multivariate TSC. In contrast, our work focuses on dual-view temporal evidence, explicit time-series-to-language alignment, and class-token scoring rather than an external classifier head.
+
+\paragraph{Temporal and morphological evidence in TSC.}
+Classical and deep TSC methods support the view that discriminative evidence can appear at multiple structural levels. Shapelet methods identify local subsequences with high class-discriminative power \cite{ye2009shapelets,tang2020interpretable}, convolutional methods such as InceptionTime and ROCKET exploit local receptive fields and kernel responses at multiple scales \cite{fawaz2020inceptiontime,dempster2020rocket}, and patch-based Transformers preserve local subseries information while enabling longer-context attention \cite{nietime}. These methods primarily operate in the chronological-dependency space. In parallel, time-series imaging methods transform one-dimensional signals into two-dimensional structures such as Gramian angular fields and Markov transition fields, enabling vision models to capture global shape and transition patterns \cite{wang2015imaging}. Recent work further shows that visualization can improve LLM reasoning over time series and that frozen vision transformers applied to imaged time series can produce strong classification representations \cite{liu2025picture,roschmann2025time}. These two lines motivate our dual-space hypothesis: few-shot TSC labels may depend on both chronological dependencies and morphological structures.
+
+\paragraph{Generative classification and semantic-prior label spaces.}
+Casting classification as generation is widely used in text-to-text learning, where labels are generated as target tokens under the same sequence objective as other tasks \cite{raffel2020exploring}. However, unconstrained decoding is mismatched with closed-set classification because many generated strings are irrelevant to the valid label set. Prior work on constrained decoding motivates restricting generation to valid lexical or structural outputs \cite{hokamp2017lexically,koo2024automata}. TimeMorph adopts the same closed-set principle but implements the final decision as supervised class-token scoring: the model learns dataset-specific class-token rows and compares their next-token logits rather than performing unconstrained generation. For datasets with meaningful label names, we further use label verbalizers as semantic priors over the same class-token rows. This keeps the decision aligned with the autoregressive interface while avoiding the length bias, shared-prefix artifacts, and language-prior sensitivity of direct phrase-likelihood classification.
+
+\section{Method}
+\label{sec:method}
+
+We propose \textbf{TimeMorph}, a dual-view time-series-to-language framework that adapts a pretrained causal language model to few-shot time series classification. The key design is to avoid translating a time series into raw text. Instead, TimeMorph transforms each sequence into a small set of continuous tokens, places these tokens in the language-model embedding stream, and performs classification with class-token scoring over dataset-specific labels. This gives the language model a closed-set decision interface while preserving the temporal and morphological evidence needed for time series classification.
+
+\subsection{Problem Setup and Architecture}
+\label{sec:method-overview}
+
+Let $D$ be a target classification dataset with label set
+$\mathcal{Y}_D=\{0,\ldots,C-1\}$. In the $S$-shot setting, the support set
+$\mathcal{S}_D$ contains at most $S$ labeled sequences per class. Given a query
+sequence $x\in\mathbb{R}^{T}$, the goal is to predict its label
+$y\in\mathcal{Y}_D$ after adapting to $\mathcal{S}_D$.
+
+TimeMorph separates this problem into three modules, as shown in
+Figure~\ref{fig:overview}. First, a dual-view encoder $G_\theta$ maps the input
+sequence into time-series tokens by combining a chronological temporal view and a
+morphology-oriented view. Second, a projection module $P_\psi$ maps these
+tokens to the input dimension of a pretrained causal language model. Third, a
+closed-set class-token scoring interface converts the language model's next-token logits
+into a classifier over $\mathcal{Y}_D$. The language-model backbone provides the
+shared conditional computation, while dataset-specific class-token rows and
+lightweight adapters supply the final decision rule for each target dataset.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth,trim=4cm 3cm 4cm 2.5cm,clip]{figures/overview.pdf}
+\caption{Overview of TimeMorph. The temporal branch extracts ordered patch-level
+dynamics from the raw waveform, while the morphology branch converts the same
+waveform into a windowed morphology map and extracts visual patch tokens with a
+frozen vision backbone. The two token streams are fused, projected into the input
+embedding space of a pretrained causal LLM, and used for closed-set prediction by
+class-token scoring over dataset-specific class tokens. Stage I learns dual-view
+time-series representations, Stage II aligns continuous time-series tokens with
+the language-model interface, and the optional semantic stage uses label
+verbalizers when meaningful class names are available.}
+\label{fig:overview}
+\end{figure}
+
+\subsection{Dual-View Time-Series Encoder}
+\label{sec:dual-view-encoder}
+
+Time series labels can depend on different types of evidence. Some classes are
+separated by ordered temporal dynamics, such as local trends, phase changes, or
+long-range evolution. Others are better characterized by waveform morphology,
+such as peaks, valleys, motifs, cycles, or discriminative subsequences. TimeMorph
+therefore constructs two complementary token sequences before interacting with
+the language model.
+
+\paragraph{Temporal view.}
+The temporal branch preserves the chronological structure of the raw sequence.
+Let $x^{\mathrm{pad}}$ be the sequence after right replicate padding. Given patch
+length $\ell$ and stride $s$, we extract overlapping temporal patches
+\begin{equation}
+\label{eq:temporal-patches}
+R_i=x^{\mathrm{pad}}_{(i-1)s+1:(i-1)s+\ell},
+\qquad
+ i=1,\ldots,N_t,
+\qquad
+N_t=\left\lfloor\frac{T+p_t-\ell}{s}\right\rfloor+1,
+\end{equation}
+where $p_t$ is the padding length needed to form complete patches. Each patch is
+linearly embedded, combined with a learnable positional embedding, and passed
+through a temporal Transformer:
+\begin{equation}
+\label{eq:temporal-encoder}
+Z^{t}(x)
+=
+G_t
+\left(
+\left[
+W_tR_1+\pi_1;
+\ldots;
+W_tR_{N_t}+\pi_{N_t}
+\right]
+\right).
+\end{equation}
+The output $Z^t(x)$ is a sequence of temporal tokens that encode ordered
+patch-level dynamics of the original waveform.
+
+\paragraph{Morphology view.}
+The morphology branch exposes shape-level structure by converting the same
+one-dimensional sequence into a two-dimensional windowed map. We first normalize
+$x$ with robust per-sequence statistics:
+\begin{equation}
+\label{eq:robust-normalization}
+\bar{x}_t
+=
+\frac{x_t-\operatorname{median}(x)}
+{\operatorname{IQR}(x)+\epsilon}.
+\end{equation}
+The normalized sequence is then unfolded into overlapping local windows. Let
+$q=\max(1,\lfloor\sqrt{T}\rfloor)$ be the window length and
+$\delta=\max(1,\lfloor\rho q\rfloor)$ be the stride. We construct the morphology
+map by normalizing the unfolded matrix, resizing it to the input resolution of
+the vision backbone, and replicating it across RGB channels:
+\begin{equation}
+\label{eq:morphology-map}
+I(x)
+=
+\operatorname{RGB}
+\left(
+\operatorname{Resize}
+\left(
+\Gamma_{\mathrm{img}}
+\left(
+\operatorname{Unfold}_{q,\delta}(\bar{x})
+\right)
+\right)
+\right),
+\end{equation}
+where $\Gamma_{\mathrm{img}}(\cdot)$ denotes per-map normalization and contrast
+adjustment. Each row of $I(x)$ corresponds to a local waveform window, so the map
+preserves local subsequence shapes while making cross-window morphology visible
+to a vision encoder. A frozen vision backbone $G_m$ extracts morphology tokens:
+\begin{equation}
+\label{eq:morphology-encoder}
+Z^{m}(x)=G_m(I(x)).
+\end{equation}
+We discard the vision class token and use only the patch tokens. The vision
+backbone remains frozen; trainable parameters are introduced in the time-series
+encoder, projection modules, class-token rows, and language-side adapters.
+
+\paragraph{Fusion.}
+The temporal and morphology tokens are projected to a common dimension and
+concatenated:
+\begin{equation}
+\label{eq:dual-view-fusion}
+\tilde{Z}^{t}(x)=Q_t(Z^{t}(x)),
+\qquad
+\tilde{Z}^{m}(x)=Q_m(Z^{m}(x)),
+\qquad
+Z_x=
+\left[
+\tilde{Z}^{t}(x);
+\tilde{Z}^{m}(x)
+\right].
+\end{equation}
+The fused sequence $Z_x\in\mathbb{R}^{N_x\times d_e}$ is the time-series token
+sequence used by the language-model interface.
+
+\subsection{Time-Series-to-Language Interface}
+\label{sec:ts-token-conditioning}
+
+The dual-view encoder produces continuous time-series tokens, whereas a causal
+language model expects embeddings drawn from its token embedding space. TimeMorph
+bridges this mismatch by reprogramming $Z_x$ into the language-model embedding
+stream rather than serializing the numeric sequence as text.
+
+Let $P_\psi$ be the projector from encoder dimension $d_e$ to the language-model
+hidden dimension, $\tau(\cdot)$ be the tokenizer, and $E_{\mathrm{lm}}$ be the
+language-model input embedding matrix. For a prompt
+$p=(p^{\mathrm{pre}},p^{\mathrm{post}})$, the conditioned input embeddings are
+\begin{equation}
+\label{eq:conditioned-input}
+H(x,p)=
+\left[
+E_{\mathrm{lm}}(\tau(p^{\mathrm{pre}}));
+P_{\psi}(Z_x);
+E_{\mathrm{lm}}(\tau(p^{\mathrm{post}}))
+\right].
+\end{equation}
+The projected time-series tokens therefore act as continuous prefix tokens inside
+the same embedding stream as text. Optional textual descriptions, when available,
+are appended to the prompt and encoded by the same tokenizer.
+
+During stage-wise pretraining, the model is optimized on time-series-conditioned
+generation examples. For an answer string $a$ with token sequence
+$u_{1:M}=\tau(a)$, we apply the language-modeling loss only to the answer tokens:
+\begin{equation}
+\label{eq:answer-lm}
+\mathcal{L}_{\mathrm{LM}}(a\mid x,p)
+=
+-\sum_{m=1}^{M}
+\log p_{\Theta}
+\left(
+ u_m
+ \mid
+ H(x,p), E_{\mathrm{lm}}(u_{<m})
+\right).
+\end{equation}
+This stage calibrates the continuous time-series tokens to the language-model
+input space. Downstream few-shot classification uses the same conditioned
+representation, but replaces free-form decoding with the closed-set rule below.
+
+\subsection{Closed-Set Class-Token Prediction}
+\label{sec:class-token-classification}
+
+Few-shot TSC requires choosing among a fixed set of valid labels. Directly
+decoding natural-language label strings is undesirable because generated text may
+leave the label set and because phrase likelihoods are affected by tokenization,
+label length, and shared prefixes. TimeMorph instead assigns each target dataset
+a compact set of single-token class identifiers:
+\begin{equation}
+\label{eq:class-token-set}
+\mathcal{C}_D
+=
+\{
+\langle c_0\rangle,\ldots,\langle c_{C-1}\rangle
+\},
+\qquad
+\mathcal{V}_D
+=
+\{
+v_0,\ldots,v_{C-1}
+\},
+\end{equation}
+where $v_c$ is the vocabulary index of class token $\langle c_c\rangle$.
+
+Let $p_D$ denote the classification prompt for dataset $D$. After the language
+model conditions on $H(x,p_D)$, let $h_{\Theta}(x,p_D)$ be the final hidden state
+at the last prompt position. With output embedding matrix $W_{\mathrm{out}}$, the
+score for class $c$ is the next-token logit assigned to its class token:
+\begin{equation}
+\label{eq:class-score}
+s_c(x)
+=
+\left[
+W_{\mathrm{out}}h_{\Theta}(x,p_D)
+\right]_{v_c}.
+\end{equation}
+Prediction is restricted to the valid class-token set:
+\begin{equation}
+\label{eq:class-pred}
+\hat{y}
+=
+\arg\max_{c\in\{0,\ldots,C-1\}} s_c(x).
+\end{equation}
+The supervised objective is the cross entropy over only the valid class tokens:
+\begin{equation}
+\label{eq:class-token-loss}
+\mathcal{L}_{\mathrm{ct}}
+=
+-\log
+\frac{\exp s_y(x)}
+{\sum_{c=0}^{C-1}\exp s_c(x)}.
+\end{equation}
+Thus, the autoregressive vocabulary head is retained, but the decision is made by
+one forward pass and one restricted comparison over $C$ valid class tokens.
+Within the vocabulary parameters, only the input embeddings and output rows of
+the new class tokens are trainable; all other vocabulary rows remain fixed.
+
+\paragraph{Semantic initialization for named labels.}
+For anonymous-label benchmarks, class tokens are learned as dataset-specific
+identifiers. When class names are meaningful, TimeMorph uses label verbalizers to
+initialize and regularize the same class-token rows. For class $c$, let
+$\mathcal{S}_c$ be a set of template-consistent verbalizers derived from its
+canonical label name. We compute a semantic prototype by averaging the
+language-model embeddings of the verbalizers:
+\begin{equation}
+\label{eq:semantic-prototype}
+p_c
+=
+\frac{1}{|\mathcal{S}_c|}
+\sum_{r\in\mathcal{S}_c}
+\frac{1}{|\tau(r)|}
+\sum_{u\in\tau(r)}
+E_{\mathrm{lm}}(u).
+\end{equation}
+The prototype is rescaled to match the average norm of vocabulary rows and is
+used to initialize the input and output rows of the corresponding class token.
+During adaptation, we regularize these rows toward a detached prototype
+$\tilde{p}_c$:
+\begin{equation}
+\label{eq:semantic-row-reg}
+\mathcal{L}_{\mathrm{sem}}
+=
+\frac{1}{C}
+\sum_{c=0}^{C-1}
+\left[
+1-\cos(e_{v_c},\tilde{p}_c)
++
+1-\cos(w_{v_c},\tilde{p}_c)
+\right],
+\end{equation}
+where $e_{v_c}$ and $w_{v_c}$ are the input and output rows of class token $v_c$.
+The adaptation loss is
+\begin{equation}
+\label{eq:adapt-loss}
+\mathcal{L}_{\mathrm{adapt}}
+=
+\mathcal{L}_{\mathrm{ct}}
++
+\lambda_{\mathrm{sem}}\mathcal{L}_{\mathrm{sem}}.
+\end{equation}
+For datasets without meaningful label names, we set $\lambda_{\mathrm{sem}}=0$.
+
+\subsection{Stage-wise Pretraining and Few-Shot Adaptation}
+\label{sec:stage-wise-transfer}
+
+TimeMorph is trained in stages so that the model first learns time-series
+structure, then calibrates the continuous-token interface to the language model,
+and finally adapts to each target few-shot label space.
+
+\paragraph{Stage I: dual-view representation pretraining.}
+Stage I trains the time-series encoder without class labels. We combine masked
+temporal patch reconstruction with an invariance--variance--covariance objective
+over augmented views. For a minibatch $\{x_i\}_{i=1}^{B}$ and two augmentations
+$r\in\{1,2\}$, define pooled representations for branch
+$b\in\{t,m,f\}$ as
+\begin{equation}
+\label{eq:pooled-batch-representations}
+H_b^{(r)}
+=
+\left[
+\operatorname{Pool}_b(Z^b(x_1^{(r)}));
+\ldots;
+\operatorname{Pool}_b(Z^b(x_B^{(r)}))
+\right]
+\in\mathbb{R}^{B\times d_b},
+\qquad
+Z^f(x)=Z_x,
+\end{equation}
+where $t$, $m$, and $f$ denote the temporal, morphology, and fused streams. For
+each stream, the regularization loss is
+\begin{equation}
+\label{eq:ivc}
+\begin{aligned}
+\mathcal{L}_{\mathrm{ivc}}^{b}
+=
+\alpha_{\mathrm{inv}}
+\frac{1}{B}
+\left\|
+H_b^{(1)}-H_b^{(2)}
+\right\|_F^2
+&+
+\beta_{\mathrm{var}}
+\sum_{r=1}^{2}\sum_j
+\max
+\left(
+0,
+1-\sigma_j(H_b^{(r)})
+\right) \\
+&+
+\gamma_{\mathrm{cov}}
+\sum_{r=1}^{2}
+\left\|
+\operatorname{offdiag}
+\left(
+\operatorname{Cov}(H_b^{(r)})
+\right)
+\right\|_F^2 .
+\end{aligned}
+\end{equation}
+The three terms respectively match representations of two augmented views,
+prevent dimension-wise collapse, and penalize redundant covariance
+\citep{bardes2022vicreg}.
+
+For reconstruction, a contiguous segment is masked and the temporal branch is
+asked to recover the original temporal patches:
+\begin{equation}
+\label{eq:masked-rec}
+\mathcal{L}_{\mathrm{rec}}
+=
+\frac{1}{2}
+\sum_{r=1}^{2}
+\left\|
+R_{\omega}
+\left(
+Z^{t}(\mathcal{M}(x^{(r)}))
+\right)
+-
+\mathcal{P}_{\ell,s}(x^{(r)})
+\right\|_2^2,
+\end{equation}
+where $\mathcal{M}$ is the masking operator,
+$\mathcal{P}_{\ell,s}$ extracts temporal patches using the same patch length and
+stride as Eq.~\eqref{eq:temporal-patches}, and $R_{\omega}$ is the
+reconstruction head. The Stage I objective is
+\begin{equation}
+\label{eq:stage1-loss}
+\mathcal{L}_{\mathrm{I}}
+=
+\lambda_{\mathrm{rec}}\mathcal{L}_{\mathrm{rec}}
++
+\lambda_t\mathcal{L}_{\mathrm{ivc}}^{t}
++
+\lambda_m\mathcal{L}_{\mathrm{ivc}}^{m}
++
+\lambda_f\mathcal{L}_{\mathrm{ivc}}^{f}.
+\end{equation}
+We apply branch dropout during this stage to prevent the fused representation from
+collapsing onto a single view.
+
+\paragraph{Stage II: language-interface calibration.}
+Stage II attaches $P_\psi$ and the pretrained causal language model. Given
+examples $(x,p,a)$ from a time-series question-answering corpus
+$\mathcal{D}_{\mathrm{TSQA}}$, the model is optimized with
+\begin{equation}
+\label{eq:stage2-loss}
+\mathcal{L}_{\mathrm{II}}
+=
+\mathbb{E}_{(x,p,a)\sim\mathcal{D}_{\mathrm{TSQA}}}
+\left[
+\mathcal{L}_{\mathrm{LM}}(a\mid x,p)
+\right].
+\end{equation}
+We first update the projector with the time-series encoder fixed, and then jointly
+optimize the encoder and projector. The language-model backbone remains frozen in
+this stage. The resulting checkpoint initializes all downstream few-shot runs.
+
+\paragraph{Optional semantic stage.}
+When training data include meaningful class names or textual descriptions, an
+optional semantic stage further aligns time-series-conditioned outputs with
+label-related language. This stage is not used for the anonymous-label UCR
+benchmark; in the default UCR setting, TimeMorph uses the Stage II checkpoint for
+downstream adaptation.
+
+\paragraph{Few-shot adaptation.}
+For each target dataset $D$, adaptation proceeds in two phases. In the warm-up
+phase, TimeMorph updates the dual-view encoder, the projection module, and the
+dataset-specific class-token rows:
+\begin{equation}
+\label{eq:warmup-params}
+\Theta_{\mathrm{warm}}
+=
+\{
+\theta,\psi,e_{\mathcal{V}_D},w_{\mathcal{V}_D}
+\},
+\qquad
+\min_{\Theta_{\mathrm{warm}}}
+\mathcal{L}_{\mathrm{adapt}} .
+\end{equation}
+This phase calibrates the continuous-token interface and the closed-set decision
+space before updating any language-side adapters.
+
+In the joint phase, low-rank adapters are added to the language model:
+\begin{equation}
+\label{eq:lora-params}
+\Theta_{\mathrm{joint}}
+=
+\Theta_{\mathrm{warm}}
+\cup
+\{
+\Delta\Theta_{\mathrm{LoRA}}
+\},
+\qquad
+\Delta W_l=B_lA_l,
+\qquad
+\operatorname{rank}(\Delta W_l)\le r.
+\end{equation}
+The pretrained language-model weights remain frozen, and only adapter parameters
+are updated on the language side. At inference time, TimeMorph performs a single
+forward pass for each query sequence and ranks the valid class tokens using
+Eq.~\eqref{eq:class-score}. Implementation details and stage-wise data sources
+are provided in Appendix~\ref{app:details}.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+
+\paragraph{Protocol.}
+We evaluate on all 128 datasets in the UCR Archive 2018 with a fixed full-label-space few-shot protocol. For each dataset $D$ and support size $S\in\{1,2,5,10\}$, all classes are included; we sample up to $S$ labeled examples per class from the official training split and evaluate on all examples in the official test split. All methods use the same sampled support sets within each of five independent runs.
+
+\paragraph{Pretraining data and default initialization.}
+The main benchmark uses the Stage II checkpoint: Stage I is trained on raw TSQA-train series, raw M4-train series, and unlabeled official TRAIN-split sequences from a fixed 98-dataset UCR pool; Stage II is trained on the TSQA training split. Stage III is not used for Table~\ref{tab:ucr_fewshot_paper_current-fewshot-main}. No pretraining stage uses any official UCR TEST split or UCR class label. For UCR datasets included in the 98-dataset pool, TimeMorph may have seen unlabeled official TRAIN sequences before downstream adaptation; after this pretraining, each target run uses only the sampled support labels for supervised adaptation.
+
+
+\paragraph{Baselines and metrics.}
+We compare against CNN/prototype baselines (\textsc{ResNet}, \textsc{TapNet}, \textsc{COSCO-ResNet}), Transformer-style or decomposition-based baselines (\textsc{PatchTST}, \textsc{DLinear}, \textsc{TimesNet}, \textsc{Autoformer}, \textsc{Crossformer}, \textsc{FEDformer}, \textsc{Informer}), and the LLM-style \textsc{GPT4TS} baseline. Accuracy is averaged over five runs and then macro-averaged over datasets. \texttt{Avg} averages the four shot settings, and \texttt{AvgRank} averages dataset-level ranks across shots; lower rank is better. Standard deviations and full per-dataset tables are in Appendix~\ref{app:full-ucr-results}.
+
+\paragraph{Fairness and training details.}
+All methods share the same official TRAIN support pool, TEST query split, and sampled support indices. We do not add a validation split by default; each method follows its runner's checkpoint-selection rule, and some baselines select checkpoints using support-set performance. Appendix~\ref{app:baseline-details} lists the training recipes and hyperparameters.
+
+\paragraph{Implementation details.}
+TimeMorph uses \texttt{meta-llama/Llama-3.2-1B}, \texttt{facebook/dinov2-base}, temporal patch length 16, stride 8, hidden size 128, and the Stage II checkpoint. Downstream adaptation uses 5 warm-up epochs, 55 joint-training epochs, and LoRA with rank 16 and alpha 32. Additional details are in Appendix~\ref{app:details}.
+
+\subsection{Main Results}
+
+\paragraph{Benchmark-level comparison.}
+Table~\ref{tab:ucr_fewshot_paper_current-fewshot-main} shows that TimeMorph obtains the highest mean accuracy under all four support sizes: 48.31, 55.55, 64.14, and 69.16 for 1-, 2-, 5-, and 10-shot. The strongest non-TimeMorph baseline is \textsc{COSCO-ResNet}, with 47.88, 54.95, 63.55, and 67.18. Thus the improvement over the strongest specialized CNN/prototype baseline is modest in accuracy, especially in the lowest-shot regimes, but it is consistent across support sizes and is also reflected in the best \texttt{AvgRank} (4.24 vs. 4.70 for \textsc{COSCO-ResNet}). The gap is more substantial against Transformer-style and LLM-style baselines: TimeMorph improves \texttt{Avg} by 4.53 points over \textsc{Informer} and 18.36 points over \textsc{GPT4TS}. These results suggest that the proposed interface is most clearly beneficial relative to generic sequence and LLM-style baselines, while remaining competitive with strong specialized CNN/prototype methods.
+
+\input{tables/main/ucr_fewshot_main.tex}
+
+\paragraph{Dataset-level robustness.}
+Table~\ref{tab:ucr_fewshot_paper_current-paper-wtl} reports Win/Tie/Loss counts against representative baselines. TimeMorph wins substantially more often than it loses against \textsc{PatchTST}, \textsc{TimesNet}, and \textsc{GPT4TS}. Against the strongest CNN/prototype baselines, the picture is closer: TimeMorph is nearly balanced with \textsc{COSCO-ResNet} and \textsc{ResNet} at several shot levels, which is consistent with the modest average-accuracy margins in Table~\ref{tab:ucr_fewshot_paper_current-fewshot-main}.
+
+\input{tables/main/ucr_fewshot_wtl.tex}
+
+\paragraph{Additional external datasets.}
+We also evaluate MIT-BIH, SleepEDF, and CinC2017 under full-label-space 10-, 20-, and 30-shot protocols, using 10 runs for each external setting. Table~\ref{tab:external-fewshot-avg} reports the average over these shot settings, with the full table in Appendix~\ref{app:external-results}. TimeMorph obtains the best average accuracy on MIT-BIH and CinC2017 and the second-best overall external average, but it is clearly behind \textsc{ResNet} and \textsc{TapNet} on SleepEDF. We therefore treat these experiments as evidence of transfer beyond UCR, not as a claim of uniform dominance across external domains.
+
+\input{tables/main/external_fewshot_avg.tex}
+
+\subsection{Computational Efficiency and Adaptation Cost}
+\label{sec:efficiency}
+
+Because TimeMorph reuses a pretrained causal LLM, total parameters and adapted parameters must be reported separately. Table~\ref{tab:efficiency-compact} shows the main trade-off: TimeMorph updates only 12.3M parameters per target dataset, but the frozen LLM backbone dominates memory and inference cost. TimeMorph is therefore most appropriate when transfer accuracy and reusable adaptation matter more than compact deployment. The complete efficiency table, including throughput and additional baselines, is in Appendix~\ref{app:efficiency-summary}.
+
+\input{tables/main/efficiency_compact.tex}
+
+\subsection{Ablation Studies}
+
+Table~\ref{tab:ablation-summary} summarizes the main top-level UCR ablations on all 128 datasets. Each ablation follows the same five-run full-label-space few-shot protocol and modifies only the component under study. Focused compact views with the corresponding drops are provided in Tables~\ref{tab:ablation-pretrain}--\ref{tab:ablation-decoding}. Because UCR labels are anonymous, the decision ablation tests closed-set class-token scoring rather than semantic label priors. The no-LLM ablation is reported separately in Table~\ref{tab:ablation-llm-backbone}, with the full per-dataset comparison in Appendix Table~\ref{tab:ablation-llm-backbone-appendix}.
+
+\input{tables/main/ucr_fewshot_ablation_summary.tex}
+
+\paragraph{Effect of curriculum pretraining.}
+Removing curriculum pretraining drops \texttt{Avg} from 59.29 to 55.94, with shot-level accuracies decreasing from 48.31/55.55/64.14/69.16 to 44.70/51.81/60.65/66.60 for 1-/2-/5-/10-shot, respectively. The focused view in Appendix Table~\ref{tab:ablation-pretrain} reports a 3.35-point average drop, suggesting that the aggregate Stage I+II initialization helps when downstream supervision is too limited to learn the representation and LLM interface from scratch. This ablation removes the full pretraining pipeline at once and should not be read as isolating each substage.
+
+\paragraph{Effect of dual-view time-series-to-language modeling.}
+Temporal-only and morphology-only variants reach \texttt{Avg} scores of 54.21 and 55.09, below the full model's 59.29. Appendix Table~\ref{tab:ablation-dual-view} shows that removing the morphology branch yields a 5.08-point average drop, while removing the temporal branch yields a 4.20-point drop. The temporal-only variant is weaker at 1-, 2-, and 5-shot, whereas the morphology-only variant is weaker at 2- and 10-shot. Neither single view dominates across all shots, which supports the intended complementarity between chronological and morphological evidence.
+
+\paragraph{Effect of class-token scoring.}
+Disabling class-token scoring reduces \texttt{Avg} from 59.29 to 55.14. As detailed in Appendix Table~\ref{tab:ablation-decoding}, the corresponding shot-level accuracies decrease from 48.31/55.55/64.14/69.16 to 44.46/50.44/60.08/65.59, giving a 4.15-point average drop. This indicates that, under the same adaptation budget, unconstrained generative adaptation is less stable for closed-set few-shot classification than directly scoring the dataset-specific label tokens.
+
+\paragraph{Effect of semantic label priors.}
+For external datasets with meaningful label names, Table~\ref{tab:semantic-prior-summary} compares anonymous class-token rows with rows initialized and regularized from label-verbalizer prototypes. Semantic priors improve the 10/20/30-shot average on MIT-BIH, SleepEDF, and CinC2017, increasing the overall average from 47.61 to 50.43. The full appendix table shows that the benefit is not uniform at every shot, with a decrease on CinC2017 20-shot, but the averaged result supports the semantic-prior class-token space as a useful extension of supervised closed-set decoding.
+
+\input{tables/main/semantic_prior_summary.tex}
+
+\paragraph{Effect of the LLM backbone.}
+The no-LLM variant replaces the language pathway with a lightweight linear classifier on the same dual-view features. As shown in Table~\ref{tab:ablation-llm-backbone}, this ablation is evaluated on all 128 UCR datasets under the same five-run protocol. Removing the LLM backbone reduces \texttt{Avg} from 59.29 to 51.46, a 7.83-point drop. The decrease grows with the number of support examples: accuracy changes from 48.31 to 44.89 at 1-shot, 55.55 to 48.29 at 2-shot, 64.14 to 54.22 at 5-shot, and 69.16 to 58.43 at 10-shot. This suggests that, under our implementation and adaptation schedule, the language pathway contributes more than a lightweight classifier on the same features; however, this ablation does not isolate whether the gain comes from pretrained knowledge, additional capacity, or the token-scoring interface.
+
+Overall, the ablations support the central design: curriculum pretraining improves transferability, dual-view modeling preserves more complete evidence, closed-set class-token scoring stabilizes the final decision, and semantic-prior row initialization and regularization further improve semantic-label transfer.
+
+\section{Limitations}
+
+TimeMorph improves average accuracy and average rank, but its gains over the strongest CNN/prototype baselines are modest in extremely low-shot settings.
+The main empirical message is therefore not that LLM-based TSC now universally dominates specialized CNN-style few-shot classifiers, but that a carefully designed time-series-to-language interface can substantially outperform previous Transformer-style and LLM-style baselines while remaining competitive with strong task-specific methods.
+TimeMorph also has a larger inference footprint than compact CNN baselines because it reuses a pretrained causal LLM, even though only a small fraction of parameters is updated during downstream adaptation.
+In our efficiency probe, this makes TimeMorph two to three orders of magnitude slower at inference than compact CNN/prototype baselines.
+The current UCR pretraining setting also uses unlabeled official TRAIN sequences from a fixed subset of UCR datasets, so it does not establish strict leave-dataset-out transfer for every UCR target dataset.
+The external semantic-prior results improve the averaged performance on all three semantic-label datasets, but individual shot-level effects still vary, so label semantics should be viewed as a prior over the class-token rows rather than as a replacement for supervised adaptation.
+TimeMorph may benefit applications where labeled time-series data are scarce, such as physiological monitoring or industrial inspection, but the present study is not a deployment-ready clinical or safety-critical system.
+Any deployment in such domains would require domain-specific validation, privacy review, and failure analysis beyond the scope of this paper.
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\appendix
+
+\section{Full UCR Benchmark Results}
+\label{app:full-ucr-results}
+This appendix reports the complete per-dataset few-shot benchmark results for all 128 UCR datasets. Each cell is shown as mean $\pm$ standard deviation over five runs, and the summary rows at the end of each table report average accuracy, average rank, and the number of datasets attaining the best mean accuracy (counting ties).
+
+\input{tables/appendix/ucr_fewshot_shot_1.tex}
+\clearpage
+\input{tables/appendix/ucr_fewshot_shot_2.tex}
+\clearpage
+\input{tables/appendix/ucr_fewshot_shot_5.tex}
+\clearpage
+\input{tables/appendix/ucr_fewshot_shot_10.tex}
+
+\clearpage
+
+\section{Additional Experimental Details}
+\label{app:details}
+We summarize the key implementation choices of TimeMorph for the few-shot benchmark in Table~\ref{tab:timemorph-appendix-details}. These settings are fixed across the main benchmark reported in Section~\ref{sec:experiments}.
+
+\begin{table}[t]
+\centering
+\caption{Key few-shot adaptation settings for TimeMorph.}
+\label{tab:timemorph-appendix-details}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{ll}
+\toprule
+Component & Setting \\
+\midrule
+Base LLM & \texttt{meta-llama/Llama-3.2-1B} \\
+Vision backbone & \texttt{facebook/dinov2-base} \\
+Classification prompt suffix / answer & \texttt{Class:} / one class token, e.g., $\langle c_y\rangle$ followed by EOS \\
+Morphology-map construction & Overlapping-window grid transform with per-sequence median/IQR normalization \\
+Temporal patch length / stride & 16 / 8 \\
+Temporal hidden size / heads & 128 / 8 \\
+Branch projectors & LayerNorm--Linear--GELU--Dropout MLPs when dimensions differ \\
+Language projector & MLP projector into the LLM hidden dimension followed by output LayerNorm \\
+Default downstream checkpoint & Stage II (TSQA transfer) \\
+Warm-up / joint epochs & 5 / 55 \\
+Batch size / eval batch size & 8 / 8 \\
+Gradient accumulation & 4 \\
+LR (encoder / projector / LoRA) & $2\times 10^{-4}$ / $1\times 10^{-4}$ / $1\times 10^{-4}$ \\
+Language-side adaptation & LoRA on \texttt{q/k/v/o\_proj}, \texttt{gate\_proj}, \texttt{up\_proj}, and \texttt{down\_proj} ($r=16$, $\alpha=32$) \\
+Tokenizer training mode & \texttt{class\_rows} \\
+Anonymous class-token initialization & pretrained vocabulary-row mean plus small random perturbation \\
+Prediction rule & anonymous class-token scoring; semantic-prior class-token scoring when label text is meaningful \\
+Freeze vision backbone & true \\
+Downstream data augmentation & none \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\paragraph{Morphology-map transform.}
+The operator $\Gamma_{\mathrm{img}}$ in Eq.~\ref{eq:morphology-map} applies per-sample min--max normalization over the two-dimensional grid and a fixed contrast adjustment $u\mapsto u^{0.8}$. In the default morphology mode, the effective window length is $\max(1,\lfloor\sqrt{T}\rfloor)$, the stride length is $\max(1,\lfloor 0.1q\rfloor)$, incomplete windows are completed by replicate padding on the left, and the resulting grid is resized to the DINOv2 image resolution with nearest-neighbor interpolation before RGB replication. We use DINOv2 patch tokens from the configured intermediate layer and exclude the class token.
+
+\paragraph{Stage I pretraining hyperparameters.}
+Stage I uses mask ratio $0.4$, branch-dropout probability $0.1$, jitter standard deviation $0.03$, scaling range $[0.8,1.2]$, and time-mask ratio $0.1$ for the two augmented views. The Stage I loss weights are $\lambda_{\mathrm{rec}}=1.0$, $\lambda_t=0.25$, $\lambda_v=0.25$, and $\lambda_f=0.5$. These values are fixed before the downstream few-shot runs.
+
+\subsection{Pretraining Stages and Data Sources}
+\label{app:pretrain-details}
+
+Table~\ref{tab:timemorph-pretrain-stages} summarizes the three training stages discussed in the main paper and clarifies which stage provides the default downstream checkpoint.
+
+\begin{table}[t]
+\centering
+\caption{Stage-wise data sources and roles for TimeMorph.}
+\label{tab:timemorph-pretrain-stages}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{1.2cm}p{3.9cm}p{4.3cm}p{5.1cm}}
+\toprule
+Stage & Training data & Validation / monitoring data & Role in the main UCR few-shot benchmark \\
+\midrule
+Stage I & Raw TSQA-train series, raw M4-train series, and official TRAIN-split raw series from a 98-dataset UCR training pool. & Raw TSQA validation/test series and raw M4 validation/test series. No UCR official TEST split is used. & Learns dual-view representations before the LLM interface; corresponds to \texttt{stage0\_encoder\_ssl} in the implementation. \\
+Stage II & TSQA train split only, with standard language-model training on time-series question answering. & TSQA validation/test splits. & Provides the default downstream checkpoint used by all main few-shot results in Section~\ref{sec:experiments}; corresponds to \texttt{stage1\_tsqa\_transfer}. \\
+Stage III & Optional mixture of TSQA, M4 captioning, and synthetic attribute supervision derived from TSQA/M4 raw series. & Corresponding validation/test splits of the same mixture. & Used only for additional semantic enrichment or caption specialization; not used for the default main benchmark initialization unless explicitly stated. This corresponds to \texttt{stage2\_semantic\_bridge} and later caption specialization in code. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+After stage-wise pretraining, downstream few-shot adaptation uses only the sampled support labels of the target dataset. For UCR targets contained in the Stage I pool, unlabeled TRAIN sequences may already have contributed to the encoder pretraining.
+
+\subsection{Code Release and Assets}
+\label{app:code-and-assets}
+
+We will release an anonymized code package with the submission. The release includes the TimeMorph implementation, the few-shot adaptation and evaluation scripts, baseline launchers, reporting scripts for the tables in this paper, environment files, and README instructions for preparing the public datasets used in our experiments. The code is released under the MIT license. The package does not redistribute raw third-party datasets or gated pretrained model weights; users should obtain those assets from the original providers and comply with their licenses and terms of use. The released scripts document which experiments are directly reproducible from the package and which require separately downloaded datasets or pretrained checkpoints.
+
+\subsection{Asset and License Table}
+\label{app:asset-license-table}
+
+Table~\ref{tab:asset-license-table} summarizes the main existing assets used in this paper. We list the original source, role, version when available, license or stated terms, and whether the asset is redistributed in our release. For assets whose official source does not state a separate dataset license, we cite the official repository or archive page and do not redistribute the raw data.
+
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{longtable}{p{2.0cm}p{1.7cm}p{3.0cm}p{3.0cm}p{2.7cm}}
+\caption{Existing assets used in this paper and their licenses or stated terms. URLs were checked during manuscript preparation.}
+\label{tab:asset-license-table}\\
+\toprule
+Asset & Role & Source / version & License or stated terms & Redistribution in our release \\
+\midrule
+\endfirsthead
+\caption[]{Existing assets used in this paper and their licenses or stated terms (continued).}\\
+\toprule
+Asset & Role & Source / version & License or stated terms & Redistribution in our release \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+UCR Archive 2018 & Main few-shot benchmark and unlabeled Stage I source pool & \href{https://www.timeseriesclassification.com/}{TSC website}; \href{https://doi.org/10.5281/zenodo.11198697}{Zenodo v1} & Zenodo record lists Creative Commons Attribution 4.0 International (CC BY 4.0); archive should be cited via Dau et al. & Not redistributed; scripts expect users to download from the original archive or cited mirror. \\
+TSQA / Time-MQA & Stage I raw series and Stage II time-series question answering & \href{https://huggingface.co/datasets/Time-MQA/TSQA}{Hugging Face dataset card} & Apache-2.0 according to the Hugging Face dataset metadata & Not redistributed; scripts load from the original dataset source. \\
+M4 Competition dataset & Stage I raw series and optional captioning / semantic enrichment data & \href{https://github.com/Mcompetitions/M4-methods}{Official M4 repository} & The official repository publicly provides the dataset and asks users to cite the M4 competition resources; no separate dataset LICENSE file was found in the repository. & Not redistributed; users download from the official repository. \\
+MIT-BIH Arrhythmia Database & External semantic-label evaluation & \href{https://physionet.org/content/mitdb/1.0.0/}{PhysioNet v1.0.0} & Open Data Commons Attribution License v1.0; PhysioNet citation required & Not redistributed; preprocessing scripts require a local PhysioNet download. \\
+Sleep-EDF Database Expanded & External semantic-label evaluation & \href{https://physionet.org/content/sleep-edfx/1.0.0/}{PhysioNet v1.0.0} & Open Data Commons Attribution License v1.0; PhysioNet citation required & Not redistributed; preprocessing scripts require a local PhysioNet download. \\
+PhysioNet/CinC 2017 AF dataset & External semantic-label evaluation & \href{https://physionet.org/content/challenge-2017/1.0.0/}{PhysioNet v1.0.0} & Open Data Commons Attribution License v1.0; PhysioNet and challenge citations required & Not redistributed; preprocessing scripts require a local PhysioNet download. \\
+Llama 3.2 1B & Pretrained causal LLM backbone & \href{https://huggingface.co/meta-llama/Llama-3.2-1B}{Hugging Face model card} & Llama 3.2 Community License and Acceptable Use Policy & Not redistributed; users must obtain access from Meta / Hugging Face. \\
+DINOv2-base & Frozen visual backbone & \href{https://huggingface.co/facebook/dinov2-base}{Hugging Face model card} & Apache-2.0 & Not redistributed; loaded from the original model repository. \\
+OpenTSLM base code & Starting codebase and time-series language-model components & Project repository and release package & MIT license in the repository license file & Modified code is released in anonymized form under MIT, preserving applicable notices. \\
+Python ML libraries, including PyTorch, Transformers, PEFT, NumPy, pandas, scikit-learn, and related dependencies & Training, adaptation, evaluation, and reporting & Version constraints are listed in the released environment files & Governed by their respective open-source licenses & Not vendored; installed by the environment files. \\
+\end{longtable}
+\endgroup
+
+\subsection{Computational Resource Reporting}
+\label{app:compute-budget}
+
+All reported downstream experiments were run on a local server with six NVIDIA
+GeForce RTX 3090 GPUs (24GB each), two Intel Xeon Silver 4314 CPUs, and 251GiB
+system memory. Unless otherwise stated, each training job used one GPU, and the
+batch launchers executed up to six single-GPU workers in parallel.
+Table~\ref{tab:compute-budget} summarizes the compute used by the main
+experiment groups. GPU-hours are summed over single-GPU jobs; wall-clock time
+can be lower when multiple workers run concurrently. The efficiency measurements
+in Appendix~\ref{app:efficiency-summary} additionally report peak memory,
+train-step latency, inference latency, throughput, total parameters, and
+downstream-updated parameters on the representative runtime subset.
+
+\begin{table}[t]
+\centering
+\caption{Compute-resource budget for the reported experiment groups. Downstream jobs use single RTX 3090 workers unless noted otherwise.}
+\label{tab:compute-budget}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{3.0cm}p{5.2cm}p{2.6cm}p{2.2cm}p{2.1cm}p{3.3cm}}
+\toprule
+Experiment group & Scope & Compute workers & Mean per run & Total GPU-hours & Notes \\
+\midrule
+Stage I--II pretraining & Curriculum pretraining checkpoint used to initialize downstream adaptation & 1 RTX 3090 worker & -- & 19.81 & Stage I encoder SSL used 9.57 GPU-hours; Stage I--II together used 19.81 GPU-hours. \\
+Optional Stage III enrichment & Semantic-enrichment and caption-specialization training used outside the default UCR results & 1 RTX 3090 worker & -- & 29.03 & Not used for the default UCR benchmark. \\
+TimeMorph main UCR benchmark & 128 UCR datasets, 1/2/5/10-shot, five runs per setting; 2,507 completed downstream runs & 6 single-GPU workers & 0.67 GPU-h/run & 1,677 & Batch size 8, gradient accumulation 4, 60 downstream epochs. \\
+UCR baseline runs & ResNet, TapNet, COSCO-ResNet, PatchTST, GPT4TS, and TSLib-family baselines under the same few-shot protocol & 6 single-GPU workers & 0.40--0.49 GPU-h/run & 10,937 & Includes the retained main UCR baseline logs; GPT4TS coverage is reported for the completed 60-dataset run. \\
+External-dataset TimeMorph runs & MIT-BIH, SleepEDF, and CinC2017 under 10/20/30-shot protocols & single-GPU workers & 1.69 GPU-h/run & 153 & Same downstream adaptation recipe as the external few-shot experiments. \\
+External-dataset baseline runs & Reported baseline families on MIT-BIH, SleepEDF, and CinC2017 & single-GPU workers & 0.68 GPU-h/job & 22 & Launcher jobs cover all three external datasets and baseline families. \\
+Top-level ablations & No-pretraining, temporal-only, visual-only, class-token decoding, and no-LLM backbone ablations & 6 single-GPU workers & 1.67 GPU-h/run & 3,895 & Includes the two retained no-LLM linear runs added together. \\
+Semantic-prior ablation & External semantic-label interface runs & single-GPU workers & 1.69 GPU-h/run & 31 & Uses the same 10/20/30-shot external evaluation protocol. \\
+Efficiency probe & Representative UCR runtime subset with parameter, memory, latency, and throughput measurements & one RTX 3090 & -- & -- & Detailed runtime and memory values are reported in Tables~\ref{tab:efficiency-compact}, \ref{tab:computational-efficiency}, and \ref{tab:computational-efficiency-details}. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Retained launcher summaries also include failed or exploratory jobs. These runs
+account for less than 2 additional GPU-hours in the preserved logs, and dry-run
+checks add a negligible amount of compute.
+
+\subsection{External Dataset Results}
+\label{app:external-results}
+
+Table~\ref{tab:external-fewshot-full} reports the full 10-, 20-, and 30-shot results on MIT-BIH, SleepEDF, and CinC2017. All methods use the same external few-shot settings and reported run count; we use these datasets as transfer checks beyond the primary UCR benchmark rather than as a claim of uniform dominance across external domains.
+
+\input{tables/main/external_fewshot_main.tex}
+
+\subsection{Semantic-Prior Decision Ablation}
+\label{app:semantic-prior-ablation}
+
+Table~\ref{tab:m2-semantic-prior-ablation-accuracy} expands the semantic-prior comparison summarized in Table~\ref{tab:semantic-prior-summary}. Both variants use one-pass class-token scoring; the semantic-prior variant additionally initializes and regularizes class-token rows from label-verbalizer prototypes. The semantic prior improves the averaged performance on all three datasets, while individual shot-level deltas remain dataset-dependent.
+
+\input{tables/ablations/m2_semantic_prior_ablation_accuracy.tex}
+
+\subsection{Efficiency Summary}
+\label{app:efficiency-summary}
+
+Table~\ref{tab:computational-efficiency} reports computational efficiency and adaptation cost under the 10-shot UCR protocol. Runtime and memory are measured on the predefined representative UCR subset with batch size 8 on a single RTX 3090, while parameter counts are reported separately for total deployed parameters and downstream-updated parameters.
+
+\input{tables/main/efficiency_table.tex}
+
+\subsection{Baseline Training Recipes and Hyperparameters}
+\label{app:baseline-details}
+
+Table~\ref{tab:baseline-training-recipes} summarizes the training rules used by the reported baseline families.
+The goal of this table is to make the few-shot comparison protocol explicit: all methods share the same sampled support/query split, but they do not all use the same checkpoint-selection rule or the same epoch schedule.
+
+\begin{table}[t]
+\centering
+\caption{Few-shot training recipes for TimeMorph and the reported baseline families. All methods use the same sampled support sets within each run and evaluate on all official TEST examples from the target dataset.}
+\label{tab:baseline-training-recipes}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{2.0cm}p{1.4cm}p{1.5cm}p{1.8cm}p{2.6cm}p{0.9cm}p{0.9cm}p{4.2cm}}
+\toprule
+Method / family & Optimizer & Epochs & Batch / LR & Model selection rule & Val & ES & Few-shot notes \\
+\midrule
+TimeMorph & AdamW & 5 warm-up + 55 joint & 8 / $2\times 10^{-4}$ (encoder), $1\times 10^{-4}$ (projector, LoRA) & Report the last Phase II checkpoint & No & No & Class-token rows remain trainable; language-side adaptation uses LoRA in Phase II. \\
+ResNet, TapNet & AdamW & Fixed schedule in the few-shot runner (60 in the benchmark configs) & model-specific / benchmark configs use $10^{-4}$ & Best support-set accuracy, tie-broken by support loss & No & No & Trained only on the sampled support set; the support set doubles as the model-selection set. \\
+COSCO-ResNet & SAM with SGD base optimizer + prototypical loss & Fixed schedule (100 in the benchmark configs) & 128 / $10^{-2}$ by default & Final trained model; support centroids computed after training & No & No & Query predictions are made by distances to support centroids rather than a learned classifier head. \\
+PatchTST & AdamW + linear warmup & Two-phase fixed schedule (head warm-up + joint fine-tuning; 60 total epochs in the benchmark configs) & 16 / separate backbone-head LRs & Report the last Phase II checkpoint & No & No & Uses the same support/query split and full dataset class set as the main protocol. \\
+TSLib family (\textsc{DLinear}, \textsc{Autoformer}, \textsc{Crossformer}, \textsc{FEDformer}, \textsc{Informer}, \textsc{TimesNet}) & RAdam + cosine schedule & Fixed model-specific schedule from the TSLib profile or benchmark override & usually 16 / $10^{-3}$ & Report the last checkpoint & No & No & Single-stage training; evaluation masks logits to the target dataset's class set. TimesNet uses a shorter profile than the other TSLib baselines. \\
+\textsc{GPT4TS} & RAdam (default runner setting) & Fixed schedule (60 in the benchmark configs) & 64 / $10^{-4}$ in the benchmark configs & Report the last checkpoint & No & No & Implemented with the One-Fits-All classification runner under the same sampled support/query protocol. \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\subsection{Computational Efficiency Probe Details}
+\label{app:efficiency-details}
+
+The efficiency probe is implemented by the repository's \texttt{efficiency\_probe.py} script.
+It uses the same model families as the main benchmark and omits TimeMorph-only ablations.
+The default runtime subset contains \textsc{Coffee}, \textsc{GunPoint}, \textsc{ECG5000}, \textsc{ElectricDevices}, \textsc{Crop}, \textsc{ACSF1}, \textsc{Phoneme}, and \textsc{NonInvasiveFetalECGThorax1}, covering short, medium, and long UCR series as well as different class counts.
+The script writes the LaTeX tables, CSV summary, and accuracy-versus-updated-parameters plot to the efficiency-report directory.
+
+\input{tables/appendix/efficiency_runtime_details.tex}
+
+\section{Additional Plot}
+\label{app:plots}
+Figure~\ref{fig:fewshot-trend} visualizes the shot-scaling trend over the 128 UCR datasets. TimeMorph remains the strongest method on the averaged benchmark curve across the entire few-shot range, with the largest absolute advantage appearing at 10-shot.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fewshot_trend.pdf}
+\caption{Shot-scaling trend on the 128 UCR datasets. Each point reports the mean accuracy over five runs. TimeMorph remains the strongest method across all four shot settings.}
+\label{fig:fewshot-trend}
+\end{figure}
+
+\clearpage
+\section{Ablation Tables}
+\label{app:ablation-tables}
+Table~\ref{tab:ablation-summary} in the main paper reports the compact ablation summary. Tables~\ref{tab:ablation-pretrain}--\ref{tab:ablation-decoding} expand that summary into three focused views under the same few-shot protocol. Table~\ref{tab:ablation-llm-backbone} summarizes the LLM-backbone ablation, and Table~\ref{tab:ablation-llm-backbone-appendix} reports its full per-dataset comparison on all 128 UCR datasets. Because UCR class identifiers are anonymous, the label-space ablation should be interpreted as testing closed-set class-token scoring; the semantic-prior class-token ablation is reported on external datasets with meaningful class names in Appendix~\ref{app:semantic-prior-ablation}.
+
+\input{tables/ablations/m2_pretrain_preview.tex}
+\clearpage
+\input{tables/ablations/m2_dual_view_preview.tex}
+\clearpage
+\input{tables/ablations/m2_class_token_scoring_preview.tex}
+\clearpage
+\input{tables/main/m2_llm_backbone_ablation_summary.tex}
+\clearpage
+\input{tables/ablations/m2_llm_backbone_full.tex}
+
+\newpage
+\input{checklist.tex}
+
+\end{document}
