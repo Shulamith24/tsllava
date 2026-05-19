@@ -2319,8 +2319,10 @@ def save_checkpoint(
         )
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    tmp_save_path = f"{save_path}.tmp.{os.getpid()}"
     try:
-        torch.save(checkpoint, save_path)
+        torch.save(checkpoint, tmp_save_path)
+        os.replace(tmp_save_path, save_path)
     except (OSError, RuntimeError) as exc:
         message = str(exc)
         is_write_failure = (
@@ -2328,15 +2330,15 @@ def save_checkpoint(
             or "unexpected pos" in message
             or "No space left on device" in message
         )
-        partial_size = os.path.getsize(save_path) if os.path.exists(save_path) else 0
+        partial_size = os.path.getsize(tmp_save_path) if os.path.exists(tmp_save_path) else 0
         try:
             free_bytes = shutil.disk_usage(os.path.dirname(save_path)).free
         except OSError:
             free_bytes = None
 
-        if is_write_failure and os.path.exists(save_path):
+        if os.path.exists(tmp_save_path):
             try:
-                os.remove(save_path)
+                os.remove(tmp_save_path)
             except OSError:
                 pass
 
@@ -2355,6 +2357,85 @@ def save_checkpoint(
                 "If you only need evaluation metrics, rerun with --skip_phase_checkpoints."
             ) from exc
 
+        raise
+
+
+def is_recoverable_checkpoint_load_error(exc: BaseException) -> bool:
+    message = str(exc)
+    recoverable_patterns = (
+        "PytorchStreamReader failed reading zip archive",
+        "failed finding central directory",
+        "failed reading zip archive",
+        "invalid header or archive is corrupted",
+        "not a ZIP archive",
+        "Ran out of input",
+    )
+    return any(pattern in message for pattern in recoverable_patterns)
+
+
+def quarantine_corrupt_checkpoint(checkpoint_path: str, rank: int = 0) -> Optional[str]:
+    if rank != 0 or not os.path.exists(checkpoint_path):
+        return None
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    quarantined_path = f"{checkpoint_path}.corrupt_{timestamp}"
+    suffix = 1
+    while os.path.exists(quarantined_path):
+        quarantined_path = f"{checkpoint_path}.corrupt_{timestamp}_{suffix}"
+        suffix += 1
+    try:
+        os.replace(checkpoint_path, quarantined_path)
+        return quarantined_path
+    except OSError as exc:
+        print(f"⚠️ Failed to quarantine corrupt checkpoint {checkpoint_path}: {exc}")
+        return None
+
+
+def quarantine_corrupt_json(json_path: str, rank: int = 0) -> Optional[str]:
+    if rank != 0 or not os.path.exists(json_path):
+        return None
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    quarantined_path = f"{json_path}.corrupt_{timestamp}"
+    suffix = 1
+    while os.path.exists(quarantined_path):
+        quarantined_path = f"{json_path}.corrupt_{timestamp}_{suffix}"
+        suffix += 1
+    try:
+        os.replace(json_path, quarantined_path)
+        return quarantined_path
+    except OSError as exc:
+        print(f"⚠️ Failed to quarantine corrupt JSON {json_path}: {exc}")
+        return None
+
+
+def load_json_or_quarantine(json_path: str, *, rank: int = 0, description: str = "JSON"):
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        quarantined_path = quarantine_corrupt_json(json_path, rank=rank)
+        if rank == 0:
+            target_text = quarantined_path or "not moved"
+            print(f"⚠️  {description} is unreadable and will be ignored: {json_path}")
+            print(f"   quarantined: {target_text}")
+            print(f"   reason: {exc}")
+        return None
+
+
+def atomic_write_json(save_path: str, payload: Any, *, indent: Optional[int] = 2):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    tmp_save_path = f"{save_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_save_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=indent)
+        os.replace(tmp_save_path, save_path)
+    except Exception:
+        if os.path.exists(tmp_save_path):
+            try:
+                os.remove(tmp_save_path)
+            except OSError:
+                pass
         raise
 
 
@@ -2485,34 +2566,53 @@ def train_phase(
     start_local_epoch = 1
 
     if resume and ckpt_path and os.path.exists(ckpt_path):
-        checkpoint = load_checkpoint(
-            model=model,
-            checkpoint_path=ckpt_path,
-            device=device,
-            tokenizer_training_mode=args.tokenizer_training_mode,
-            label_interface=args.label_interface,
-            semantic_target_mode=args.semantic_target_mode,
-            optimizer=optimizer,
-            scheduler=scheduler,
-        )
-        resume_state = resolve_phase_resume_state(
-            checkpoint,
-            phase_name=phase_name,
-            phase_epochs=phase_epochs,
-        )
-        start_local_epoch = resume_state["start_epoch"]
-        losses = resume_state["loss_history"]
-        if rank == 0:
-            print(
-                f"   {phase_name}: 断点续训，已完成 {resume_state['completed_epoch']} / {phase_epochs} 个 epoch"
+        try:
+            checkpoint = load_checkpoint(
+                model=model,
+                checkpoint_path=ckpt_path,
+                device=device,
+                tokenizer_training_mode=args.tokenizer_training_mode,
+                label_interface=args.label_interface,
+                semantic_target_mode=args.semantic_target_mode,
+                optimizer=optimizer,
+                scheduler=scheduler,
             )
-        if resume_state["is_complete"]:
-            return {
-                "losses": losses,
-                "last_loss": resume_state["last_loss"],
-                "total_steps": total_steps,
-                "warmup_steps": warmup_steps,
-            }
+        except Exception as exc:
+            if not is_recoverable_checkpoint_load_error(exc):
+                raise
+            quarantined_path = quarantine_corrupt_checkpoint(ckpt_path, rank=rank)
+            if rank == 0:
+                target_text = quarantined_path or "not moved"
+                print(
+                    f"⚠️  {phase_name}: resume checkpoint is unreadable and will be ignored: {ckpt_path}"
+                )
+                print(f"   quarantined: {target_text}")
+                print(f"   reason: {exc}")
+                print(f"   restarting {phase_name} from epoch 1")
+            checkpoint = None
+
+        if checkpoint is None:
+            start_local_epoch = 1
+            losses = []
+        else:
+            resume_state = resolve_phase_resume_state(
+                checkpoint,
+                phase_name=phase_name,
+                phase_epochs=phase_epochs,
+            )
+            start_local_epoch = resume_state["start_epoch"]
+            losses = resume_state["loss_history"]
+            if rank == 0:
+                print(
+                    f"   {phase_name}: 断点续训，已完成 {resume_state['completed_epoch']} / {phase_epochs} 个 epoch"
+                )
+            if resume_state["is_complete"]:
+                return {
+                    "losses": losses,
+                    "last_loss": resume_state["last_loss"],
+                    "total_steps": total_steps,
+                    "warmup_steps": warmup_steps,
+                }
 
     for local_epoch in range(start_local_epoch, phase_epochs + 1):
         global_epoch = epoch_offset + local_epoch
@@ -2660,12 +2760,20 @@ def run_single_experiment(
     if world_size > 1:
         dist.barrier()
 
-    completed_run_exists_rank0 = (
+    cached_metrics_rank0 = None
+    completed_run_exists_rank0 = False
+    if (
         args.resume
         and rank == 0
         and os.path.exists(run_metrics_path)
         and (args.cleanup_checkpoints or os.path.exists(phase2_ckpt_path))
-    )
+    ):
+        cached_metrics_rank0 = load_json_or_quarantine(
+            run_metrics_path,
+            rank=rank,
+            description="cached run_metrics.json",
+        )
+        completed_run_exists_rank0 = cached_metrics_rank0 is not None
     completed_run_exists = broadcast_object_from_rank0(
         completed_run_exists_rank0 if rank == 0 else None,
         world_size,
@@ -2675,8 +2783,7 @@ def run_single_experiment(
         cached_metrics = None
         if rank == 0:
             print(f"[shot={shot_name} run={run_id}] 检测到已完成结果，直接复用: {run_metrics_path}")
-            with open(run_metrics_path, "r") as f:
-                cached_metrics = json.load(f)
+            cached_metrics = cached_metrics_rank0
         if world_size > 1:
             dist.barrier()
         return cached_metrics
@@ -2686,38 +2793,40 @@ def run_single_experiment(
     support_info_rank0 = None
     if rank == 0:
         if args.resume and os.path.exists(support_info_path):
-            with open(support_info_path, "r") as f:
-                support_info_rank0 = json.load(f)
-        else:
+            support_info_rank0 = load_json_or_quarantine(
+                support_info_path,
+                rank=rank,
+                description="few-shot support index JSON",
+            )
+        if support_info_rank0 is None:
             support_info_rank0 = sample_support_info(
                 label_to_indices,
                 shot,
                 run_seed,
                 way=args.way,
             )
-            with open(support_info_path, "w") as f:
-                json.dump(
-                    {
-                        "dataset": args.dataset,
-                        "dataset_family": args.dataset_family,
-                        "label_interface": args.label_interface,
-                        "split_protocol": args.split_protocol,
-                        "way": support_info_rank0["way"],
-                        "shot": shot_name,
-                        "run_id": run_id,
-                        "seed": run_seed,
-                        "selected_class_ids": support_info_rank0["selected_class_ids"],
-                        "selected_indices": support_info_rank0["selected_indices"],
-                        "selected_by_class": support_info_rank0["selected_by_class"],
-                        "k_eff_per_class": support_info_rank0["k_eff_per_class"],
-                        "class_train_counts": support_info_rank0["class_train_counts"],
-                        "classes_with_shortage": support_info_rank0["classes_with_shortage"],
-                        "any_shortage": support_info_rank0["any_shortage"],
-                        "support_size": support_info_rank0["support_size"],
-                    },
-                    f,
-                    indent=2,
-                )
+            atomic_write_json(
+                support_info_path,
+                {
+                    "dataset": args.dataset,
+                    "dataset_family": args.dataset_family,
+                    "label_interface": args.label_interface,
+                    "split_protocol": args.split_protocol,
+                    "way": support_info_rank0["way"],
+                    "shot": shot_name,
+                    "run_id": run_id,
+                    "seed": run_seed,
+                    "selected_class_ids": support_info_rank0["selected_class_ids"],
+                    "selected_indices": support_info_rank0["selected_indices"],
+                    "selected_by_class": support_info_rank0["selected_by_class"],
+                    "k_eff_per_class": support_info_rank0["k_eff_per_class"],
+                    "class_train_counts": support_info_rank0["class_train_counts"],
+                    "classes_with_shortage": support_info_rank0["classes_with_shortage"],
+                    "any_shortage": support_info_rank0["any_shortage"],
+                    "support_size": support_info_rank0["support_size"],
+                },
+                indent=2,
+            )
     support_info = broadcast_object_from_rank0(support_info_rank0, world_size, rank)
     support_info.setdefault("selected_class_ids", [])
     support_info.setdefault("selected_indices", [])
@@ -3021,21 +3130,19 @@ def run_single_experiment(
             "model_checkpoint": "phase2_last.pt" if save_phase_checkpoints else None,
         }
 
-        with open(run_metrics_path, "w") as f:
-            json.dump(run_metrics, f, indent=2)
+        atomic_write_json(run_metrics_path, run_metrics, indent=2)
 
-        with open(os.path.join(run_dir, "test_predictions.json"), "w") as f:
-            json.dump(
-                {
-                    "predictions": test_results["predictions"],
-                    "labels": test_results["labels"],
-                    "macro_f1": test_results["macro_f1"],
-                    "eval_decode_mode": test_results["eval_decode_mode"],
-                    "semantic_score_mode": test_results["semantic_score_mode"],
-                },
-                f,
-                indent=2,
-            )
+        atomic_write_json(
+            os.path.join(run_dir, "test_predictions.json"),
+            {
+                "predictions": test_results["predictions"],
+                "labels": test_results["labels"],
+                "macro_f1": test_results["macro_f1"],
+                "eval_decode_mode": test_results["eval_decode_mode"],
+                "semantic_score_mode": test_results["semantic_score_mode"],
+            },
+            indent=2,
+        )
 
         if save_phase_checkpoints and args.cleanup_checkpoints:
             cleanup_checkpoint_files(
@@ -3112,8 +3219,7 @@ def main():
 
         if rank == 0:
             os.makedirs(save_root, exist_ok=True)
-            with open(os.path.join(save_root, "config.json"), "w") as f:
-                json.dump(vars(args), f, indent=2)
+            atomic_write_json(os.path.join(save_root, "config.json"), vars(args), indent=2)
 
             print("=" * 80)
             print("M2: Few-shot Univariate Classification with Pretrained SP Models")
@@ -3200,8 +3306,7 @@ def main():
 
                 shot_dir = os.path.join(save_root, f"shot_{shot_name}")
                 os.makedirs(shot_dir, exist_ok=True)
-                with open(os.path.join(shot_dir, "shot_summary.json"), "w") as f:
-                    json.dump(shot_summary, f, indent=2)
+                atomic_write_json(os.path.join(shot_dir, "shot_summary.json"), shot_summary, indent=2)
 
                 print(
                     f"[shot={shot_name}] "
@@ -3226,8 +3331,7 @@ def main():
                 "shot_summaries": shot_summaries,
             }
 
-            with open(os.path.join(save_root, "fewshot_summary.json"), "w") as f:
-                json.dump(overall_summary, f, indent=2)
+            atomic_write_json(os.path.join(save_root, "fewshot_summary.json"), overall_summary, indent=2)
 
             save_shot_summary_csv(
                 save_path=os.path.join(save_root, "fewshot_summary.csv"),

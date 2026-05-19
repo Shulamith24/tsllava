@@ -773,14 +773,14 @@ class OpenTSLMSP(TimeSeriesLLM):
                 expected_lora_params = {
                     name
                     for name, param in self.llm.named_parameters()
-                    if param.requires_grad and "lora_" in name
+                    if "lora_" in name
                 }
 
                 for name, param in self.llm.named_parameters():
-                    if name in lora_state and param.requires_grad and "lora_" in name:
+                    if name in lora_state and "lora_" in name:
                         param.data.copy_(lora_state[name])
                         loaded_count += 1
-                    elif param.requires_grad and "lora_" in name:
+                    elif "lora_" in name:
                         missing_keys.append(name)
 
                 if missing_keys and not allow_missing:
@@ -797,9 +797,13 @@ class OpenTSLMSP(TimeSeriesLLM):
                 raise RuntimeError(f"Failed to load LoRA adapters: {e}")
 
         elif checkpoint_has_lora:
-            raise RuntimeError(
-                "Checkpoint indicates LoRA was enabled but no LoRA state found"
-            )
+            if not allow_missing:
+                raise RuntimeError(
+                    "Checkpoint indicates LoRA was enabled but no LoRA state found"
+                )
+            print("⚠️  Checkpoint indicates LoRA was enabled but no LoRA state was found.")
+            print("   LoRA adapters will keep their current initialization.")
+            return 0
 
         # Handle case where checkpoint has no LoRA but model expects it
         if not checkpoint_has_lora and self.lora_enabled:
@@ -831,7 +835,7 @@ class OpenTSLMSP(TimeSeriesLLM):
                 # Save LoRA adapter weights
                 lora_state = {}
                 for name, param in self.llm.named_parameters():
-                    if param.requires_grad and "lora_" in name:
+                    if "lora_" in name:
                         lora_state[name] = param.data.clone()
 
                 if lora_state:
