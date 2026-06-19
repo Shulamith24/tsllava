@@ -1,0 +1,28 @@
+% Requires \usepackage{booktabs,graphicx}
+\begin{table*}[t]
+\centering
+\caption{Few-shot classification accuracy (\%) on two external semantic-label datasets. Each cell reports mean $\pm$ standard deviation over 10 runs under the same few-shot protocol. Best is bold and second-best is underlined within each dataset-shot column.}
+\label{tab:external-fewshot-full}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Model & \multicolumn{3}{c}{MIT-BIH} & \multicolumn{3}{c}{CinC2017} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+ & 10-shot & 20-shot & 30-shot & 10-shot & 20-shot & 30-shot \\
+\midrule
+TimeMorph & \underline{57.05 $\pm$ 10.96} & \textbf{66.62 $\pm$ 6.54} & \textbf{68.87 $\pm$ 11.23} & \textbf{34.72 $\pm$ 3.15} & \textbf{35.24 $\pm$ 1.24} & \textbf{38.86 $\pm$ 7.00} \\
+ResNet & 37.97 $\pm$ 14.13 & 55.66 $\pm$ 8.58 & 57.07 $\pm$ 9.05 & 30.95 $\pm$ 12.41 & \underline{33.73 $\pm$ 7.43} & \underline{36.20 $\pm$ 4.84} \\
+TapNet & 31.94 $\pm$ 7.18 & 40.15 $\pm$ 10.28 & 44.11 $\pm$ 11.14 & 30.05 $\pm$ 6.73 & 32.80 $\pm$ 8.81 & 31.01 $\pm$ 11.54 \\
+COSCO-ResNet & 32.33 $\pm$ 14.25 & 35.08 $\pm$ 13.75 & 41.17 $\pm$ 8.94 & \underline{31.41 $\pm$ 4.48} & 31.04 $\pm$ 6.97 & 31.98 $\pm$ 8.37 \\
+PatchTST & 38.94 $\pm$ 14.35 & 55.36 $\pm$ 8.84 & 57.08 $\pm$ 9.40 & 26.07 $\pm$ 6.24 & 30.35 $\pm$ 7.51 & 31.21 $\pm$ 3.36 \\
+OneFitsAll & 32.92 $\pm$ 16.63 & 42.48 $\pm$ 10.82 & 54.87 $\pm$ 10.04 & 30.80 $\pm$ 6.07 & 27.56 $\pm$ 4.33 & 29.23 $\pm$ 3.03 \\
+TimesNet & 51.01 $\pm$ 5.84 & 54.21 $\pm$ 7.81 & 56.15 $\pm$ 8.77 & 27.25 $\pm$ 2.81 & 28.41 $\pm$ 4.24 & 29.43 $\pm$ 2.44 \\
+DLinear & 55.57 $\pm$ 9.85 & 57.45 $\pm$ 7.95 & \underline{58.84 $\pm$ 8.69} & 24.92 $\pm$ 1.16 & 25.17 $\pm$ 1.22 & 24.53 $\pm$ 1.70 \\
+Autoformer & 38.05 $\pm$ 5.65 & 42.49 $\pm$ 8.58 & 44.39 $\pm$ 7.25 & 28.37 $\pm$ 5.44 & 27.67 $\pm$ 2.76 & 26.30 $\pm$ 4.36 \\
+Crossformer & 53.48 $\pm$ 9.36 & \underline{58.55 $\pm$ 10.43} & 58.24 $\pm$ 9.71 & 24.02 $\pm$ 6.10 & 25.50 $\pm$ 2.86 & 27.35 $\pm$ 2.35 \\
+FEDformer & \textbf{58.88 $\pm$ 5.77} & 56.80 $\pm$ 9.98 & 55.12 $\pm$ 10.09 & 20.35 $\pm$ 8.32 & 26.90 $\pm$ 3.54 & 27.91 $\pm$ 4.87 \\
+Informer & 53.19 $\pm$ 6.03 & 54.20 $\pm$ 7.61 & 52.35 $\pm$ 10.80 & 26.93 $\pm$ 9.30 & 28.14 $\pm$ 4.01 & 30.12 $\pm$ 5.95 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}

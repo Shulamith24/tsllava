@@ -1,0 +1,23 @@
+% Requires \usepackage{booktabs,graphicx}
+\begin{table*}[t]
+\centering
+\caption{Efficiency and accuracy comparison on representative 10-shot tasks. Accuracy is averaged over five runs for \textsc{GunPoint} and ten runs for MIT-BIH and CinC2017. Peak memory and inference latency are measured by \texttt{efficiency\_probe.py} with batch size 8 on a single RTX 3090. Updated parameters count only parameters fine-tuned on the support set. \textsuperscript{\textdagger}TimeMorph uses gradient checkpointing for the 3000-step CinC2017 probe; PatchTST exceeds 24GB during the same batch-8 training probe.}
+\label{tab:efficiency-compact}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcrrrrrrrrr}
+\toprule
+Model & Updated params & \multicolumn{3}{c}{\textsc{GunPoint}} & \multicolumn{3}{c}{MIT-BIH} & \multicolumn{3}{c}{CinC2017} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11}
+ &  & Acc. & Peak GB & ms/ex. & Acc. & Peak GB & ms/ex. & Acc. & Peak GB & ms/ex. \\
+\midrule
+TimeMorph & 12.2M & \textbf{97.47} & 13.24 & 31.07 & \textbf{57.05} & 15.05 & 38.02 & \textbf{34.72} & 12.21\textsuperscript{\textdagger} & 54.44 \\
+COSCO-ResNet & 661K & 91.73 & 0.06 & 0.19 & 32.33 & 0.16 & 0.21 & 31.41 & 1.34 & 0.45 \\
+ResNet & 628K & 85.73 & 0.06 & 0.14 & 37.97 & 0.16 & 0.20 & 30.95 & 1.29 & 0.43 \\
+TapNet & 911K & 82.13 & 0.09 & 0.16 & 31.94 & 0.13 & 0.23 & 30.05 & 1.17 & 1.94 \\
+PatchTST & 597K & 77.60 & 0.13 & 0.31 & 38.94 & 0.27 & 0.29 & 26.07 & OOM & -- \\
+GPT4TS & 1.1M & 62.00 & 0.38 & 0.58 & 32.92 & 0.45 & 0.59 & 30.80 & 1.19 & 0.59 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}

@@ -26,18 +26,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from fewshot_utils import write_json  # noqa: E402
-from opentslm.time_series_datasets.mitbih.mitbih_loader import (  # noqa: E402
-    load_mitbih_arrhythmia_splits,
-)
-from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (  # noqa: E402
-    load_sleepedf_classification_splits,
-)
-from opentslm.time_series_datasets.cinc2017af.cinc2017af_loader import (  # noqa: E402
-    load_cinc2017af_splits,
-)
-from opentslm.time_series_datasets.heart_sound.heart_sound_loader import (  # noqa: E402
-    load_heart_sound_splits,
-)
 from opentslm.time_series_datasets.univariate_fewshot import (  # noqa: E402
     resolve_univariate_dataset_name,
     resolve_univariate_split_protocol,
@@ -196,6 +184,8 @@ def _load_mitbih_arrays(
     split_protocol: str,
     normalize: bool,
 ) -> Dict[str, Any]:
+    from opentslm.time_series_datasets.mitbih.mitbih_loader import load_mitbih_arrhythmia_splits
+
     del dataset_name
     train_rows, _val_rows, test_rows = load_mitbih_arrhythmia_splits(
         raw_data_path=data_path,
@@ -227,6 +217,10 @@ def _load_sleepedf_arrays(
     split_protocol: str,
     normalize: bool,
 ) -> Dict[str, Any]:
+    from opentslm.time_series_datasets.sleep.sleepedf_classification_loader import (
+        load_sleepedf_classification_splits,
+    )
+
     del dataset_name
     train_rows, _val_rows, test_rows = load_sleepedf_classification_splits(
         raw_data_path=data_path,
@@ -339,6 +333,8 @@ def load_univariate_arrays(
             normalize=normalize,
         )
     elif resolved_family == "cinc2017af":
+        from opentslm.time_series_datasets.cinc2017af.cinc2017af_loader import load_cinc2017af_splits
+
         payload = _load_row_time_series_arrays(
             load_cinc2017af_splits,
             resolved_name,
@@ -347,6 +343,8 @@ def load_univariate_arrays(
             normalize=normalize,
         )
     elif resolved_family == "cinc2016heart":
+        from opentslm.time_series_datasets.heart_sound.heart_sound_loader import load_heart_sound_splits
+
         payload = _load_row_time_series_arrays(
             load_heart_sound_splits,
             resolved_name,

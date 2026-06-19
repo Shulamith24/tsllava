@@ -1,0 +1,29 @@
+% Requires \usepackage{booktabs}
+\begin{table*}[t]
+\centering
+\caption{Few-shot classification accuracy (\%) on 128 UCR datasets, grouped by model family. Baseline method references are shown in the Model column. We report the mean over five runs. \texttt{Avg} and \texttt{AvgRank} average the four shot-specific mean accuracies and average ranks, respectively. Best is bold and second-best is underlined.}
+\label{tab:ucr_fewshot_paper_current-fewshot-main}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrr}
+\toprule
+Family & Model & 1-shot & 2-shot & 5-shot & 10-shot & Avg & AvgRank \\
+\midrule
+\multirow{3}{*}{CNN} & ResNet~\cite{wang2017time} & 47.79 & 53.98 & 61.27 & 66.24 & 57.32 & 4.89 \\
+ & TapNet~\cite{tapnet} & 45.40 & 50.79 & 59.47 & 64.93 & 55.15 & 5.45 \\
+ & COSCO-ResNet~\cite{barreda2024cosco} & \underline{47.88} & \underline{54.95} & \underline{63.55} & \underline{67.18} & \underline{58.39} & \underline{4.70} \\
+\midrule
+\multirow{7}{*}{Transformer/TS} & DLinear~\cite{zeng2023transformers} & 44.21 & 48.01 & 52.30 & 55.43 & 49.99 & 7.24 \\
+ & PatchTST~\cite{nie2023time} & 42.39 & 48.43 & 56.94 & 62.72 & 52.62 & 6.54 \\
+ & TimesNet~\cite{wu2023timesnet} & 45.16 & 49.95 & 57.86 & 62.79 & 53.94 & 5.90 \\
+ & Autoformer~\cite{wu2021autoformer} & 36.78 & 39.45 & 43.20 & 46.04 & 41.37 & 9.47 \\
+ & Crossformer~\cite{zhang2023crossformer} & 44.31 & 49.45 & 57.20 & 61.94 & 53.23 & 6.04 \\
+ & FEDformer~\cite{zhou2022fedformer} & 37.71 & 41.71 & 47.30 & 51.50 & 44.56 & 8.68 \\
+ & Informer~\cite{zhou2021informer} & 46.42 & 51.14 & 58.35 & 63.13 & 54.76 & 5.59 \\
+\midrule
+LLM/foundation & GPT4TS~\cite{zhou2023onefitsall} & 35.61 & 38.30 & 42.94 & 46.88 & 40.93 & 9.26 \\
+\midrule
+Ours & TimeMorph & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & \textbf{4.24} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}

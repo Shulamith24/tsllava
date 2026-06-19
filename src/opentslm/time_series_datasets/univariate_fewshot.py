@@ -8,22 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from opentslm.time_series_datasets.mitbih.MITBIHClassificationDataset import (
-    MITBIHClassificationDataset,
-)
-from opentslm.time_series_datasets.sleep.SleepEDFClassificationDataset import (
-    SleepEDFClassificationDataset,
-)
-from opentslm.time_series_datasets.cinc2017af.CinC2017AFClassificationDataset import (
-    CinC2017AFClassificationDataset,
-)
-from opentslm.time_series_datasets.heart_sound.HeartSoundClassificationDataset import (
-    HeartSoundClassificationDataset,
-)
-from opentslm.time_series_datasets.ucr.UCRClassificationDataset import (
-    UCRClassificationDataset,
-)
-
 
 DatasetFamily = Literal[
     "ucr",
@@ -156,6 +140,8 @@ def load_univariate_fewshot_bundle(args, *, eos_token: str) -> UnivariateFewShot
         )
 
     if dataset_family == "ucr":
+        from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
+
         train_dataset = UCRClassificationDataset(
             split="train",
             EOS_TOKEN=eos_token,
@@ -181,6 +167,8 @@ def load_univariate_fewshot_bundle(args, *, eos_token: str) -> UnivariateFewShot
         raw_label_verbalizers = {}
         raw_label_cards = {}
     elif dataset_family == "mitbih":
+        from opentslm.time_series_datasets.mitbih.MITBIHClassificationDataset import MITBIHClassificationDataset
+
         train_dataset = MITBIHClassificationDataset(
             split="train",
             EOS_TOKEN=eos_token,
@@ -221,6 +209,8 @@ def load_univariate_fewshot_bundle(args, *, eos_token: str) -> UnivariateFewShot
         raw_label_verbalizers = MITBIHClassificationDataset.get_label_verbalizers()
         raw_label_cards = MITBIHClassificationDataset.get_label_cards()
     elif dataset_family == "sleepedf":
+        from opentslm.time_series_datasets.sleep.SleepEDFClassificationDataset import SleepEDFClassificationDataset
+
         train_dataset = SleepEDFClassificationDataset(
             split="train",
             EOS_TOKEN=eos_token,
@@ -264,6 +254,10 @@ def load_univariate_fewshot_bundle(args, *, eos_token: str) -> UnivariateFewShot
         raw_label_verbalizers = SleepEDFClassificationDataset.get_label_verbalizers()
         raw_label_cards = SleepEDFClassificationDataset.get_label_cards()
     elif dataset_family == "cinc2017af":
+        from opentslm.time_series_datasets.cinc2017af.CinC2017AFClassificationDataset import (
+            CinC2017AFClassificationDataset,
+        )
+
         train_dataset = CinC2017AFClassificationDataset(
             split="train",
             EOS_TOKEN=eos_token,
@@ -307,6 +301,10 @@ def load_univariate_fewshot_bundle(args, *, eos_token: str) -> UnivariateFewShot
         raw_label_verbalizers = CinC2017AFClassificationDataset.get_label_verbalizers()
         raw_label_cards = CinC2017AFClassificationDataset.get_label_cards()
     elif dataset_family == "cinc2016heart":
+        from opentslm.time_series_datasets.heart_sound.HeartSoundClassificationDataset import (
+            HeartSoundClassificationDataset,
+        )
+
         train_dataset = HeartSoundClassificationDataset(
             split="train",
             EOS_TOKEN=eos_token,

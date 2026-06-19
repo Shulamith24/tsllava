@@ -73,6 +73,16 @@ REGISTRY: Dict[Tuple[str, str], ExperimentEntry] = {
         supports_inner_resume=True,
         default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
     ),
+    ("m2_no_llm_transformer", "fewshot"): _entry(
+        "m2_no_llm_transformer",
+        "fewshot",
+        "scripts/ablations/train_m2_no_llm_linear_classification_fewshot.py",
+        summary_kind="fewshot",
+        add_protocol_flag=False,
+        supports_inner_resume=True,
+        default_shots=DEFAULT_LIGHTWEIGHT_FEWSHOT_SHOTS,
+        fixed_args=("--classifier_head", "transformer"),
+    ),
     ("onefitsall", "full"): _entry(
         "onefitsall",
         "full",

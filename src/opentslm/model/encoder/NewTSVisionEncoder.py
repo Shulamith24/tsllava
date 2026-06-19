@@ -15,9 +15,17 @@ from PIL import Image
 
 LEGACY_VISION_2D_MODE = "legacy_unfold"
 TIVIT_SQRT_OVERLAP_VISION_2D_MODE = "tivit_sqrt_overlap"
+LINE_PLOT_VISION_2D_MODE = "line_plot"
+GAF_VISION_2D_MODE = "gaf"
+RECURRENCE_PLOT_VISION_2D_MODE = "recurrence_plot"
+STFT_SPECTROGRAM_VISION_2D_MODE = "stft_spectrogram"
 SUPPORTED_VISION_2D_MODES = (
     LEGACY_VISION_2D_MODE,
     TIVIT_SQRT_OVERLAP_VISION_2D_MODE,
+    LINE_PLOT_VISION_2D_MODE,
+    GAF_VISION_2D_MODE,
+    RECURRENCE_PLOT_VISION_2D_MODE,
+    STFT_SPECTROGRAM_VISION_2D_MODE,
 )
 LEGACY_DEFAULT_VIT_STRIDE = 0.5
 TIVIT_DEFAULT_VIT_STRIDE = 0.1
@@ -169,6 +177,80 @@ class NewTSPseudoImageTransform:
         max_vals = x_2d.amax(dim=(-2, -1), keepdim=True)
         x_2d = (x_2d - min_vals) / (max_vals - min_vals + 1e-5)
         return torch.pow(x_2d, 0.8)
+
+    @staticmethod
+    def _resample_series(x: torch.Tensor, target_length: int) -> torch.Tensor:
+        if x.size(-1) == target_length:
+            return x
+        return F.interpolate(
+            x.unsqueeze(1),
+            size=int(target_length),
+            mode="linear",
+            align_corners=True,
+        ).squeeze(1)
+
+    @staticmethod
+    def _scale_to_unit_interval(x: torch.Tensor) -> torch.Tensor:
+        min_vals = x.amin(dim=-1, keepdim=True)
+        max_vals = x.amax(dim=-1, keepdim=True)
+        return (x - min_vals) / (max_vals - min_vals + 1e-5)
+
+    def _build_line_plot_image(self, x: torch.Tensor) -> torch.Tensor:
+        width = self.image_size
+        height = self.image_size
+        y = self._scale_to_unit_interval(self._resample_series(x, width))
+        y_index = ((1.0 - y) * (height - 1)).round().long().clamp(0, height - 1)
+
+        image = torch.ones(x.size(0), 1, height, width, device=x.device, dtype=x.dtype)
+        batch_index = torch.arange(x.size(0), device=x.device).unsqueeze(1).expand(-1, width)
+        col_index = torch.arange(width, device=x.device).unsqueeze(0).expand(x.size(0), -1)
+        image[batch_index, 0, y_index, col_index] = 0.0
+        image[batch_index, 0, (y_index - 1).clamp(0, height - 1), col_index] = 0.15
+        image[batch_index, 0, (y_index + 1).clamp(0, height - 1), col_index] = 0.15
+        return image
+
+    def _build_gaf_image(self, x: torch.Tensor) -> torch.Tensor:
+        x_unit = self._scale_to_unit_interval(self._resample_series(x, self.image_size))
+        x_scaled = (x_unit * 2.0 - 1.0).clamp(-1.0, 1.0)
+        phi = torch.acos(x_scaled)
+        gaf = torch.cos(phi.unsqueeze(-1) + phi.unsqueeze(-2))
+        return (gaf.unsqueeze(1) + 1.0) * 0.5
+
+    def _build_recurrence_plot_image(self, x: torch.Tensor) -> torch.Tensor:
+        x_resampled = self._resample_series(x, self.image_size)
+        distances = torch.abs(x_resampled.unsqueeze(-1) - x_resampled.unsqueeze(-2))
+        max_vals = distances.amax(dim=(-2, -1), keepdim=True)
+        recurrence = 1.0 - distances / (max_vals + 1e-5)
+        return recurrence.unsqueeze(1).clamp(0.0, 1.0)
+
+    def _build_stft_spectrogram_image(self, x: torch.Tensor) -> torch.Tensor:
+        if x.size(-1) < 2:
+            x = self._replicate_pad_right(x, 2 - x.size(-1))
+
+        time_length = x.size(-1)
+        n_fft = 2 ** int(math.floor(math.log2(max(2, time_length))))
+        n_fft = min(64, max(2, n_fft))
+        if time_length < n_fft:
+            x = self._replicate_pad_right(x, n_fft - time_length)
+
+        window = torch.hann_window(n_fft, device=x.device, dtype=x.dtype)
+        stft = torch.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=max(1, n_fft // 4),
+            win_length=n_fft,
+            window=window,
+            center=False,
+            return_complex=True,
+        )
+        spectrogram = torch.log1p(torch.abs(stft))
+        spectrogram = self._normalize_image_grid(spectrogram.unsqueeze(1))
+        return F.interpolate(
+            spectrogram,
+            size=(self.image_size, self.image_size),
+            mode="bilinear",
+            align_corners=False,
+        )
 
     @staticmethod
     def _replicate_pad_right(x: torch.Tensor, pad_right: int) -> torch.Tensor:
@@ -332,6 +414,16 @@ class NewTSPseudoImageTransform:
         x = self._normalize_time_series(x)
         x = einops.rearrange(x, "b t d -> (b d) t")
         time_length = x.shape[-1]
+
+        if self.vision_2d_mode == LINE_PLOT_VISION_2D_MODE:
+            return self._build_line_plot_image(x)
+        if self.vision_2d_mode == GAF_VISION_2D_MODE:
+            return self._build_gaf_image(x)
+        if self.vision_2d_mode == RECURRENCE_PLOT_VISION_2D_MODE:
+            return self._build_recurrence_plot_image(x)
+        if self.vision_2d_mode == STFT_SPECTROGRAM_VISION_2D_MODE:
+            return self._build_stft_spectrogram_image(x)
+
         runtime_config = self.get_runtime_transform_config(
             time_length=time_length,
             patch_size=patch_size,
@@ -361,6 +453,13 @@ class NewTSPseudoImageTransform:
         stride: Optional[float] = None,
     ) -> torch.Tensor:
         x_grid = self.ts2grid(x, patch_size=patch_size, stride=stride)
+        if self.vision_2d_mode in {
+            LINE_PLOT_VISION_2D_MODE,
+            GAF_VISION_2D_MODE,
+            RECURRENCE_PLOT_VISION_2D_MODE,
+            STFT_SPECTROGRAM_VISION_2D_MODE,
+        }:
+            return x_grid
         if self.vision_2d_mode == TIVIT_SQRT_OVERLAP_VISION_2D_MODE:
             return self._resize_tivit_grid(x_grid)
         return self._resize_square_grid(x_grid)

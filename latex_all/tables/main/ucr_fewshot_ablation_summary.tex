@@ -1,0 +1,18 @@
+% Requires \usepackage{booktabs}
+\begin{table*}[t]
+\centering
+\caption{Cumulative implementation ablations on the 128 UCR datasets. ``$+$'' means the component is retained, and ``$-$'' means it is removed along the cumulative path. Each value is mean accuracy (\%) over the datasets. $\Delta$ denotes the average accuracy decrease relative to TimeMorph.}
+\label{tab:ablation-summary}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccrrrrrr}
+\toprule
+Setting & Pretrain & LLM & Morph. & 1-shot & 2-shot & 5-shot & 10-shot & Avg & $\Delta$ \\
+\midrule
+TimeMorph & $+$ & $+$ & $+$ & \textbf{48.31} & \textbf{55.55} & \textbf{64.14} & \textbf{69.16} & \textbf{59.29} & -- \\
+TimeMorph-nopretrain & $-$ & $+$ & $+$ & 46.70 & 51.81 & 62.65 & 66.60 & 56.94 & 2.35 \\
+TimeMorph-nopretrain-nollm & $-$ & $-$ & $+$ & 44.90 & 49.77 & 58.36 & 62.73 & 53.94 & 5.35 \\
+TimeMorph-nopretrain-nollm-novision & $-$ & $-$ & $-$ & 40.26 & 45.54 & 54.17 & 59.79 & 49.94 & 9.35 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
