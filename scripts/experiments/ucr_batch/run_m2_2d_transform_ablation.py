@@ -41,7 +41,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run TimeMorph no-LLM Transformer 1D-to-2D transform ablations with dataset-level GPU queues."
     )
-    parser.add_argument("--local_checkpoint", required=True, help="Checkpoint providing the pretrained dual-branch encoder.")
+    parser.add_argument(
+        "--local_checkpoint",
+        default=None,
+        help=(
+            "Optional TimeMorph/NewTS dual-branch encoder checkpoint. Omit this for the "
+            "default no-TimeMorph-pretraining 1D-to-2D construction comparison."
+        ),
+    )
     parser.add_argument("--data_path", default=str(DEFAULT_DATA_PATH))
     parser.add_argument("--gpu_ids", default=None, help="Comma-separated CUDA device ids for run_ucr_batch.")
     parser.add_argument("--shots", default=",".join(DEFAULT_SHOTS))
@@ -107,8 +114,6 @@ def _run_batch_job(
 
 def _base_forward_args(args: argparse.Namespace, shots: tuple[str, ...]) -> list[str]:
     forward_args = [
-        "--local_checkpoint",
-        str(args.local_checkpoint),
         "--shots",
         ",".join(shots),
         "--num_runs",
@@ -118,6 +123,8 @@ def _base_forward_args(args: argparse.Namespace, shots: tuple[str, ...]) -> list
         "--no_freeze_encoder",
         "--freeze_vision_backbone",
     ]
+    if args.local_checkpoint:
+        forward_args.extend(["--local_checkpoint", str(args.local_checkpoint)])
     if args.cleanup_checkpoints:
         forward_args.append("--cleanup_checkpoints")
     if args.skip_checkpoints:

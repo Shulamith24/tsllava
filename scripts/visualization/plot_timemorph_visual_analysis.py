@@ -307,16 +307,29 @@ def plot_branch_bars(ax, datasets: list[str], features_dir: Path) -> dict[str, A
 
 def plot_attention_rollout(features_dir: Path, output_dir: Path, datasets: list[str]) -> dict[str, str]:
     attention_payloads = []
+    missing_reasons: dict[str, Any] = {}
     for dataset in datasets:
         path = features_dir / dataset / "attention_rollout.npz"
         if not path.exists():
+            metadata_path = features_dir / dataset / "metadata.json"
+            if metadata_path.exists():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    missing_reasons[dataset] = metadata.get("attention_rollout", "missing artifact")
+                except Exception as exc:
+                    missing_reasons[dataset] = f"metadata read failed: {type(exc).__name__}: {exc}"
+            else:
+                missing_reasons[dataset] = "metadata.json not found"
             continue
         with np.load(path, allow_pickle=False) as data:
             if data["raw_series"].shape[0] == 0:
                 continue
             attention_payloads.append((dataset, {key: data[key] for key in data.files}))
     if not attention_payloads:
-        raise FileNotFoundError("No attention_rollout.npz artifacts were found for the requested datasets.")
+        raise FileNotFoundError(
+            "No attention_rollout.npz artifacts were found for the requested datasets. "
+            f"Export metadata reports: {missing_reasons}"
+        )
 
     rows = min(4, sum(payload["raw_series"].shape[0] for _, payload in attention_payloads))
     fig, axes = plt.subplots(rows, 3, figsize=(10.8, 2.35 * rows), squeeze=False)

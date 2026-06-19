@@ -202,6 +202,35 @@ def resolve_device(args: argparse.Namespace) -> str:
     return "cpu"
 
 
+def reset_univariate_dataset_cache(args: argparse.Namespace) -> None:
+    """Avoid class-level dataset caches leaking across datasets in one export process."""
+    family = str(getattr(args, "dataset_family", "ucr")).lower()
+    cache_attrs = (
+        "loaded",
+        "_train_dataset",
+        "_validation_dataset",
+        "_test_dataset",
+    )
+    metadata_attrs = (
+        "_dataset_name",
+        "_label_to_token",
+        "_token_to_label",
+        "_num_classes",
+        "_class_tokens",
+    )
+    dataset_classes = []
+
+    if family == "ucr":
+        from opentslm.time_series_datasets.ucr.UCRClassificationDataset import UCRClassificationDataset
+
+        dataset_classes.append(UCRClassificationDataset)
+
+    for dataset_cls in dataset_classes:
+        for attr in (*cache_attrs, *metadata_attrs):
+            if hasattr(dataset_cls, attr):
+                delattr(dataset_cls, attr)
+
+
 def build_model_from_phase_checkpoint(
     args: argparse.Namespace,
     checkpoint: dict[str, Any],
@@ -239,16 +268,32 @@ def load_timemorph_run(
     device: str,
 ):
     model = build_model_from_phase_checkpoint(args, checkpoint, device=device)
+    saved_class_token_ids = [int(token_id) for token_id in checkpoint.get("class_token_ids", [])]
+    num_tokens_to_add = int(dataset_bundle.num_classes)
+    if saved_class_token_ids:
+        if len(saved_class_token_ids) < int(dataset_bundle.num_classes):
+            raise ValueError(
+                f"Checkpoint {phase2_checkpoint_path} contains only {len(saved_class_token_ids)} "
+                f"class-token rows, but {dataset_bundle.dataset_name} has {dataset_bundle.num_classes} classes."
+            )
+        max_selected_class = max((int(class_id) for class_id in support_class_ids), default=-1)
+        if max_selected_class >= len(saved_class_token_ids):
+            raise ValueError(
+                f"Selected class id {max_selected_class} is outside checkpoint class-token rows "
+                f"({len(saved_class_token_ids)} rows) for {dataset_bundle.dataset_name}."
+            )
+        num_tokens_to_add = max(num_tokens_to_add, len(saved_class_token_ids))
+
     class_tokens, class_token_ids = train.add_class_tokens_to_model(
         model,
-        num_classes=dataset_bundle.num_classes,
+        num_classes=num_tokens_to_add,
         tokenizer_training_mode=args.tokenizer_training_mode,
         rank=0,
     )
-    if dataset_bundle.class_tokens and class_tokens != dataset_bundle.class_tokens:
+    if dataset_bundle.class_tokens and class_tokens[: dataset_bundle.num_classes] != dataset_bundle.class_tokens:
         raise RuntimeError(
             f"Class-token mismatch for {dataset_bundle.dataset_name}: "
-            f"{class_tokens} vs {dataset_bundle.class_tokens}"
+            f"{class_tokens[: dataset_bundle.num_classes]} vs {dataset_bundle.class_tokens}"
         )
     checkpoint_mode = train.get_checkpoint_tokenizer_training_mode(checkpoint)
     if checkpoint_mode != args.tokenizer_training_mode:
@@ -267,6 +312,34 @@ def load_timemorph_run(
     model.eval()
     selected_class_token_ids = [int(class_token_ids[class_id]) for class_id in support_class_ids]
     return model, class_tokens, class_token_ids, selected_class_token_ids
+
+
+def validate_visual_run_metadata(
+    *,
+    dataset: str,
+    run_dir: Path,
+    support_info: dict[str, Any],
+    run_metrics: dict[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    for source_name, payload in (("fewshot_indices.json", support_info), ("run_metrics.json", run_metrics)):
+        recorded_dataset = payload.get("dataset") if isinstance(payload, dict) else None
+        if recorded_dataset is None:
+            continue
+        if str(recorded_dataset) != str(dataset):
+            raise ValueError(
+                f"Resolved run directory {run_dir} is for dataset {recorded_dataset!r}, "
+                f"but the exporter is processing {dataset!r}. Check --runs_root and --datasets."
+            )
+
+    support_classes = support_info.get("selected_class_ids")
+    metric_classes = run_metrics.get("selected_class_ids") if isinstance(run_metrics, dict) else None
+    if isinstance(support_classes, list) and isinstance(metric_classes, list):
+        if [int(item) for item in support_classes] != [int(item) for item in metric_classes]:
+            warnings.append(
+                "selected_class_ids differ between fewshot_indices.json and run_metrics.json"
+            )
+    return warnings
 
 
 def sample_indices_per_class(
@@ -456,6 +529,23 @@ def normalize_saliency(saliency: torch.Tensor) -> torch.Tensor:
     return flat.view_as(saliency)
 
 
+def ensure_attention_outputs_enabled(vit) -> None:
+    """Force a HF vision backbone into an attention implementation that returns maps."""
+    if hasattr(vit, "set_attn_implementation"):
+        try:
+            vit.set_attn_implementation("eager")
+        except Exception:
+            pass
+    config = getattr(vit, "config", None)
+    if config is not None:
+        try:
+            config.output_attentions = True
+            config._attn_implementation = "eager"
+            config._attn_implementation_internal = "eager"
+        except Exception:
+            pass
+
+
 @torch.no_grad()
 def attention_rollout_for_batch(model, batch: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     underlying_model = train.get_model(model)
@@ -473,6 +563,7 @@ def attention_rollout_for_batch(model, batch: list[dict[str, Any]]) -> tuple[np.
     morphology = vision_encoder.ts2grayscale_image(past_values)[:, 0].detach().cpu().numpy().astype(np.float32)
     images = vision_encoder.ts2image(past_values)
     pixel_values = vision_encoder._prepare_pixel_values(images)
+    ensure_attention_outputs_enabled(vision_encoder.vit)
     outputs = vision_encoder.vit(
         pixel_values=pixel_values,
         output_attentions=True,
@@ -621,9 +712,17 @@ def export_dataset(args: argparse.Namespace, dataset: str) -> dict[str, Any]:
     train_args.device = device
 
     dataset_eos = train.resolve_dataset_eos_token(train_args)
+    reset_univariate_dataset_cache(train_args)
     dataset_bundle = load_univariate_fewshot_bundle(train_args, eos_token=dataset_eos)
     support_info = json.loads(support_info_path.read_text(encoding="utf-8"))
     support_class_ids = [int(class_id) for class_id in support_info["selected_class_ids"]]
+    run_metrics = json.loads(run_metrics_path.read_text(encoding="utf-8")) if run_metrics_path.exists() else {}
+    metadata_warnings = validate_visual_run_metadata(
+        dataset=dataset,
+        run_dir=run_dir,
+        support_info=support_info,
+        run_metrics=run_metrics,
+    )
 
     model, class_tokens, class_token_ids, selected_class_token_ids = load_timemorph_run(
         args=train_args,
@@ -633,8 +732,6 @@ def export_dataset(args: argparse.Namespace, dataset: str) -> dict[str, Any]:
         support_class_ids=support_class_ids,
         device=device,
     )
-
-    run_metrics = json.loads(run_metrics_path.read_text(encoding="utf-8")) if run_metrics_path.exists() else {}
 
     label_to_indices = train.build_label_to_indices(dataset_bundle.train_dataset)
     test_label_to_indices = train.build_label_to_indices(dataset_bundle.test_dataset)
@@ -689,6 +786,9 @@ def export_dataset(args: argparse.Namespace, dataset: str) -> dict[str, Any]:
         "device": device,
         "class_tokens": class_tokens,
         "class_token_ids": [int(token_id) for token_id in class_token_ids],
+        "dataset_num_classes": int(dataset_bundle.num_classes),
+        "checkpoint_class_token_ids": [int(token_id) for token_id in checkpoint.get("class_token_ids", [])],
+        "metadata_warnings": metadata_warnings,
         "selected_class_ids": support_class_ids,
         "selected_class_token_ids": selected_class_token_ids,
         "splits": {},

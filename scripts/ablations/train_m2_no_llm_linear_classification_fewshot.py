@@ -106,8 +106,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
     parser.add_argument("--eos_token", type=str, default="<eos>")
 
-    parser.add_argument("--local_checkpoint", type=str, required=True)
+    parser.add_argument(
+        "--local_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional pretrained TimeMorph/NewTS dual-branch encoder checkpoint. "
+            "When omitted, the no-LLM encoder is initialized from the script defaults; "
+            "the frozen ViT backbone still uses its configured pretrained vision model."
+        ),
+    )
     parser.add_argument("--pretrained_model", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--encoder_init",
+        type=str,
+        default="auto",
+        choices=["auto", "scratch", "checkpoint"],
+        help=(
+            "Encoder initialization for the no-LLM ablation. 'auto' uses checkpoint "
+            "initialization when --local_checkpoint is provided and scratch otherwise."
+        ),
+    )
     parser.add_argument("--runtime_branch_mode", type=str, default="both", choices=["both", "ts_only", "vision_only"])
     parser.add_argument(
         "--classifier_head",
@@ -231,8 +250,10 @@ def validate_args(args: argparse.Namespace, shots: Sequence[ShotType]) -> None:
         raise ValueError("--transformer_head_ffn_dim must be >= 1")
     if args.resume and args.skip_checkpoints:
         raise ValueError("--resume cannot be used with --skip_checkpoints")
-    if not args.local_checkpoint:
-        raise ValueError("--local_checkpoint is required for the no-LLM encoder ablation")
+    if args.encoder_init == "checkpoint" and not args.local_checkpoint:
+        raise ValueError("--encoder_init checkpoint requires --local_checkpoint")
+    if args.encoder_init == "scratch" and args.local_checkpoint:
+        raise ValueError("--encoder_init scratch should not be combined with --local_checkpoint")
     validate_vision_2d_mode(args.vision_2d_mode)
 
 
@@ -500,10 +521,20 @@ def build_encoder_linear_model(
     num_classes: int,
     device: torch.device,
 ) -> Tuple[DualBranchNoLLMClassifier, Dict[str, Any]]:
-    checkpoint = torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
-    encoder_config = resolve_encoder_config_from_checkpoint(checkpoint, args)
+    use_checkpoint = bool(args.local_checkpoint) if args.encoder_init == "auto" else args.encoder_init == "checkpoint"
+    checkpoint = (
+        torch.load(args.local_checkpoint, map_location="cpu", weights_only=False)
+        if use_checkpoint
+        else None
+    )
+    encoder_config = (
+        resolve_encoder_config_from_checkpoint(checkpoint, args)
+        if checkpoint is not None
+        else resolve_encoder_config_from_checkpoint({}, args)
+    )
     encoder = NewTSDualBranchEncoder(**encoder_config, device=str(device)).to(device)
-    encoder.load_state_dict(extract_encoder_state_from_checkpoint(checkpoint), strict=True)
+    if checkpoint is not None:
+        encoder.load_state_dict(extract_encoder_state_from_checkpoint(checkpoint), strict=True)
     if args.gradient_checkpointing:
         encoder.enable_gradient_checkpointing()
 
@@ -523,6 +554,8 @@ def build_encoder_linear_model(
         for param in model.encoder.parameters():
             param.requires_grad = False
 
+    encoder_config["encoder_init"] = "checkpoint" if checkpoint is not None else "scratch"
+    encoder_config["local_checkpoint"] = str(args.local_checkpoint) if checkpoint is not None else None
     return model, encoder_config
 
 
@@ -1062,6 +1095,8 @@ def run_single_experiment(
         "grad_clip": hparams.grad_clip,
         "freeze_encoder": bool(args.freeze_encoder),
         "train_ts_encoder": not bool(args.freeze_encoder),
+        "encoder_init": encoder_config.get("encoder_init"),
+        "local_checkpoint": encoder_config.get("local_checkpoint"),
         "branch_mode": args.runtime_branch_mode,
         "freeze_vision_backbone": bool(args.freeze_vision_backbone),
         "vision_2d_mode": encoder_config.get("vision_2d_mode"),
@@ -1153,6 +1188,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print(f"num_runs: {num_runs}")
     print(f"device: {device}")
     print(f"local_checkpoint: {args.local_checkpoint}")
+    print(f"encoder_init: {args.encoder_init}")
     print(f"model: {model_name}")
     print(f"classifier_head: {args.classifier_head}")
     print(f"freeze_encoder: {args.freeze_encoder}")
@@ -1214,6 +1250,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "vision_2d_mode": args.vision_2d_mode,
         "vit_patch_size": args.vit_patch_size,
         "vit_stride": args.vit_stride,
+        "encoder_init": args.encoder_init,
         "freeze_encoder": bool(args.freeze_encoder),
         "freeze_vision_backbone": bool(args.freeze_vision_backbone),
         "timestamp": str(datetime.datetime.now()),
