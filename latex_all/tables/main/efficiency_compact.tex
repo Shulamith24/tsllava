@@ -1,7 +1,7 @@
 % Requires \usepackage{booktabs,graphicx}
 \begin{table*}[t]
 \centering
-\caption{Efficiency and accuracy comparison on representative 10-shot tasks. Accuracy is averaged over five runs for \textsc{GunPoint} and ten runs for MIT-BIH and CinC2017. Peak memory and inference latency are measured by \texttt{efficiency\_probe.py} with batch size 8 on a single RTX 3090. Updated parameters count only parameters fine-tuned on the support set. \textsuperscript{\textdagger}TimeMorph uses gradient checkpointing for the 3000-step CinC2017 probe; PatchTST exceeds 24GB during the same batch-8 training probe.}
+\caption{Efficiency and accuracy comparison on representative 10-shot tasks. Accuracy is averaged over five runs for \textsc{GunPoint} and ten runs for MIT-BIH and CinC2017. Peak memory and inference latency are measured on a single RTX 3090 under the same evaluation setting. Updated parameters count only parameters fine-tuned on the support set. \textsuperscript{\textdagger}TimeMorph uses gradient checkpointing on CinC2017; PatchTST exceeds the 24GB memory budget under the same setting.}
 \label{tab:efficiency-compact}
 \scriptsize
 \resizebox{\textwidth}{!}{%

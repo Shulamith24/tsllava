@@ -669,9 +669,56 @@ class NewTSVisionEncoder(nn.Module):
         )
 
     def _prepare_pixel_values(self, images: torch.Tensor) -> torch.Tensor:
-        image_list = [self._to_pil_image(image) for image in images]
-        inputs = self.processor(images=image_list, return_tensors="pt")
-        return inputs["pixel_values"].to(images.device)
+        if images.dim() != 4:
+            raise ValueError(f"Expected image tensor with shape [B, C, H, W], got {tuple(images.shape)}")
+
+        processor = getattr(self.processor, "image_processor", self.processor)
+        size_config = getattr(processor, "size", None) or {}
+        crop_config = getattr(processor, "crop_size", None) or {}
+        target_height = None
+        target_width = None
+        resize_height = None
+        resize_width = None
+        if isinstance(size_config, dict):
+            target_height = size_config.get("height")
+            target_width = size_config.get("width")
+            if target_height is None and target_width is None and size_config.get("shortest_edge") is not None:
+                resize_height = resize_width = int(size_config["shortest_edge"])
+                target_height = target_width = size_config["shortest_edge"]
+        if isinstance(crop_config, dict) and getattr(processor, "do_center_crop", False):
+            target_height = crop_config.get("height") or target_height
+            target_width = crop_config.get("width") or target_width
+        target_height = int(target_height or self.image_size)
+        target_width = int(target_width or self.image_size)
+
+        pixel_values = images.clamp(0.0, 1.0)
+        if resize_height is not None and resize_width is not None:
+            if pixel_values.shape[-2:] != (resize_height, resize_width):
+                pixel_values = F.interpolate(
+                    pixel_values,
+                    size=(resize_height, resize_width),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            if (resize_height, resize_width) != (target_height, target_width):
+                top = max(0, (resize_height - target_height) // 2)
+                left = max(0, (resize_width - target_width) // 2)
+                pixel_values = pixel_values[:, :, top : top + target_height, left : left + target_width]
+        elif pixel_values.shape[-2:] != (target_height, target_width):
+            pixel_values = F.interpolate(
+                pixel_values,
+                size=(target_height, target_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if getattr(processor, "do_normalize", True):
+            image_mean = getattr(processor, "image_mean", (0.485, 0.456, 0.406))
+            image_std = getattr(processor, "image_std", (0.229, 0.224, 0.225))
+            mean = torch.tensor(image_mean, device=pixel_values.device, dtype=pixel_values.dtype).view(1, -1, 1, 1)
+            std = torch.tensor(image_std, device=pixel_values.device, dtype=pixel_values.dtype).view(1, -1, 1, 1)
+            pixel_values = (pixel_values - mean) / std
+        return pixel_values
 
     def forward_vit(self, images: torch.Tensor) -> torch.Tensor:
         pixel_values = self._prepare_pixel_values(images)

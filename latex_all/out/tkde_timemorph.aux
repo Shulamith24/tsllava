@@ -1,0 +1,345 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{ismail2019deep}
+\citation{cleveland1984graphical,heer2010tour}
+\citation{ye2009shapelets,wang2015encoding}
+\citation{dempster2020rocket,tapnet,tang2020dpsn}
+\citation{fawaz2020inceptiontime}
+\citation{dyformer}
+\citation{tapnet}
+\citation{chen2025llmfew}
+\citation{gruver2023llmtime,zhou2023onefitsall,jin2024timellm,sun2024test}
+\citation{brown2020language,dong2024survey}
+\citation{zheng2025understanding}
+\citation{hokamp2017lexically,koo2024automata}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{narwariya2020meta}
+\citation{yoon2019tapnet}
+\citation{snell2017prototypical}
+\citation{tang2020dpsn}
+\citation{barreda2024cosco}
+\citation{gruver2023llmtime}
+\citation{zhou2023onefitsall}
+\citation{sun2024test}
+\citation{jin2024timellm}
+\citation{chang2025llm4ts}
+\citation{langer2025opentslm}
+\citation{chen2025llmfew}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces  Motivation of TimeMorph. Effective few-shot TSC requires both temporal dynamics and waveform morphology, while adapting LLMs to this setting introduces representation, alignment, and closed-set prediction challenges. }}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:intro}{{1}{2}{Motivation of TimeMorph. Effective few-shot TSC requires both temporal dynamics and waveform morphology, while adapting LLMs to this setting introduces representation, alignment, and closed-set prediction challenges}{figure.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\citation{tan2024language,merrill2024struggle}
+\citation{ansari2024chronos}
+\citation{das2024timesfm}
+\citation{woo2024moirai}
+\citation{goswami2024moment}
+\citation{gao2024units}
+\citation{ye2009shapelets,tang2020dpsn}
+\citation{fawaz2020inceptiontime,dempster2020rocket}
+\citation{nie2023patchtst}
+\citation{wang2015imaging}
+\citation{liu2025vltime}
+\citation{roschmann2025tivit}
+\citation{raffel2020t5}
+\citation{zhao2021calibrate,holtzman2021surface}
+\citation{balakrishnan2019constrained,geng2023grammar}
+\citation{schick2021exploiting,gao2021lmbff}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{3}{section.3}\protected@file@percent }
+\newlabel{sec:method}{{3}{3}{Method}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Problem Setup}{3}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:problem-formulation}{{3.1}{3}{Problem Setup}{subsection.3.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.1}Univariate Time-Series Classification}{3}{subsubsection.3.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.2}Few-Shot Learning Setup}{3}{subsubsection.3.1.2}\protected@file@percent }
+\newlabel{eq:k-shot-support}{{1}{3}{Few-Shot Learning Setup}{equation.3.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces  Overview of TimeMorph. (a) TimeMorph encodes a raw univariate time series with temporal and morphology branches, fuses the resulting tokens, and projects them into the embedding space of a pretrained causal LLM for closed-set prediction. (b) Staged pretraining learns robust dual-view representations and aligns time-series tokens with LLM embeddings under language supervision. (c) During few-shot fine-tuning, dataset-specific class tokens are added and predictions are made by scoring only valid class tokens. }}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:overview}{{2}{4}{Overview of TimeMorph. (a) TimeMorph encodes a raw univariate time series with temporal and morphology branches, fuses the resulting tokens, and projects them into the embedding space of a pretrained causal LLM for closed-set prediction. (b) Staged pretraining learns robust dual-view representations and aligns time-series tokens with LLM embeddings under language supervision. (c) During few-shot fine-tuning, dataset-specific class tokens are added and predictions are made by scoring only valid class tokens}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Framework}{4}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:timemorph-framework}{{3.2}{4}{Framework}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.1}Dual-View Time-Series Encoding}{4}{subsubsection.3.2.1}\protected@file@percent }
+\newlabel{sec:dual-view-encoder}{{3.2.1}{4}{Dual-View Time-Series Encoding}{subsubsection.3.2.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Temporal branch}{4}{section*.1}\protected@file@percent }
+\newlabel{eq:temporal-patches}{{2}{4}{Temporal branch}{equation.3.2}{}}
+\newlabel{eq:temporal-encoder}{{3}{4}{Temporal branch}{equation.3.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Morphology branch}{4}{section*.2}\protected@file@percent }
+\newlabel{eq:robust-normalization}{{4}{4}{Morphology branch}{equation.3.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces  Qualitative motivation for the dual-view encoder. For representative UCR tasks, we visualize real training examples nearest to their class centroids, together with their raw sequences, ordered temporal patches, and morphology-map representations. The temporal view preserves ordered patch-level evolution, whereas the morphology view exposes local subsequence shapes and cross-window structural transitions through a two-dimensional waveform map. }}{5}{figure.3}\protected@file@percent }
+\newlabel{fig:dual-view-motivation}{{3}{5}{Qualitative motivation for the dual-view encoder. For representative UCR tasks, we visualize real training examples nearest to their class centroids, together with their raw sequences, ordered temporal patches, and morphology-map representations. The temporal view preserves ordered patch-level evolution, whereas the morphology view exposes local subsequence shapes and cross-window structural transitions through a two-dimensional waveform map}{figure.3}{}}
+\newlabel{eq:morphology-map}{{5}{5}{Morphology branch}{equation.3.5}{}}
+\newlabel{eq:morphology-encoder}{{6}{5}{Morphology branch}{equation.3.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Dual-view fusion}{5}{section*.3}\protected@file@percent }
+\newlabel{eq:dual-view-fusion}{{7}{5}{Dual-view fusion}{equation.3.7}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.2}Time-Series Token Projection}{5}{subsubsection.3.2.2}\protected@file@percent }
+\newlabel{sec:token-projection}{{3.2.2}{5}{Time-Series Token Projection}{subsubsection.3.2.2}{}}
+\newlabel{eq:conditioned-input}{{8}{5}{Time-Series Token Projection}{equation.3.8}{}}
+\citation{wang2025chattime}
+\citation{makridakis2020m4}
+\citation{dau2019ucr}
+\citation{bardes2022vicreg}
+\citation{wang2025chattime}
+\citation{makridakis2020m4}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.3}Closed-Set Class-Token Scoring}{6}{subsubsection.3.2.3}\protected@file@percent }
+\newlabel{sec:class-token-classification}{{3.2.3}{6}{Closed-Set Class-Token Scoring}{subsubsection.3.2.3}{}}
+\newlabel{eq:class-token-set}{{9}{6}{Closed-Set Class-Token Scoring}{equation.3.9}{}}
+\newlabel{eq:class-score}{{10}{6}{Closed-Set Class-Token Scoring}{equation.3.10}{}}
+\newlabel{eq:class-pred}{{11}{6}{Closed-Set Class-Token Scoring}{equation.3.11}{}}
+\newlabel{eq:class-token-loss}{{12}{6}{Closed-Set Class-Token Scoring}{equation.3.12}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Label-semantic priors}{6}{section*.4}\protected@file@percent }
+\newlabel{eq:semantic-prototype}{{13}{6}{Label-semantic priors}{equation.3.13}{}}
+\newlabel{eq:semantic-row-reg}{{14}{6}{Label-semantic priors}{equation.3.14}{}}
+\newlabel{eq:adapt-loss}{{15}{6}{Label-semantic priors}{equation.3.15}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.4}Staged Pretraining and Few-Shot Fine-Tuning}{6}{subsubsection.3.2.4}\protected@file@percent }
+\newlabel{sec:pretraining-adaptation}{{3.2.4}{6}{Staged Pretraining and Few-Shot Fine-Tuning}{subsubsection.3.2.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Stage I: Representation Pretraining}{6}{section*.5}\protected@file@percent }
+\newlabel{eq:representation-pretraining-loss}{{16}{6}{Stage I: Representation Pretraining}{equation.3.16}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Stage II: Language-Alignment Pretraining}{6}{section*.6}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Unified data forms used in Stage-II language-alignment pretraining. Each instance is represented as $(x,p,a)$, where $x$ is a raw time series, $p$ is a natural-language or template-based prompt, and $a$ is the supervised textual target. Raw series are encoded by the time-series encoder and are not serialized as text.}}{7}{table.1}\protected@file@percent }
+\newlabel{tab:pretrain-data-forms}{{1}{7}{Unified data forms used in Stage-II language-alignment pretraining. Each instance is represented as $(x,p,a)$, where $x$ is a raw time series, $p$ is a natural-language or template-based prompt, and $a$ is the supervised textual target. Raw series are encoded by the time-series encoder and are not serialized as text}{table.1}{}}
+\newlabel{eq:language-alignment-loss}{{17}{7}{Stage II: Language-Alignment Pretraining}{equation.3.17}{}}
+\@writefile{toc}{\contentsline {paragraph}{\relax Stage III: Semantic-Prior Initialization}{7}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\relax Language-Alignment Data Forms}{7}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\relax Target-Dataset Fine-Tuning}{7}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Experiments}{7}{section.4}\protected@file@percent }
+\newlabel{sec:experiments}{{4}{7}{Experiments}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Experimental Setup}{7}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.1.1}Datasets and Few-Shot Protocol}{7}{subsubsection.4.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.1.2}Baselines}{7}{subsubsection.4.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.1.3}Implementation Details}{7}{subsubsection.4.1.3}\protected@file@percent }
+\citation{wang2017time}
+\citation{tapnet}
+\citation{barreda2024cosco}
+\citation{zeng2023transformers}
+\citation{nie2023patchtst}
+\citation{wu2023timesnet}
+\citation{wu2021autoformer}
+\citation{zhang2023crossformer}
+\citation{zhou2022fedformer}
+\citation{zhou2021informer}
+\citation{zhou2023onefitsall}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Key training settings for TimeMorph.}}{8}{table.2}\protected@file@percent }
+\newlabel{tab:timemorph-settings}{{2}{8}{Key training settings for TimeMorph}{table.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.1.4}Protocol Fairness and Leakage Control}{8}{subsubsection.4.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Overall Few-Shot Performance}{8}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.2.1}Results on UCR}{8}{subsubsection.4.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.2.2}Results on External Semantic-Label Datasets}{8}{subsubsection.4.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Component and Interface Analysis}{8}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.3.1}Effect of Staged Pretraining and LLM Interface}{8}{subsubsection.4.3.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Few-shot classification accuracy (\%) on 128 UCR datasets, grouped by model family. Baseline method references are shown in the Model column. We report the mean over five runs. \texttt  {Avg} and \texttt  {AvgRank} average the four shot-specific mean accuracies and average ranks, respectively. Best is bold and second-best is underlined.}}{9}{table.3}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-fewshot-main}{{3}{9}{Few-shot classification accuracy (\%) on 128 UCR datasets, grouped by model family. Baseline method references are shown in the Model column. We report the mean over five runs. \texttt {Avg} and \texttt {AvgRank} average the four shot-specific mean accuracies and average ranks, respectively. Best is bold and second-best is underlined}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Few-shot classification accuracy (\%) on two external semantic-label datasets. Each cell reports mean $\pm $ standard deviation over 10 runs under the same few-shot protocol. Best is bold and second-best is underlined within each dataset-shot column.}}{9}{table.4}\protected@file@percent }
+\newlabel{tab:external-fewshot-full}{{4}{9}{Few-shot classification accuracy (\%) on two external semantic-label datasets. Each cell reports mean $\pm $ standard deviation over 10 runs under the same few-shot protocol. Best is bold and second-best is underlined within each dataset-shot column}{table.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.3.2}Effect of Morphology-Map Construction}{9}{subsubsection.4.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.3.3}Effect of Semantic Label Priors}{9}{subsubsection.4.3.3}\protected@file@percent }
+\citation{abnar2020quantifying}
+\citation{maaten2008visualizing}
+\citation{maaten2008visualizing}
+\citation{maaten2008visualizing}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Cumulative component ablations on the 128 UCR datasets. ``$+$'' means the component is retained, and ``$-$'' means it is removed along the cumulative path. Each value is mean accuracy (\%) over the datasets. $\Delta $ denotes the average accuracy decrease relative to TimeMorph.}}{10}{table.5}\protected@file@percent }
+\newlabel{tab:ablation-summary}{{5}{10}{Cumulative component ablations on the 128 UCR datasets. ``$+$'' means the component is retained, and ``$-$'' means it is removed along the cumulative path. Each value is mean accuracy (\%) over the datasets. $\Delta $ denotes the average accuracy decrease relative to TimeMorph}{table.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Ablation of 1D-to-2D morphology construction on UCR using the full TimeMorph model under the 5-shot protocol with three independent runs. Acc. reports mean accuracy (\%), Std. reports the corresponding standard deviation, AvgRank is the average dataset-level rank, Best counts the number of datasets on which each construction performs best, and W/T/L is measured against the reference morphology-map construction.}}{10}{table.6}\protected@file@percent }
+\newlabel{tab:morphology-map-ablation-summary}{{6}{10}{Ablation of 1D-to-2D morphology construction on UCR using the full TimeMorph model under the 5-shot protocol with three independent runs. Acc. reports mean accuracy (\%), Std. reports the corresponding standard deviation, AvgRank is the average dataset-level rank, Best counts the number of datasets on which each construction performs best, and W/T/L is measured against the reference morphology-map construction}{table.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Semantic-prior class-token ablation on two external semantic-label datasets (accuracy, \%). Each cell reports mean $\pm $ standard deviation over 10 runs under the same few-shot protocol. The better variant within each dataset-shot column is bold. $\Delta $ denotes Semantic prior minus Anonymous labels.}}{10}{table.7}\protected@file@percent }
+\newlabel{tab:m2-semantic-prior-ablation-accuracy}{{7}{10}{Semantic-prior class-token ablation on two external semantic-label datasets (accuracy, \%). Each cell reports mean $\pm $ standard deviation over 10 runs under the same few-shot protocol. The better variant within each dataset-shot column is bold. $\Delta $ denotes Semantic prior minus Anonymous labels}{table.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Qualitative and Representation Analysis}{10}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:qualitative-analysis}{{4.4}{10}{Qualitative and Representation Analysis}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.1}Morphology-Branch Attention}{10}{subsubsection.4.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.2}Representation Structure and Branch Complementarity}{10}{subsubsection.4.4.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces  Attention-rollout analysis of the morphology branch. Each row shows a normalized raw waveform, the corresponding morphology map, and the attention-rollout overlay from the frozen DINOv2 encoder. Highlighted regions indicate morphology-map areas receiving higher aggregated attention. }}{11}{figure.4}\protected@file@percent }
+\newlabel{fig:timemorph-attention-rollout}{{4}{11}{Attention-rollout analysis of the morphology branch. Each row shows a normalized raw waveform, the corresponding morphology map, and the attention-rollout overlay from the frozen DINOv2 encoder. Highlighted regions indicate morphology-map areas receiving higher aggregated attention}{figure.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Dataset-Level Analysis}{11}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.5.1}Win--Tie--Loss Analysis}{11}{subsubsection.4.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.5.2}Per-Dataset Accuracy Distribution}{11}{subsubsection.4.5.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces  Representation analysis. The top row gives t-SNE visualizations\nobreakspace  {}\cite  {maaten2008visualizing} of temporal, morphology, and fused LLM decision representations. Points are colored by ground-truth class, and misclassified samples are marked separately. The stacked bars compare correctness overlap among temporal-only, morphology-only, and fused dual-view inference on the same fine-tuned checkpoint. }}{12}{figure.5}\protected@file@percent }
+\newlabel{fig:timemorph-representation-analysis}{{5}{12}{Representation analysis. The top row gives t-SNE visualizations~\cite {maaten2008visualizing} of temporal, morphology, and fused LLM decision representations. Points are colored by ground-truth class, and misclassified samples are marked separately. The stacked bars compare correctness overlap among temporal-only, morphology-only, and fused dual-view inference on the same fine-tuned checkpoint}{figure.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Win--tie--loss heatmap against representative UCR baselines. Each cell reports wins/ties/losses over 128 datasets, with color indicating the normalized win margin $(W-L)/N$. }}{12}{figure.6}\protected@file@percent }
+\newlabel{fig:ucr-wtl-heatmap}{{6}{12}{Win--tie--loss heatmap against representative UCR baselines. Each cell reports wins/ties/losses over 128 datasets, with color indicating the normalized win margin $(W-L)/N$}{figure.6}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces  Per-dataset accuracy distribution on the 128 UCR datasets. Each box summarizes one method's accuracy across datasets for a fixed shot setting; diamonds mark mean accuracies. }}{13}{figure.7}\protected@file@percent }
+\newlabel{fig:ucr-gain-boxplot}{{7}{13}{Per-dataset accuracy distribution on the 128 UCR datasets. Each box summarizes one method's accuracy across datasets for a fixed shot setting; diamonds mark mean accuracies}{figure.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Efficiency and accuracy comparison on representative 10-shot tasks. Accuracy is averaged over five runs for \textsc  {GunPoint} and ten runs for MIT-BIH and CinC2017. Peak memory and inference latency are measured on a single RTX 3090 under the same evaluation setting. Updated parameters count only parameters fine-tuned on the support set. \textsuperscript  {\textdagger }TimeMorph uses gradient checkpointing on CinC2017; PatchTST exceeds the 24GB memory budget under the same setting.}}{14}{table.8}\protected@file@percent }
+\newlabel{tab:efficiency-compact}{{8}{14}{Efficiency and accuracy comparison on representative 10-shot tasks. Accuracy is averaged over five runs for \textsc {GunPoint} and ten runs for MIT-BIH and CinC2017. Peak memory and inference latency are measured on a single RTX 3090 under the same evaluation setting. Updated parameters count only parameters fine-tuned on the support set. \textsuperscript {\textdagger }TimeMorph uses gradient checkpointing on CinC2017; PatchTST exceeds the 24GB memory budget under the same setting}{table.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Efficiency and Practicality}{14}{subsection.4.6}\protected@file@percent }
+\newlabel{sec:efficiency}{{4.6}{14}{Efficiency and Practicality}{subsection.4.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{14}{section.5}\protected@file@percent }
+\newlabel{sec:conclusion}{{5}{14}{Conclusion}{section.5}{}}
+\gdef \LT@i {\LT@entry 
+    {5}{80.21887pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {1}{37.27469pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}}
+\@writefile{toc}{\contentsline {section}{Appendix\nobreakspace  A: Full UCR Benchmark Results}{15}{section*.10}\protected@file@percent }
+\newlabel{app:full-ucr-results}{{A}{15}{\appendixname \nobreakspace \thesectiondis \\* Full UCR Benchmark Results}{section*.10}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{Per-dataset 1-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{15}{table.9}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-1}{{9}{15}{Per-dataset 1-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.9}{}}
+\gdef \LT@ii {\LT@entry 
+    {5}{80.21887pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {1}{37.27469pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{Per-dataset 2-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{17}{table.10}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-2}{{10}{17}{Per-dataset 2-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.10}{}}
+\gdef \LT@iii {\LT@entry 
+    {5}{80.21887pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {1}{37.27469pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}}
+\@writefile{lot}{\contentsline {table}{\numberline {11}{Per-dataset 5-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{19}{table.11}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-5}{{11}{19}{Per-dataset 5-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.11}{}}
+\gdef \LT@iv {\LT@entry 
+    {5}{80.21887pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {1}{37.27469pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}\LT@entry 
+    {5}{32.41675pt}}
+\@writefile{lot}{\contentsline {table}{\numberline {12}{Per-dataset 10-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs.}}{21}{table.12}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-shot-10}{{12}{21}{Per-dataset 10-shot classification results on 128 UCR datasets. Each value is reported as mean $\pm $ standard deviation over 5 runs}{table.12}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {13}{\ignorespaces Win/Tie/Loss of TimeMorph against selected baselines on 128 UCR datasets.}}{23}{table.13}\protected@file@percent }
+\newlabel{tab:ucr_fewshot_paper_current-paper-wtl}{{13}{23}{Win/Tie/Loss of TimeMorph against selected baselines on 128 UCR datasets}{table.13}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Win--Tie--Loss Counts}{23}{subsection.Appendix.A.1}\protected@file@percent }
+\newlabel{app:wtl-table}{{A.1}{23}{Win--Tie--Loss Counts}{subsection.Appendix.A.1}{}}
+\gdef \LT@v {\LT@entry 
+    {1}{60.9055pt}\LT@entry 
+    {1}{52.36958pt}\LT@entry 
+    {1}{89.35826pt}\LT@entry 
+    {1}{89.35826pt}\LT@entry 
+    {1}{80.82234pt}}
+\@writefile{toc}{\contentsline {section}{Appendix\nobreakspace  B: Additional Experimental Details}{24}{section*.11}\protected@file@percent }
+\newlabel{app:details}{{B}{24}{\appendixname \nobreakspace \thesectiondis \\* Additional Experimental Details}{section*.11}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.1}Code Release and Assets}{24}{subsection.Appendix.B.1}\protected@file@percent }
+\newlabel{app:code-and-assets}{{B.1}{24}{Code Release and Assets}{subsection.Appendix.B.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.2}Asset and License Table}{24}{subsection.Appendix.B.2}\protected@file@percent }
+\newlabel{app:asset-license-table}{{B.2}{24}{Asset and License Table}{subsection.Appendix.B.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {14}{Existing assets used in this paper and their licenses or stated terms. URLs were checked during manuscript preparation.}}{24}{table.14}\protected@file@percent }
+\newlabel{tab:asset-license-table}{{14}{24}{Existing assets used in this paper and their licenses or stated terms. URLs were checked during manuscript preparation}{table.14}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {15}{\ignorespaces Computational efficiency and fine-tuning cost under the 10-shot UCR protocol. Total parameters count the full deployed model, while updated parameters count only the parameters fine-tuned on the downstream support set. Adapter size estimates the per-dataset trainable-state footprint. Runtime and memory are measured on representative UCR datasets using a single RTX 3090.}}{25}{table.15}\protected@file@percent }
+\newlabel{tab:computational-efficiency}{{15}{25}{Computational efficiency and fine-tuning cost under the 10-shot UCR protocol. Total parameters count the full deployed model, while updated parameters count only the parameters fine-tuned on the downstream support set. Adapter size estimates the per-dataset trainable-state footprint. Runtime and memory are measured on representative UCR datasets using a single RTX 3090}{table.15}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.3}Efficiency Summary}{25}{subsection.Appendix.B.3}\protected@file@percent }
+\newlabel{app:efficiency-summary}{{B.3}{25}{Efficiency Summary}{subsection.Appendix.B.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.4}Baseline Training Recipes and Hyperparameters}{25}{subsection.Appendix.B.4}\protected@file@percent }
+\newlabel{app:baseline-details}{{B.4}{25}{Baseline Training Recipes and Hyperparameters}{subsection.Appendix.B.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.5}Computational Efficiency Details}{25}{subsection.Appendix.B.5}\protected@file@percent }
+\newlabel{app:efficiency-details}{{B.5}{25}{Computational Efficiency Details}{subsection.Appendix.B.5}{}}
+\@writefile{toc}{\contentsline {section}{Appendix\nobreakspace  C: Additional Plots}{25}{section*.12}\protected@file@percent }
+\newlabel{app:plots}{{C}{25}{\appendixname \nobreakspace \thesectiondis \\* Additional Plots}{section*.12}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {C.1}Additional Qualitative Visualizations}{25}{subsection.Appendix.C.1}\protected@file@percent }
+\newlabel{app:qualitative-visualizations}{{C.1}{25}{Additional Qualitative Visualizations}{subsection.Appendix.C.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {16}{\ignorespaces Few-shot training recipes for TimeMorph and the reported baseline families. All methods use the same sampled support sets within each run and evaluate on all official TEST examples from the target dataset.}}{26}{table.16}\protected@file@percent }
+\newlabel{tab:baseline-training-recipes}{{16}{26}{Few-shot training recipes for TimeMorph and the reported baseline families. All methods use the same sampled support sets within each run and evaluate on all official TEST examples from the target dataset}{table.16}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {17}{\ignorespaces Per-dataset runtime details for the computational-efficiency analysis. Rows with incomplete measurements are omitted.}}{26}{table.17}\protected@file@percent }
+\newlabel{tab:computational-efficiency-details}{{17}{26}{Per-dataset runtime details for the computational-efficiency analysis. Rows with incomplete measurements are omitted}{table.17}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {8}{\ignorespaces Shot-scaling trend on the 128 UCR datasets. Each point reports the mean accuracy over five runs. TimeMorph remains the strongest method across all four shot settings.}}{27}{figure.8}\protected@file@percent }
+\newlabel{fig:fewshot-trend}{{8}{27}{Shot-scaling trend on the 128 UCR datasets. Each point reports the mean accuracy over five runs. TimeMorph remains the strongest method across all four shot settings}{figure.8}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces  Additional t-SNE visualizations for temporal, morphology, and fused decision representations on representative UCR datasets. The plots are used as qualitative diagnostics and are not used for model selection. }}{28}{figure.9}\protected@file@percent }
+\newlabel{fig:timemorph-tsne-appendix}{{9}{28}{Additional t-SNE visualizations for temporal, morphology, and fused decision representations on representative UCR datasets. The plots are used as qualitative diagnostics and are not used for model selection}{figure.9}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {10}{\ignorespaces  Mutual $k$-nearest-neighbor alignment among temporal, morphology, and fused decision representations. The heatmap summarizes neighborhood overlap across the representative qualitative-analysis datasets; lower temporal--morphology alignment indicates different neighborhood structures rather than lower accuracy. }}{29}{figure.10}\protected@file@percent }
+\newlabel{fig:timemorph-branch-alignment}{{10}{29}{Mutual $k$-nearest-neighbor alignment among temporal, morphology, and fused decision representations. The heatmap summarizes neighborhood overlap across the representative qualitative-analysis datasets; lower temporal--morphology alignment indicates different neighborhood structures rather than lower accuracy}{figure.10}{}}
+\bibstyle{IEEEtran}
+\bibdata{references}
+\bibcite{ismail2019deep}{1}
+\bibcite{cleveland1984graphical}{2}
+\bibcite{heer2010tour}{3}
+\bibcite{ye2009shapelets}{4}
+\bibcite{wang2015encoding}{5}
+\bibcite{dempster2020rocket}{6}
+\bibcite{tapnet}{7}
+\bibcite{tang2020dpsn}{8}
+\bibcite{fawaz2020inceptiontime}{9}
+\bibcite{dyformer}{10}
+\bibcite{chen2025llmfew}{11}
+\bibcite{gruver2023llmtime}{12}
+\bibcite{zhou2023onefitsall}{13}
+\bibcite{jin2024timellm}{14}
+\bibcite{sun2024test}{15}
+\bibcite{brown2020language}{16}
+\bibcite{dong2024survey}{17}
+\bibcite{zheng2025understanding}{18}
+\bibcite{hokamp2017lexically}{19}
+\bibcite{koo2024automata}{20}
+\bibcite{narwariya2020meta}{21}
+\bibcite{yoon2019tapnet}{22}
+\bibcite{snell2017prototypical}{23}
+\bibcite{barreda2024cosco}{24}
+\bibcite{chang2025llm4ts}{25}
+\bibcite{langer2025opentslm}{26}
+\bibcite{tan2024language}{27}
+\bibcite{merrill2024struggle}{28}
+\bibcite{ansari2024chronos}{29}
+\bibcite{das2024timesfm}{30}
+\bibcite{woo2024moirai}{31}
+\bibcite{goswami2024moment}{32}
+\bibcite{gao2024units}{33}
+\bibcite{nie2023patchtst}{34}
+\bibcite{wang2015imaging}{35}
+\bibcite{liu2025vltime}{36}
+\bibcite{roschmann2025tivit}{37}
+\bibcite{raffel2020t5}{38}
+\@writefile{toc}{\contentsline {section}{References}{30}{section*.13}\protected@file@percent }
+\bibcite{zhao2021calibrate}{39}
+\bibcite{holtzman2021surface}{40}
+\bibcite{balakrishnan2019constrained}{41}
+\bibcite{geng2023grammar}{42}
+\bibcite{schick2021exploiting}{43}
+\bibcite{gao2021lmbff}{44}
+\bibcite{wang2025chattime}{45}
+\bibcite{makridakis2020m4}{46}
+\bibcite{dau2019ucr}{47}
+\bibcite{bardes2022vicreg}{48}
+\bibcite{wang2017time}{49}
+\bibcite{zeng2023transformers}{50}
+\bibcite{wu2023timesnet}{51}
+\bibcite{wu2021autoformer}{52}
+\bibcite{zhang2023crossformer}{53}
+\bibcite{zhou2022fedformer}{54}
+\bibcite{zhou2021informer}{55}
+\bibcite{abnar2020quantifying}{56}
+\bibcite{maaten2008visualizing}{57}
+\gdef \@abspage@last{31}

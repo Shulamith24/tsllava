@@ -63,6 +63,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cleanup_checkpoints", action="store_true")
     parser.add_argument("--skip_checkpoints", "--skip-phase-checkpoints", dest="skip_checkpoints", action="store_true")
     parser.add_argument("--dataloader_num_workers", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--eval_batch_size", type=int, default=None)
+    parser.add_argument("--freeze_encoder", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
 
     parser.add_argument("--grid_legacy_unfold", action="store_true")
@@ -131,6 +135,14 @@ def _base_forward_args(args: argparse.Namespace, shots: tuple[str, ...]) -> list
         forward_args.append("--skip_checkpoints")
     if args.dataloader_num_workers is not None:
         forward_args.extend(["--dataloader_num_workers", str(args.dataloader_num_workers)])
+    if args.epochs is not None:
+        forward_args.extend(["--epochs", str(args.epochs)])
+    if args.batch_size is not None:
+        forward_args.extend(["--batch_size", str(args.batch_size)])
+    if args.eval_batch_size is not None:
+        forward_args.extend(["--eval_batch_size", str(args.eval_batch_size)])
+    if args.freeze_encoder:
+        forward_args.append("--freeze_encoder")
     return forward_args
 
 

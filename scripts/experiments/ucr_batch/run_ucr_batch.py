@@ -235,11 +235,16 @@ RUNTIME_BATCH_CONFIG_KEYS = {"launcher", "gpu_ids", "worker_count"}
 
 
 def semantic_batch_config(config_payload: dict) -> dict:
-    return {
+    semantic = {
         key: value
         for key, value in config_payload.items()
         if key not in RUNTIME_BATCH_CONFIG_KEYS
     }
+    if isinstance(semantic.get("forward_args"), list):
+        semantic["forward_args"] = [
+            arg for arg in semantic["forward_args"] if arg != "--cleanup_checkpoints"
+        ]
+    return semantic
 
 
 def ensure_batch_config(config_path: Path, config_payload: dict) -> None:
@@ -288,7 +293,11 @@ def build_command(
     command = [sys.executable, str(entry.script_path)]
     if entry.add_protocol_flag:
         command.extend(["--protocol", protocol])
-    if entry.supports_inner_resume:
+    skip_checkpoints = any(
+        token.split("=", 1)[0] in {"--skip_checkpoints", "--skip_phase_checkpoints"}
+        for token in forward_args
+    )
+    if entry.supports_inner_resume and not skip_checkpoints:
         command.append("--resume")
     command.extend(entry.fixed_args)
     command.extend(["--dataset", dataset, "--data_path", data_path, "--save_dir", save_dir])

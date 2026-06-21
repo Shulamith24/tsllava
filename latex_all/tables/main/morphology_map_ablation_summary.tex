@@ -1,0 +1,19 @@
+% Requires \usepackage{booktabs}
+\begin{table*}[t]
+\centering
+\caption{Ablation of 1D-to-2D morphology construction on UCR using the full TimeMorph model under the 5-shot protocol with three independent runs. Acc. reports mean accuracy (\%), Std. reports the corresponding standard deviation, AvgRank is the average dataset-level rank, Best counts the number of datasets on which each construction performs best, and W/T/L is measured against the reference morphology-map construction.}
+\label{tab:morphology-map-ablation-summary}
+\resizebox{0.95\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Method & Construction & Acc. & Std. & AvgRank & Best & W/T/L vs. Ref. \\
+\midrule
+Morphology map & Sliding-window morphology map & \textbf{65.18} & 3.02 & \textbf{2.21} & \textbf{53} & -- \\
+Recurrence plot & Pairwise recurrence map & 62.88 & 18.93 & 2.68 & 35 & 43/6/79 \\
+GAF & Gramian angular field & \underline{63.01} & 19.71 & 2.74 & 28 & 46/9/73 \\
+STFT spectrogram & Short-time Fourier spectrogram & 58.05 & 2.85 & 3.59 & 15 & 29/5/94 \\
+Line plot & Rendered waveform line plot & 57.20 & 3.65 & 3.79 & 14 & 26/2/100 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
