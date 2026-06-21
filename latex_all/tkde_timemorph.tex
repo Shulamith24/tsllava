@@ -682,8 +682,7 @@ Since attention rollout aggregates internal transformer attention, we interpret 
 
 \begin{figure*}[t]
 \centering
-\hspace*{-1cm}
-\includegraphics[width=\linewidth,trim=0.0cm 0cm 0.0cm 2cm,]{figures/timemorph_representation_analysis.pdf}
+\includegraphics[width=0.92\linewidth,trim=0.0cm 0.2cm 0.0cm 2.2cm,clip]{figures/timemorph_representation_analysis.pdf}
 \caption{
 Representation analysis.
 The top row gives t-SNE visualizations~\cite{maaten2008visualizing} of temporal, morphology, and fused LLM decision representations.
@@ -726,9 +725,9 @@ Figure~\ref{fig:ucr-wtl-heatmap} shows win--tie--loss statistics against represe
 TimeMorph wins on substantially more datasets than it loses against \textsc{PatchTST}, \textsc{TimesNet}, and \textsc{GPT4TS}.
 The comparison with specialized CNN and metric-learning methods is closer, but TimeMorph still achieves the strongest overall average and rank.
 
-\begin{figure*}[t]
+\begin{figure*}[!t]
 \centering
-\includegraphics[width=0.88\linewidth]{figures/ucr_wtl_heatmap.pdf}
+\includegraphics[width=0.78\linewidth]{figures/ucr_wtl_heatmap.pdf}
 \caption{Win--tie--loss heatmap against representative UCR baselines. Each cell reports wins/ties/losses over 128 datasets, with color indicating the normalized win margin $(W-L)/N$.
 }
 \label{fig:ucr-wtl-heatmap}
@@ -739,17 +738,15 @@ Figure~\ref{fig:ucr-gain-boxplot} reports the per-dataset accuracy distributions
 TimeMorph has the highest mean accuracy in all four shot settings, with a distribution that is especially separated from the Transformer-style and LLM-style baselines.
 The comparison with specialized CNN and metric-learning baselines is closer, matching the aggregate results in Table~\ref{tab:ucr_fewshot_paper_current-fewshot-main}: TimeMorph provides broad gains over generic sequence models and remains competitive with specialized few-shot classifiers.
 
-\begin{figure*}[!t]
+\begin{figure*}[!b]
 \centering
-\includegraphics[width=0.8\linewidth]{figures/ucr_gain_boxplot.pdf}
+\includegraphics[width=0.72\linewidth]{figures/ucr_gain_boxplot.pdf}
 \caption{
 Per-dataset accuracy distribution on the 128 UCR datasets.
 Each box summarizes one method's accuracy across datasets for a fixed shot setting; diamonds mark mean accuracies.
 }
 \label{fig:ucr-gain-boxplot}
 \end{figure*}
-
-\FloatBarrier
 
 \subsection{Efficiency and Practicality}
 \label{sec:efficiency}
@@ -760,7 +757,8 @@ The LLM interface increases memory and latency relative to compact CNN baselines
 Additional UCR efficiency statistics, including throughput and memory usage, are reported in Appendix~\ref{app:efficiency-summary}.
 \input{tables/main/efficiency_compact.tex}
 
-\FloatBarrier
+\clearpage
+\twocolumn
 
 \section{Conclusion}
 \label{sec:conclusion}
