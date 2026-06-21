@@ -302,11 +302,6 @@ H.~A. Dau, A.~Bagnall, K.~Kamgar, C.-C.~M. Yeh, Y.~Zhu, S.~Gharghabi, C.~A.
   Ratanamahatana, and E.~Keogh, ``The ucr time series archive,'' \emph{IEEE/CAA
   Journal of Automatica Sinica}, vol.~6, no.~6, pp. 1293--1305, 2019.
 
-\bibitem{bardes2022vicreg}
-A.~Bardes, J.~Ponce, and Y.~LeCun, ``{VICReg}: Variance-invariance-covariance
-  regularization for self-supervised learning,'' in \emph{International
-  Conference on Learning Representations}, 2022.
-
 \bibitem{wang2017time}
 Z.~Wang, W.~Yan, and T.~Oates, ``Time series classification from scratch with
   deep neural networks: A strong baseline,'' in \emph{2017 International Joint

@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 import math
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
 import einops
@@ -26,6 +27,14 @@ SUPPORTED_VISION_2D_MODES = (
     GAF_VISION_2D_MODE,
     RECURRENCE_PLOT_VISION_2D_MODE,
     STFT_SPECTROGRAM_VISION_2D_MODE,
+)
+HF_PRETRAINED_VISION_BACKBONE = "hf_pretrained"
+SMALL_VIT_SCRATCH_VISION_BACKBONE = "small_vit_scratch"
+CNN_SCRATCH_VISION_BACKBONE = "cnn_scratch"
+SUPPORTED_VISION_BACKBONE_TYPES = (
+    HF_PRETRAINED_VISION_BACKBONE,
+    SMALL_VIT_SCRATCH_VISION_BACKBONE,
+    CNN_SCRATCH_VISION_BACKBONE,
 )
 LEGACY_DEFAULT_VIT_STRIDE = 0.5
 TIVIT_DEFAULT_VIT_STRIDE = 0.1
@@ -70,6 +79,16 @@ def resolve_effective_vit_patch_policy(vision_2d_mode: str) -> str:
 
 def vision_mode_ignores_patch_size(vision_2d_mode: str) -> bool:
     return validate_vision_2d_mode(vision_2d_mode) == TIVIT_SQRT_OVERLAP_VISION_2D_MODE
+
+
+def validate_vision_backbone_type(vision_backbone_type: str) -> str:
+    normalized = str(vision_backbone_type or HF_PRETRAINED_VISION_BACKBONE).strip().lower()
+    if normalized not in SUPPORTED_VISION_BACKBONE_TYPES:
+        raise ValueError(
+            f"Unsupported vision_backbone_type: {vision_backbone_type}. "
+            f"Valid types: {list(SUPPORTED_VISION_BACKBONE_TYPES)}"
+        )
+    return normalized
 
 
 def load_vision_backbone(
@@ -133,6 +152,144 @@ def load_vision_backbone(
         raise ValueError(f"Unsupported vision model: {model_name}")
 
     return processor, vit, hidden_dim, num_patches, image_size, num_layers
+
+
+@dataclass(frozen=True)
+class ScratchVisionOutput:
+    last_hidden_state: torch.Tensor
+    hidden_states: Optional[tuple[torch.Tensor, ...]] = None
+
+
+class ScratchSmallViTBackbone(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size: int = 224,
+        patch_size: int = 16,
+        hidden_dim: int = 192,
+        depth: int = 4,
+        num_heads: int = 3,
+        mlp_dim: int = 768,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if image_size % patch_size != 0:
+            raise ValueError("image_size must be divisible by patch_size for ScratchSmallViTBackbone")
+        if hidden_dim % num_heads != 0:
+            raise ValueError("hidden_dim must be divisible by num_heads for ScratchSmallViTBackbone")
+        self.image_size = int(image_size)
+        self.patch_size = int(patch_size)
+        self.hidden_dim = int(hidden_dim)
+        self.depth = int(depth)
+        self.num_heads = int(num_heads)
+        self.mlp_dim = int(mlp_dim)
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+
+        self.patch_embed = nn.Conv2d(
+            3,
+            self.hidden_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, self.hidden_dim))
+        self.pos_drop = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=self.hidden_dim,
+                    nhead=self.num_heads,
+                    dim_feedforward=self.mlp_dim,
+                    dropout=dropout,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=True,
+                )
+                for _ in range(self.depth)
+            ]
+        )
+        self.norm = nn.LayerNorm(self.hidden_dim)
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.pos_embed, std=0.02)
+
+    def forward(
+        self,
+        *,
+        pixel_values: torch.Tensor,
+        output_hidden_states: bool = False,
+    ) -> ScratchVisionOutput:
+        tokens = self.patch_embed(pixel_values).flatten(2).transpose(1, 2)
+        cls = self.cls_token.expand(tokens.size(0), -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        tokens = self.pos_drop(tokens + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype))
+        hidden_states = [tokens] if output_hidden_states else None
+        for block in self.blocks:
+            tokens = block(tokens)
+            if hidden_states is not None:
+                hidden_states.append(tokens)
+        tokens = self.norm(tokens)
+        if hidden_states is not None:
+            hidden_states[-1] = tokens
+        return ScratchVisionOutput(
+            last_hidden_state=tokens,
+            hidden_states=tuple(hidden_states) if hidden_states is not None else None,
+        )
+
+
+class ScratchCNNVisionBackbone(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size: int = 224,
+        hidden_dim: int = 192,
+        depth: int = 4,
+    ) -> None:
+        super().__init__()
+        if image_size % 16 != 0:
+            raise ValueError("image_size must be divisible by 16 for ScratchCNNVisionBackbone")
+        self.image_size = int(image_size)
+        self.hidden_dim = int(hidden_dim)
+        self.depth = int(depth)
+        channels = [32, 64, 128, self.hidden_dim]
+        blocks = []
+        in_channels = 3
+        for out_channels in channels:
+            blocks.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(out_channels),
+                    nn.GELU(),
+                    nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+                    nn.BatchNorm2d(out_channels),
+                    nn.GELU(),
+                )
+            )
+            in_channels = out_channels
+        self.blocks = nn.ModuleList(blocks)
+        self.proj = nn.Identity()
+        self.norm = nn.LayerNorm(self.hidden_dim)
+        self.num_patches = (self.image_size // 16) ** 2
+
+    def _tokens_from_feature_map(self, features: torch.Tensor) -> torch.Tensor:
+        tokens = self.proj(features).flatten(2).transpose(1, 2)
+        tokens = self.norm(tokens)
+        cls = tokens.mean(dim=1, keepdim=True)
+        return torch.cat([cls, tokens], dim=1)
+
+    def forward(
+        self,
+        *,
+        pixel_values: torch.Tensor,
+        output_hidden_states: bool = False,
+    ) -> ScratchVisionOutput:
+        features = pixel_values
+        for block in self.blocks:
+            features = block(features)
+        tokens = self._tokens_from_feature_map(features)
+        hidden_states = None
+        if output_hidden_states:
+            hidden_states = tuple(tokens for _ in range(self.depth + 1))
+        return ScratchVisionOutput(last_hidden_state=tokens, hidden_states=hidden_states)
 
 
 class NewTSPseudoImageTransform:
@@ -486,6 +643,7 @@ class NewTSVisionEncoder(nn.Module):
     def __init__(
         self,
         model_name: str = "facebook/dinov2-base",
+        vision_backbone_type: str = HF_PRETRAINED_VISION_BACKBONE,
         layer_idx: int = 4,
         feature_mode: str = "single",
         mix_layers: Optional[Sequence[int]] = None,
@@ -503,6 +661,7 @@ class NewTSVisionEncoder(nn.Module):
         super().__init__()
 
         self.model_name = model_name
+        self.vision_backbone_type = validate_vision_backbone_type(vision_backbone_type)
         self.layer_idx = int(layer_idx)
         self.feature_mode = feature_mode
         self.mix_layers = tuple(int(layer) for layer in mix_layers) if mix_layers else tuple()
@@ -511,24 +670,47 @@ class NewTSVisionEncoder(nn.Module):
         self.vision_2d_mode = validate_vision_2d_mode(vision_2d_mode)
         self.return_cls_token = return_cls_token
         self.truncate_to_feature_layer = bool(truncate_to_feature_layer)
-        self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(
-            num_hidden_layers=num_hidden_layers
-        )
+        self.requested_num_hidden_layers = self._resolve_requested_num_hidden_layers(num_hidden_layers=num_hidden_layers)
         self.vision_train_mode = str(vision_train_mode)
         self.vision_topk_blocks = int(vision_topk_blocks)
         self.device = device
 
-        (
-            self.processor,
-            self.vit,
-            self.hidden_dim,
-            self.num_vit_patches,
-            backbone_image_size,
-            self.num_hidden_layers,
-        ) = load_vision_backbone(
-            model_name,
-            num_hidden_layers=self.requested_num_hidden_layers,
-        )
+        if self.vision_backbone_type == HF_PRETRAINED_VISION_BACKBONE:
+            (
+                self.processor,
+                self.vit,
+                self.hidden_dim,
+                self.num_vit_patches,
+                backbone_image_size,
+                self.num_hidden_layers,
+            ) = load_vision_backbone(
+                model_name,
+                num_hidden_layers=self.requested_num_hidden_layers,
+            )
+        else:
+            self.processor = None
+            backbone_image_size = int(image_size or 224)
+            if self.vision_backbone_type == SMALL_VIT_SCRATCH_VISION_BACKBONE:
+                self.vit = ScratchSmallViTBackbone(
+                    image_size=backbone_image_size,
+                    patch_size=16,
+                    hidden_dim=192,
+                    depth=4,
+                    num_heads=3,
+                    mlp_dim=768,
+                    dropout=0.1,
+                )
+            elif self.vision_backbone_type == CNN_SCRATCH_VISION_BACKBONE:
+                self.vit = ScratchCNNVisionBackbone(
+                    image_size=backbone_image_size,
+                    hidden_dim=192,
+                    depth=4,
+                )
+            else:
+                raise ValueError(f"Unsupported vision_backbone_type: {self.vision_backbone_type}")
+            self.hidden_dim = int(self.vit.hidden_dim)
+            self.num_vit_patches = int(self.vit.num_patches)
+            self.num_hidden_layers = int(self.vit.depth)
 
         self.image_size = int(image_size or backbone_image_size)
         self.mix_logits: Optional[nn.Parameter] = None
@@ -539,6 +721,10 @@ class NewTSVisionEncoder(nn.Module):
         *,
         num_hidden_layers: Optional[int],
     ) -> Optional[int]:
+        if getattr(self, "vision_backbone_type", HF_PRETRAINED_VISION_BACKBONE) != HF_PRETRAINED_VISION_BACKBONE:
+            if num_hidden_layers is not None:
+                raise ValueError("--vit_num_hidden_layers is only supported for hf_pretrained vision backbones")
+            return None
         if num_hidden_layers is not None and num_hidden_layers <= 0:
             raise ValueError("num_hidden_layers must be positive when provided")
 
@@ -671,6 +857,17 @@ class NewTSVisionEncoder(nn.Module):
     def _prepare_pixel_values(self, images: torch.Tensor) -> torch.Tensor:
         if images.dim() != 4:
             raise ValueError(f"Expected image tensor with shape [B, C, H, W], got {tuple(images.shape)}")
+
+        if self.vision_backbone_type != HF_PRETRAINED_VISION_BACKBONE:
+            pixel_values = images.clamp(0.0, 1.0)
+            if pixel_values.shape[-2:] != (self.image_size, self.image_size):
+                pixel_values = F.interpolate(
+                    pixel_values,
+                    size=(self.image_size, self.image_size),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            return (pixel_values - 0.5) / 0.5
 
         processor = getattr(self.processor, "image_processor", self.processor)
         size_config = getattr(processor, "size", None) or {}
@@ -828,6 +1025,20 @@ class NewTSVisionEncoder(nn.Module):
         blocks = self._get_encoder_blocks()
         trainable_indices = []
 
+        if self.vision_backbone_type != HF_PRETRAINED_VISION_BACKBONE:
+            if mode == "all":
+                self.unfreeze()
+                trainable_indices = list(range(self.num_hidden_layers))
+            elif mode == "topk":
+                raise ValueError("vision_train_mode=topk is only supported for hf_pretrained vision backbones")
+            self.vision_train_mode = mode
+            self.vision_topk_blocks = topk
+            return {
+                "train_mode": self.vision_train_mode,
+                "loaded_layers": self.num_hidden_layers,
+                "trainable_layers": trainable_indices,
+            }
+
         if mode == "all":
             self.unfreeze()
             trainable_indices = list(range(len(blocks)))
@@ -877,6 +1088,7 @@ class NewTSVisionEncoder(nn.Module):
 
     def get_feature_config(self) -> Dict[str, Any]:
         return {
+            "vision_backbone_type": self.vision_backbone_type,
             "feature_mode": self.feature_mode,
             "layer_idx": self.layer_idx if self.feature_mode == "single" else None,
             "mix_layers": list(self.mix_layers) if self.feature_mode == "scalar_mix" else None,

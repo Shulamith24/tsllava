@@ -43,6 +43,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         ts_positional_encoding: str = "sinusoidal",
         branch_mode: str = "both",
         vit_model_name: str = "facebook/dinov2-base",
+        vision_backbone_type: str = "hf_pretrained",
         vit_feature_mode: str = "single",
         vit_layer_idx: int = 4,
         vit_mix_layers: Optional[Sequence[int]] = None,
@@ -122,6 +123,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         self.aggregator_fuse_layers = int(aggregator_fuse_layers)
         self.enable_modality_embeddings = bool(enable_modality_embeddings)
         self.branch_dropout = float(branch_dropout)
+        self.vision_backbone_type = str(vision_backbone_type)
         self.vision_train_mode = str(vision_train_mode)
         self.vision_topk_blocks = int(vision_topk_blocks)
         self.freeze_ts_backbone_default = bool(freeze_ts_backbone)
@@ -157,6 +159,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
         if branch_mode in {"both", "vision_only"}:
             self.vision_encoder = NewTSVisionEncoder(
                 model_name=vit_model_name,
+                vision_backbone_type=vision_backbone_type,
                 layer_idx=vit_layer_idx,
                 feature_mode=vit_feature_mode,
                 mix_layers=vit_mix_layers,
@@ -421,6 +424,7 @@ class NewTSDualBranchEncoder(TimeSeriesEncoderBase):
             config.update(
                 {
                     "vit_model_name": self.vision_encoder.model_name,
+                    "vision_backbone_type": self.vision_encoder.vision_backbone_type,
                     "vit_feature_mode": self.vision_encoder.feature_mode,
                     "vit_layer_idx": self.vision_encoder.layer_idx,
                     "vit_mix_layers": list(self.vision_encoder.mix_layers),

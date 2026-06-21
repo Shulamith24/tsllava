@@ -49,9 +49,12 @@ from ucr_fewshot_baseline_utils import (  # noqa: E402
 )
 from opentslm.model.encoder.NewTSDualBranchEncoder import NewTSDualBranchEncoder  # noqa: E402
 from opentslm.model.encoder.NewTSVisionEncoder import (  # noqa: E402
+    HF_PRETRAINED_VISION_BACKBONE,
     LEGACY_VISION_2D_MODE,
     SUPPORTED_VISION_2D_MODES,
+    SUPPORTED_VISION_BACKBONE_TYPES,
     resolve_effective_vision_stride,
+    validate_vision_backbone_type,
     validate_vision_2d_mode,
 )
 from opentslm.model_config import ENCODER_OUTPUT_DIM  # noqa: E402
@@ -184,9 +187,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--aug_freq_dropout_prob", type=float, default=0.2, help=argparse.SUPPRESS)
 
     parser.add_argument("--vision_2d_mode", type=str, default=LEGACY_VISION_2D_MODE, choices=list(SUPPORTED_VISION_2D_MODES))
+    parser.add_argument(
+        "--vision_backbone_type",
+        type=str,
+        default=HF_PRETRAINED_VISION_BACKBONE,
+        choices=list(SUPPORTED_VISION_BACKBONE_TYPES),
+        help="Vision backbone used by the 1D-to-2D branch.",
+    )
+    parser.add_argument("--vit_model_name", type=str, default="facebook/dinov2-base")
+    parser.add_argument("--vit_feature_mode", type=str, default="single", choices=["last", "single", "scalar_mix"])
+    parser.add_argument("--vit_layer_idx", type=int, default=4)
     parser.add_argument("--vit_patch_size", type=int, default=16)
     parser.add_argument("--vit_stride", type=float, default=0.5)
     parser.add_argument("--vit_mix_layers", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--vit_truncate_to_feature_layer",
+        dest="vit_truncate_to_feature_layer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--vit_num_hidden_layers", type=int, default=None)
+    parser.add_argument("--vision_train_mode", type=str, default="none", choices=["none", "topk", "all"])
+    parser.add_argument("--vision_topk_blocks", type=int, default=4)
 
     parser.add_argument("--no_lora", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--lora_r", type=int, default=16, help=argparse.SUPPRESS)
@@ -221,6 +243,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args.vit_patch_size_explicit = cli_flag_was_provided(provided_argv, "--vit_patch_size")
     args.vit_stride_explicit = cli_flag_was_provided(provided_argv, "--vit_stride")
     args.vision_2d_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_2d_mode")
+    args.vision_backbone_type_explicit = cli_flag_was_provided(provided_argv, "--vision_backbone_type")
+    args.vit_model_name_explicit = cli_flag_was_provided(provided_argv, "--vit_model_name")
+    args.vit_feature_mode_explicit = cli_flag_was_provided(provided_argv, "--vit_feature_mode")
+    args.vit_layer_idx_explicit = cli_flag_was_provided(provided_argv, "--vit_layer_idx")
+    args.vit_truncate_to_feature_layer_explicit = (
+        cli_flag_was_provided(provided_argv, "--vit_truncate_to_feature_layer")
+        or cli_flag_was_provided(provided_argv, "--no_vit_truncate_to_feature_layer")
+    )
+    args.vit_num_hidden_layers_explicit = cli_flag_was_provided(provided_argv, "--vit_num_hidden_layers")
+    args.vision_train_mode_explicit = cli_flag_was_provided(provided_argv, "--vision_train_mode")
+    args.vision_topk_blocks_explicit = cli_flag_was_provided(provided_argv, "--vision_topk_blocks")
     args.protocol = "fewshot"
     return args
 
@@ -255,6 +288,11 @@ def validate_args(args: argparse.Namespace, shots: Sequence[ShotType]) -> None:
     if args.encoder_init == "scratch" and args.local_checkpoint:
         raise ValueError("--encoder_init scratch should not be combined with --local_checkpoint")
     validate_vision_2d_mode(args.vision_2d_mode)
+    vision_backbone_type = validate_vision_backbone_type(args.vision_backbone_type)
+    if vision_backbone_type != HF_PRETRAINED_VISION_BACKBONE and args.vision_train_mode == "topk":
+        raise ValueError("--vision_train_mode=topk is only supported for hf_pretrained vision backbones")
+    if vision_backbone_type != HF_PRETRAINED_VISION_BACKBONE and args.vit_num_hidden_layers is not None:
+        raise ValueError("--vit_num_hidden_layers is only supported for hf_pretrained vision backbones")
 
 
 def resolve_model_name(args: argparse.Namespace) -> str:
@@ -296,6 +334,7 @@ def default_newts_dual_branch_config() -> Dict[str, Any]:
         "ts_positional_encoding": "sinusoidal",
         "branch_mode": "both",
         "vit_model_name": "facebook/dinov2-base",
+        "vision_backbone_type": HF_PRETRAINED_VISION_BACKBONE,
         "vit_feature_mode": "single",
         "vit_layer_idx": 4,
         "vit_mix_layers": None,
@@ -375,6 +414,34 @@ def resolve_encoder_config_from_checkpoint(
             args.vit_stride if args.vit_stride_explicit else config["vit_stride"],
             stride_explicit=args.vit_stride_explicit,
         )
+
+    vision_backbone_type = validate_vision_backbone_type(
+        args.vision_backbone_type if args.vision_backbone_type_explicit else config.get("vision_backbone_type", HF_PRETRAINED_VISION_BACKBONE)
+    )
+    checkpoint_backbone_type = validate_vision_backbone_type(config.get("vision_backbone_type", HF_PRETRAINED_VISION_BACKBONE))
+    if checkpoint and args.vision_backbone_type_explicit and vision_backbone_type != checkpoint_backbone_type:
+        raise ValueError(
+            "Cannot load a checkpoint with a different vision_backbone_type. "
+            f"checkpoint={checkpoint_backbone_type}, requested={vision_backbone_type}. "
+            "Use --encoder_init scratch or omit --local_checkpoint for this backbone ablation."
+        )
+    config["vision_backbone_type"] = vision_backbone_type
+    if args.vit_model_name_explicit:
+        config["vit_model_name"] = str(args.vit_model_name)
+    if args.vit_feature_mode_explicit:
+        config["vit_feature_mode"] = str(args.vit_feature_mode)
+    if args.vit_layer_idx_explicit:
+        config["vit_layer_idx"] = int(args.vit_layer_idx)
+    if args.vit_mix_layers is not None:
+        config["vit_mix_layers"] = list(args.vit_mix_layers)
+    if args.vit_truncate_to_feature_layer_explicit:
+        config["vit_truncate_to_feature_layer"] = bool(args.vit_truncate_to_feature_layer)
+    if args.vit_num_hidden_layers_explicit:
+        config["vit_num_hidden_layers"] = args.vit_num_hidden_layers
+    if args.vision_train_mode_explicit:
+        config["vision_train_mode"] = str(args.vision_train_mode)
+    if args.vision_topk_blocks_explicit:
+        config["vision_topk_blocks"] = int(args.vision_topk_blocks)
 
     config["freeze_ts_backbone"] = bool(args.freeze_ts_backbone)
     config["freeze_vision_backbone"] = bool(args.freeze_vision_backbone)
@@ -1099,6 +1166,12 @@ def run_single_experiment(
         "local_checkpoint": encoder_config.get("local_checkpoint"),
         "branch_mode": args.runtime_branch_mode,
         "freeze_vision_backbone": bool(args.freeze_vision_backbone),
+        "vision_backbone_type": encoder_config.get("vision_backbone_type"),
+        "vision_train_mode": encoder_config.get("vision_train_mode"),
+        "vision_topk_blocks": encoder_config.get("vision_topk_blocks"),
+        "vit_model_name": encoder_config.get("vit_model_name"),
+        "vit_feature_mode": encoder_config.get("vit_feature_mode"),
+        "vit_layer_idx": encoder_config.get("vit_layer_idx"),
         "vision_2d_mode": encoder_config.get("vision_2d_mode"),
         "vit_patch_size": encoder_config.get("vit_patch_size"),
         "vit_stride": encoder_config.get("vit_stride"),
@@ -1194,6 +1267,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print(f"freeze_encoder: {args.freeze_encoder}")
     print(f"freeze_vision_backbone: {args.freeze_vision_backbone}")
     print(f"runtime_branch_mode: {args.runtime_branch_mode}")
+    print(f"vision_backbone_type: {args.vision_backbone_type}")
+    print(f"vision_train_mode: {args.vision_train_mode}")
+    print(f"vision_topk_blocks: {args.vision_topk_blocks}")
+    print(f"vit_model_name: {args.vit_model_name}")
+    print(f"vit_feature_mode: {args.vit_feature_mode}")
+    print(f"vit_layer_idx: {args.vit_layer_idx}")
     print(f"vision_2d_mode: {args.vision_2d_mode}")
     print(f"vit_patch_size: {args.vit_patch_size}")
     print(f"vit_stride: {args.vit_stride}")
@@ -1247,6 +1326,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "num_runs": num_runs,
         "classifier_head": args.classifier_head,
         "runtime_branch_mode": args.runtime_branch_mode,
+        "vision_backbone_type": args.vision_backbone_type,
+        "vision_train_mode": args.vision_train_mode,
+        "vision_topk_blocks": args.vision_topk_blocks,
+        "vit_model_name": args.vit_model_name,
+        "vit_feature_mode": args.vit_feature_mode,
+        "vit_layer_idx": args.vit_layer_idx,
         "vision_2d_mode": args.vision_2d_mode,
         "vit_patch_size": args.vit_patch_size,
         "vit_stride": args.vit_stride,
