@@ -280,6 +280,19 @@ def save_pdf_png(fig, output_dir: Path, base_name: str, *, dpi: int = 320) -> di
     return {"pdf": str(pdf_path.resolve()), "png": str(png_path.resolve())}
 
 
+def add_panel_label(fig, ax, label: str, title: str) -> None:
+    bbox = ax.get_position()
+    fig.text(
+        bbox.x0,
+        bbox.y1 + 0.035,
+        f"{label} {title}",
+        ha="left",
+        va="bottom",
+        fontsize=10.5,
+        fontweight="bold",
+    )
+
+
 def normalize_series(series: np.ndarray) -> np.ndarray:
     series = np.asarray(series, dtype=np.float32)
     std = float(series.std())
@@ -514,11 +527,11 @@ def plot_branch_bars(ax, datasets: list[str], features_dir: Path) -> dict[str, A
     ax.set_yticklabels(datasets)
     ax.set_xlim(0, 1)
     ax.set_xlabel("Fraction of query samples", labelpad=7)
-    ax.set_title("Branch correctness overlap")
-    legend_columns = len(labels) if labels else 1
+    ax.set_title("")
+    legend_columns = min(2, len(labels)) if labels else 1
     ax.legend(
         loc="upper center",
-        bbox_to_anchor=(0.0, -0.33, 1.0, 0.12),
+        bbox_to_anchor=(0.0, -0.42, 1.0, 0.22),
         ncol=legend_columns,
         mode="expand",
         frameon=False,
@@ -677,16 +690,26 @@ def plot_representation_analysis(
         tsne_cache_details[feature_key] = cache_detail
 
     branch_count = max(1, len(branch_datasets))
-    fig_height = max(6.2, 4.4 + 0.28 * branch_count)
-    branch_height_ratio = max(0.95, 0.11 * branch_count)
-    fig = plt.figure(figsize=(13.4, fig_height))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.0, branch_height_ratio], hspace=0.38, wspace=0.18)
-    axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
+    fig_height = max(8.6, 6.8 + 0.36 * branch_count)
+    branch_height_ratio = max(1.35, 0.18 * branch_count)
+    fig = plt.figure(figsize=(3.55, fig_height))
+    gs = fig.add_gridspec(
+        4,
+        1,
+        height_ratios=[1.0, 1.0, 1.0, branch_height_ratio],
+        hspace=0.58,
+        top=0.95,
+        bottom=0.13,
+        left=0.16,
+        right=0.98,
+    )
+    axes = [fig.add_subplot(gs[i, 0]) for i in range(3)]
     labels = both["labels"].astype(np.int64)
     correct = both["correct"].astype(bool)
-    scatter_tsne(axes[0], embeddings[0][1], labels, correct, title=f"{main_dataset}: temporal tokens")
-    scatter_tsne(axes[1], embeddings[1][1], labels, correct, title=f"{main_dataset}: morphology tokens")
-    scatter_tsne(axes[2], embeddings[2][1], labels, correct, title=f"{main_dataset}: fused LLM decision state")
+    scatter_tsne(axes[0], embeddings[0][1], labels, correct, title="Temporal")
+    scatter_tsne(axes[1], embeddings[1][1], labels, correct, title="Morphology")
+    scatter_tsne(axes[2], embeddings[2][1], labels, correct, title="Fused LLM state")
+    add_panel_label(fig, axes[0], "(a)", f"{main_dataset} representation space")
 
     legend_handles = [
         Line2D([0], [0], marker="o", color="w", label="Correct", markerfacecolor=TSNE_COLORS[0], markersize=6),
@@ -694,8 +717,9 @@ def plot_representation_analysis(
     ]
     axes[2].legend(handles=legend_handles, loc="lower right", frameon=True, borderpad=0.3)
 
-    ax_bar = fig.add_subplot(gs[1, :])
+    ax_bar = fig.add_subplot(gs[3, 0])
     branch_details = plot_branch_bars(ax_bar, branch_datasets, features_dir)
+    add_panel_label(fig, ax_bar, "(b)", "Branch correctness overlap")
     artifacts = save_pdf_png(fig, output_dir, "timemorph_representation_analysis")
     return artifacts, {
         "main_dataset": main_dataset,

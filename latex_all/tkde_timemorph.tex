@@ -537,18 +537,26 @@ Base LLM weights &
 \subsection{Experimental Setup}
 
 \subsubsection{Datasets and Few-Shot Protocol}
-We evaluate TimeMorph on all 128 datasets in the UCR Archive 2018 under a fixed full-label-space few-shot protocol.
-For each dataset $D$ and $K\in\{1,2,5,10\}$, all target classes are included.
+We evaluate TimeMorph on the 128 univariate datasets in the UCR Archive 2018 under a full-label-space few-shot protocol.
+For each dataset $D$ and support size $K\in{1,2,5,10}$, all target classes are retained.
 We sample up to $K$ labeled examples per class from the official TRAIN split as the support set and evaluate on all examples in the official TEST split.
-UCR results are averaged over five independent runs and then macro-averaged over datasets.
-We further evaluate semantic-label transfer on MIT-BIH and CinC2017 with $K\in\{10,20,30\}$ over ten independent runs, using the same full-label-space protocol.
-These two external datasets contain meaningful class names, so TimeMorph enables label-name priors during fine-tuning.
+UCR results are averaged over five independent support-sampling runs and then macro-averaged over datasets.
+This protocol differs from episodic $N$-way evaluation: the classifier must discriminate among the native label set of each dataset after seeing only $K$ labeled examples per class.
+
+We further evaluate transfer to two external semantic-label datasets, MIT-BIH and CinC2017, using $K\in{10,20,30}$ and ten independent runs.
+These datasets contain clinically meaningful class names; therefore, the semantic-prior class-token variant is used by default and ablated separately in Section~\ref{label priors}.
 
 \subsubsection{Baselines}
-We compare TimeMorph with representative few-shot and time-series classification baselines, including \textsc{ResNet}, \textsc{TapNet}, \textsc{COSCO-ResNet}, \textsc{PatchTST}, \textsc{DLinear}, \textsc{TimesNet}, \textsc{Autoformer}, \textsc{Crossformer}, \textsc{FEDformer}, \textsc{Informer}, and \textsc{GPT4TS}.
-For UCR, \texttt{Avg} averages the four shot-specific mean accuracies, and \texttt{AvgRank} averages dataset-level ranks across shots.
-Standard deviations and full per-dataset tables are reported in Appendix~\ref{app:full-ucr-results}.
-Appendix~\ref{app:baseline-details} lists the training recipes and hyperparameters for the reported baseline families.
+We compare TimeMorph with three groups of baselines.
+The first group contains CNN or metric-learning methods for few-shot TSC, including \textsc{ResNet}~\cite{wang2017time}, \textsc{TapNet}~\cite{yoon2019tapnet}, and \textsc{COSCO-ResNet}~\cite{barreda2024cosco}.
+The second group contains Transformer-style or decomposition-based time-series models, including \textsc{PatchTST}~\cite{nie2023patchtst}, \textsc{DLinear}~\cite{zeng2023transformers}, \textsc{TimesNet}~\cite{wu2023timesnet}, \textsc{Autoformer}~\cite{wu2021autoformer}, \textsc{Crossformer}~\cite{zhang2023crossformer}, \textsc{FEDformer}~\cite{zhou2022fedformer}, and \textsc{Informer}~\cite{zhou2021informer}.
+The third group contains the LLM-style \textsc{GPT4TS} baseline~\cite{zhou2023onefitsall}.
+
+We report classification accuracy in percentage form.
+For each method, dataset, and shot setting, accuracy is first averaged over independent runs.
+Benchmark-level accuracy is the macro-average over datasets.
+For UCR, \texttt{Avg} denotes the arithmetic mean of the four shot-specific benchmark accuracies, and \texttt{AvgRank} denotes the average of dataset-level ranks across the four shot settings; lower \texttt{AvgRank} indicates better benchmark-wide robustness.
+Standard deviations and complete per-dataset tables are reported in Appendix~\ref{app:baseline-details}.
 
 \subsubsection{Implementation Details}
 TimeMorph uses \texttt{Llama-3.2-1B} as the causal language backbone and \texttt{dinov2-base} as the frozen morphology encoder.
@@ -608,23 +616,23 @@ We therefore summarize the fairness boundary here and provide the full recipe ta
 
 \subsubsection{Results on UCR}
 Table~\ref{tab:ucr_fewshot_paper_current-fewshot-main} reports the main results on 128 UCR datasets.
-TimeMorph achieves the best mean accuracy in all four shot settings, obtaining 48.31, 55.55, 64.14, and 69.16 in the 1-, 2-, 5-, and 10-shot settings.
-It also obtains the best overall average accuracy and the best average rank.
-Compared with the strongest baseline, \textsc{COSCO-ResNet}, TimeMorph improves average accuracy from 58.39 to 59.29 and average rank from 4.70 to 4.24.
-The gains are larger over generic sequence models and LLM-style baselines: TimeMorph improves the average accuracy by 4.53 points over \textsc{Informer} and 18.36 points over \textsc{GPT4TS}.
-These results show that TimeMorph consistently benefits from combining temporal dynamics, morphological structure, and LLM-based class-token scoring.
+TimeMorph obtains the highest mean accuracy under all four support sizes, reaching 48.31, 55.55, 64.14, and 69.16 in the 1-, 2-, 5-, and 10-shot settings, respectively.
+The strongest non-TimeMorph baseline is \textsc{COSCO-ResNet}, which reaches an overall \texttt{Avg} of 58.39 compared with 59.29 for TimeMorph.
+Thus, the average-accuracy margin over the strongest specialized CNN/prototype baseline is modest but consistent across support sizes.
+The ranking metric shows the same trend: TimeMorph obtains the best \texttt{AvgRank} of 4.24, compared with 4.70 for \textsc{COSCO-ResNet}.
+The gains are larger against generic sequence and LLM-style baselines.
+TimeMorph improves \texttt{Avg} by 4.53 points over \textsc{Informer} and by 18.36 points over \textsc{GPT4TS}.
+These results suggest that the proposed dual-view and class-token interface is most beneficial relative to generic sequence modeling and direct LLM-style adaptation, while remaining competitive with specialized few-shot classifiers.
 \input{tables/main/ucr_fewshot_main.tex}
 
 \subsubsection{Results on External Semantic-Label Datasets}
-We further evaluate TimeMorph on MIT-BIH and CinC2017 under 10-, 20-, and 30-shot settings.
-These datasets provide meaningful class names, allowing TimeMorph to use label-verbalizer priors during fine-tuning.
-Table~\ref{tab:external-fewshot-full} reports the complete results.
-TimeMorph obtains the best result in five of the six dataset-shot settings and remains the strongest method when results are averaged across shots.
-The result confirms that the semantic class-token interface transfers beyond UCR and can exploit informative label names when they are available.
+Table~\ref{tab:external-fewshot-full} reports results on MIT-BIH and CinC2017 under 10-, 20-, and 30-shot settings.
+TimeMorph obtains the best result in five of the six dataset-shot settings and has the highest average over shots.
+Unlike UCR, these datasets provide meaningful label names, allowing TimeMorph to initialize and regularize class-token rows with label verbalizers.
+The external results therefore test whether the same closed-set class-token mechanism can also exploit label semantics when they are informative.
 \input{tables/main/external_fewshot_main.tex}
 
 \subsection{Component and Interface Analysis}
-
 \subsubsection{Effect of Staged Pretraining and LLM Interface}
 Table~\ref{tab:ablation-summary} reports the main component ablations on all 128 UCR datasets.
 The ``$+$/$-$'' columns indicate whether staged pretraining, the LLM pathway, and the morphology view are retained.
@@ -648,6 +656,7 @@ Recurrence plots and Gramian angular fields remain competitive but trail the pro
 These results indicate that the morphology branch benefits from a structured local-window representation of waveform shape, not simply from visual rendering of the raw signal.
 
 \subsubsection{Effect of Semantic Label Priors}
+\label{label priors}
 For external datasets with meaningful label names, Table~\ref{tab:m2-semantic-prior-ablation-accuracy} compares anonymous class-token rows with semantic-prior rows.
 Both variants start from the same final Stage-II checkpoint; the semantic-prior variant differs only in label-verbalizer initialization and semantic regularization of the class-token rows.
 Semantic priors improve five of the six dataset-shot settings and increase the overall average from 47.84 to 50.23.
@@ -680,17 +689,17 @@ High-response regions usually appear near high-contrast structures in the morpho
 This pattern indicates that the frozen visual encoder attends to structured waveform morphology exposed by the map representation.
 Since attention rollout aggregates internal transformer attention, we interpret it as qualitative evidence of encoder focus rather than causal importance of individual timestamps or image pixels.
 
-\begin{figure*}[t]
+\begin{figure}[t]
 \centering
-\includegraphics[width=0.92\linewidth,trim=0.0cm 0.2cm 0.0cm 2.2cm,clip]{figures/timemorph_representation_analysis.pdf}
+\includegraphics[width=\linewidth]{figures/timemorph_representation_analysis.pdf}
 \caption{
 Representation analysis.
-The top row gives t-SNE visualizations~\cite{maaten2008visualizing} of temporal, morphology, and fused LLM decision representations.
+(a) t-SNE visualizations~\cite{maaten2008visualizing} of temporal, morphology, and fused LLM decision representations.
 Points are colored by ground-truth class, and misclassified samples are marked separately.
-The stacked bars compare correctness overlap among temporal-only, morphology-only, and fused dual-view inference on the same fine-tuned checkpoint.
+(b) Correctness overlap among temporal-only, morphology-only, and fused dual-view inference on the same fine-tuned checkpoint.
 }
 \label{fig:timemorph-representation-analysis}
-\end{figure*}
+\end{figure}
 
 \subsubsection{Representation Structure and Branch Complementarity}
 Figure~\ref{fig:timemorph-representation-analysis} compares the temporal pooled representation, morphology pooled representation, and final LLM decision state using t-SNE~\cite{maaten2008visualizing}.
@@ -757,20 +766,21 @@ The LLM interface increases memory and latency relative to compact CNN baselines
 Additional UCR efficiency statistics, including throughput and memory usage, are reported in Appendix~\ref{app:efficiency-summary}.
 \input{tables/main/efficiency_compact.tex}
 
-\clearpage
-\twocolumn
-
 \section{Conclusion}
 \label{sec:conclusion}
-This paper presented \textbf{TimeMorph}, a dual-view LLM-based framework for few-shot time-series classification. 
-TimeMorph addresses three key issues in adapting pretrained language models to scarce-label time-series data: preserving complementary temporal and morphological evidence, aligning continuous time-series representations with the LLM embedding space, and enforcing valid closed-set predictions. 
-To this end, TimeMorph combines a temporal branch for chronological dynamics with a morphology branch that exposes waveform structures through visual pseudo-images, projects the fused tokens into a frozen causal LLM through staged cross-modal transfer, and replaces open-ended label generation with supervised class-token scoring over the valid label set. 
-When informative class names are available, semantic label priors further regularize the class-token space without relying on unstable multi-token generation.
 
-Extensive experiments on the full UCR few-shot benchmark and external semantic-label datasets show that TimeMorph consistently improves over task-specific, Transformer-based, and LLM/foundation-model baselines. 
-The ablation studies further confirm that staged transfer, the LLM pathway, dual-view modeling, and semantic label priors contribute to the final performance. 
-These results suggest that LLMs can be effectively fine-tuned for few-shot TSC when the modality interface and prediction space are carefully designed. 
-Future work will extend TimeMorph to broader multivariate, streaming, and domain-specific time-series scenarios while further improving fine-tuning efficiency.
+This paper presented \textbf{TimeMorph}, a dual-view LLM-based framework for few-shot time-series classification.
+The central goal of TimeMorph is to adapt pretrained language models to scarce-label time-series problems while addressing three practical challenges: preserving complementary temporal and morphological evidence, bridging continuous time-series representations with the LLM embedding space, and ensuring valid closed-set predictions.
+To this end, TimeMorph combines a temporal branch for chronological dynamics with a morphology branch that exposes waveform structures through visual pseudo-images, aligns the fused time-series tokens to a frozen causal LLM through staged cross-modal transfer, and performs classification through supervised class-token scoring over the valid label set.
+When semantically meaningful class names are available, TimeMorph further incorporates label-verbalizer priors to regularize the class-token space without relying on unstable multi-token label generation.
+
+Extensive experiments on the UCR few-shot benchmark and external semantic-label datasets demonstrate that TimeMorph achieves the strongest average performance and ranking among the compared methods.
+The gains are particularly clear over generic Transformer-style and LLM-style baselines, while comparisons with specialized CNN and metric-learning methods are closer, indicating that TimeMorph is not uniformly dominant on every dataset but provides a competitive and complementary LLM-based alternative for few-shot TSC.
+Ablation studies further show that staged transfer, the LLM pathway, morphology-aware evidence, and semantic class-token priors each contribute to the final model, supporting the importance of jointly designing the modality interface and the prediction space when adapting LLMs to time-series classification.
+
+Despite these encouraging results, TimeMorph is not intended to be a lightweight replacement for compact time-series classifiers.
+Its advantage is most relevant in label-scarce settings where pretrained multimodal and language-model priors can be exploited, whereas its inference cost remains higher than that of conventional CNN or prototype-based models.
+Future work will investigate stricter disjoint pretraining protocols, more efficient distillation or compression strategies, and broader extensions to multivariate, streaming, and domain-specific time-series scenarios.
 
 
 \clearpage

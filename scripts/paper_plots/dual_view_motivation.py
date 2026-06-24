@@ -6,23 +6,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
-from matplotlib.patches import Rectangle
 
 try:
-    from .common import PAPER_OUTPUT_DIR, apply_paper_style, save_pdf_png
+    from .common import apply_paper_style, save_pdf_png
 except ImportError:  # pragma: no cover
-    from scripts.paper_plots.common import PAPER_OUTPUT_DIR, apply_paper_style, save_pdf_png
+    from scripts.paper_plots.common import apply_paper_style, save_pdf_png
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from opentslm.model.encoder.NewTSVisionEncoder import NewTSPseudoImageTransform
-from opentslm.time_series_datasets.ucr.ucr_loader import UCRDataset, load_ucr_dataset
 
 
 _CACHE_ROOT = Path("/tmp") / "tsllava_visualization_cache"
@@ -33,216 +31,295 @@ os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_ROOT))
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CONFIG_DIR))
 
 
+BLUE = "#1f4e79"
+RED = "#c43c4e"
+BOX_EDGE = "#c9d7e8"
+GRID_COLOR = "#e8e8e8"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot a dual-view motivation figure for TimeMorph")
-    parser.add_argument("--dataset", type=str, default="TwoLeadECG", help="UCR dataset used for the illustrative example")
-    parser.add_argument("--split", type=str, default="train", choices=["train", "test"], help="UCR split")
-    parser.add_argument("--sample_index", type=int, default=0, help="Sample index inside the split")
-    parser.add_argument("--data_path", type=str, default="./data", help="Path to the UCR archive root")
-    parser.add_argument("--patch_size", type=int, default=16, help="Temporal patch length")
-    parser.add_argument("--stride", type=int, default=8, help="Temporal patch stride")
-    parser.add_argument(
-        "--vision_2d_mode",
-        type=str,
-        default="legacy_unfold",
-        choices=["legacy_unfold", "tivit_sqrt_overlap"],
-        help="Pseudo-image construction mode",
-    )
+    parser = argparse.ArgumentParser(description="Plot the dual-view motivation figure for TimeMorph")
+    parser.add_argument("--data_path", type=str, default="./data", help="Path containing UCRArchive_2018")
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=str(PAPER_OUTPUT_DIR),
+        default=str(PROJECT_ROOT / "latex_all" / "figures"),
         help="Directory where the figure PDF/PNG will be written",
     )
-    parser.add_argument(
-        "--output_name",
-        type=str,
-        default="dual_view_motivation",
-        help="Base file name without extension",
-    )
-    parser.add_argument(
-        "--focus_patch_index",
-        type=int,
-        default=-1,
-        help="Patch index to highlight; -1 selects a centered patch automatically",
-    )
-    parser.add_argument(
-        "--num_patch_rows",
-        type=int,
-        default=4,
-        help="Number of consecutive temporal patches to show in the middle panel",
-    )
-    parser.add_argument(
-        "--image_size",
-        type=int,
-        default=224,
-        help="Target image size for the morphology panel",
-    )
+    parser.add_argument("--output_name", type=str, default="dual_view_motivation")
+    parser.add_argument("--patch_size", type=int, default=16)
+    parser.add_argument("--stride", type=int, default=8)
+    parser.add_argument("--image_size", type=int, default=96)
     return parser.parse_args(argv)
 
 
-def load_sample(dataset_name: str, split: str, data_path: str, sample_index: int) -> tuple[torch.Tensor, int, int]:
-    train_df, test_df = load_ucr_dataset(dataset_name, raw_data_path=data_path)
-    split_df = train_df if split == "train" else test_df
-    dataset = UCRDataset(split_df)
-    if sample_index < 0 or sample_index >= len(dataset):
-        raise IndexError(f"sample_index={sample_index} is out of range for {dataset_name}/{split} with {len(dataset)} samples")
-    series, label = dataset[sample_index]
-    return series, int(label), len(dataset)
+def load_train_array(dataset: str, data_path: str) -> tuple[np.ndarray, np.ndarray]:
+    base = Path(data_path)
+    archive = base if base.name == "UCRArchive_2018" else base / "UCRArchive_2018"
+    path = archive / dataset / f"{dataset}_TRAIN.tsv"
+    if not path.exists():
+        raise FileNotFoundError(f"UCR TRAIN file not found: {path}")
+    df = pd.read_csv(path, sep="\t", header=None)
+    labels = df.iloc[:, 0].to_numpy()
+    values = df.iloc[:, 1:].to_numpy(dtype=np.float32)
+    return labels, values
 
 
-def prepare_patches(series: torch.Tensor, patch_size: int, stride: int) -> tuple[np.ndarray, np.ndarray]:
-    transform = NewTSPseudoImageTransform(ts_patch_size=patch_size, ts_stride=0.5, vision_2d_mode="legacy_unfold", image_size=224)
-    normalized = transform._normalize_time_series(series.view(1, -1, 1)).squeeze(0).squeeze(-1)
-    if stride <= 0:
-        raise ValueError("stride must be positive")
+def z_normalize(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    return (x - x.mean()) / (x.std() + 1e-8)
 
-    pad_right = (stride - (normalized.numel() - patch_size) % stride) % stride if normalized.numel() >= patch_size else patch_size - normalized.numel()
-    if stride == patch_size:
-        pad_right = (patch_size - normalized.numel() % patch_size) % patch_size
-    padded = torch.cat([normalized, normalized[-1:].expand(pad_right)]) if pad_right > 0 else normalized
-    if stride == patch_size:
-        patches = padded.unfold(0, patch_size, patch_size)
+
+def nearest_centroid_example(labels: np.ndarray, values: np.ndarray, target_label: int) -> np.ndarray:
+    subset = np.stack([z_normalize(row) for row in values[labels == target_label]], axis=0)
+    centroid = subset.mean(axis=0, keepdims=True)
+    idx = np.argmin(np.linalg.norm(subset - centroid, axis=1))
+    return subset[idx]
+
+
+def extract_patches(series: np.ndarray, patch_size: int, stride: int) -> np.ndarray:
+    if len(series) < patch_size:
+        pad = np.full(patch_size - len(series), series[-1], dtype=series.dtype)
+        series = np.concatenate([series, pad])
+    rem = (len(series) - patch_size) % stride
+    if rem:
+        pad = np.full(stride - rem, series[-1], dtype=series.dtype)
+        series = np.concatenate([series, pad])
+    starts = range(0, len(series) - patch_size + 1, stride)
+    return np.stack([series[start : start + patch_size] for start in starts], axis=0)
+
+
+def morphology_map(series: np.ndarray, patch_size: int, image_size: int) -> np.ndarray:
+    transform = NewTSPseudoImageTransform(
+        ts_patch_size=patch_size,
+        ts_stride=0.5,
+        vision_2d_mode="legacy_unfold",
+        image_size=image_size,
+    )
+    tensor = torch.tensor(series, dtype=torch.float32).view(1, -1, 1)
+    image = transform.ts2grayscale_image(tensor)[0, 0].detach().cpu().numpy()
+    return image.astype(np.float32)
+
+
+def plot_raw_axis(
+    ax: plt.Axes,
+    dataset: str,
+    pair: tuple[int, int],
+    series_pair: tuple[np.ndarray, np.ndarray],
+    ylabel: str,
+    legend_loc: str,
+    *,
+    show_xlabel: bool,
+) -> None:
+    x = np.arange(len(series_pair[0]))
+    ax.plot(x, series_pair[0], color=BLUE, lw=1.45, label=f"class {pair[0]}")
+    ax.plot(x, series_pair[1], color=RED, lw=1.45, label=f"class {pair[1]}")
+    ax.set_title("Raw class contrast", fontsize=11, pad=5)
+    ax.set_ylabel(ylabel, fontsize=10)
+    if show_xlabel:
+        ax.set_xlabel("Time", fontsize=10)
+    ax.text(
+        0.02,
+        0.92,
+        dataset,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.legend(loc=legend_loc, fontsize=7.2, frameon=False, handlelength=1.7, borderpad=0.2)
+    ax.grid(True, color=GRID_COLOR, linewidth=0.55, linestyle="--", alpha=0.8)
+    ax.tick_params(labelsize=8, length=2.5)
+    ax.set_xlim(0, len(series_pair[0]) - 1)
+
+
+def add_patch_box(
+    ax: plt.Axes,
+    patch: np.ndarray,
+    left: float,
+    bottom: float,
+    width: float,
+    height: float,
+    color: str,
+) -> None:
+    inset = ax.inset_axes([left, bottom, width, height])
+    x = np.linspace(0, 1, len(patch))
+    y = z_normalize(patch)
+    ymin, ymax = y.min(), y.max()
+    denom = max(float(ymax - ymin), 1e-6)
+    y = (y - ymin) / denom
+    inset.plot(x, y, color=color, lw=1.25)
+    inset.set_xlim(0, 1)
+    inset.set_ylim(-0.08, 1.08)
+    inset.set_xticks([])
+    inset.set_yticks([])
+    for spine in inset.spines.values():
+        spine.set_edgecolor(BOX_EDGE)
+        spine.set_linewidth(0.8)
+
+
+def plot_patch_axis(
+    ax: plt.Axes,
+    pair: tuple[int, int],
+    series_pair: tuple[np.ndarray, np.ndarray],
+    patch_start: int,
+    patch_size: int,
+    stride: int,
+    *,
+    show_xlabel: bool,
+) -> None:
+    ax.set_title("Ordered waveform patches", fontsize=11, pad=5)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    patches_a = extract_patches(series_pair[0], patch_size, stride)
+    patches_b = extract_patches(series_pair[1], patch_size, stride)
+    selected = list(range(patch_start, patch_start + 4))
+
+    box_w = 0.15
+    box_h = 0.24
+    x0 = 0.23
+    dx = 0.18
+    y_top = 0.60
+    y_bot = 0.15
+
+    ax.text(0.08, y_top + box_h * 0.5, f"class {pair[0]}", ha="right", va="center", fontsize=8.5)
+    ax.text(0.08, y_bot + box_h * 0.5, f"class {pair[1]}", ha="right", va="center", fontsize=8.5)
+
+    for col, patch_idx in enumerate(selected):
+        left = x0 + col * dx
+        if patch_idx < len(patches_a):
+            add_patch_box(ax, patches_a[patch_idx], left, y_top, box_w, box_h, BLUE)
+        if patch_idx < len(patches_b):
+            add_patch_box(ax, patches_b[patch_idx], left, y_bot, box_w, box_h, RED)
+        ax.text(left + box_w / 2, y_top + box_h + 0.055, f"p{patch_idx}", ha="center", va="bottom", fontsize=7.8)
+        ax.text(left + box_w / 2, y_bot + box_h + 0.035, f"p{patch_idx}", ha="center", va="bottom", fontsize=7.8)
+        if col < len(selected) - 1:
+            for y in (y_top, y_bot):
+                ax.annotate(
+                    "",
+                    xy=(left + box_w + 0.035, y + box_h / 2),
+                    xytext=(left + box_w + 0.005, y + box_h / 2),
+                    arrowprops=dict(arrowstyle="->", color="#4b5563", lw=0.7),
+                    xycoords=ax.transAxes,
+                    textcoords=ax.transAxes,
+                )
+
+    if show_xlabel:
+        ax.text(x0, 0.03, "first", ha="left", va="center", fontsize=8.5)
+        ax.text(x0 + 3 * dx + box_w, 0.03, "last", ha="right", va="center", fontsize=8.5)
+        ax.text(0.5, -0.055, "Within-patch time", ha="center", va="center", fontsize=10, transform=ax.transAxes)
     else:
-        patches = padded.unfold(0, patch_size, stride)
-    patch_array = patches.detach().cpu().numpy()
-    raw_series = normalized.detach().cpu().numpy()
-    return raw_series, patch_array
+        ax.text(x0, 0.04, "first", ha="left", va="center", fontsize=8.5)
+        ax.text(x0 + 3 * dx + box_w, 0.04, "last", ha="right", va="center", fontsize=8.5)
 
 
-def normalize_rows(x: np.ndarray) -> np.ndarray:
-    x = x.astype(np.float32)
-    row_min = x.min(axis=1, keepdims=True)
-    row_max = x.max(axis=1, keepdims=True)
-    return (x - row_min) / np.maximum(row_max - row_min, 1e-6)
+def plot_morph_axis(
+    ax: plt.Axes,
+    pair: tuple[int, int],
+    series_pair: tuple[np.ndarray, np.ndarray],
+    patch_size: int,
+    image_size: int,
+    *,
+    show_xlabel: bool,
+) -> None:
+    ax.set_title("Window-shape morphology", fontsize=11, pad=5)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 2)
+    for row, series in enumerate(series_pair):
+        image = morphology_map(series, patch_size, image_size)
+        y0 = 1 - row
+        ax.imshow(image, cmap="gray", aspect="auto", interpolation="nearest", extent=(0, 1, y0, y0 + 0.92))
+    ax.axhline(1.0, color="white", lw=3.0)
+    ax.set_yticks([1.46, 0.46])
+    ax.set_yticklabels([f"class {pair[0]}", f"class {pair[1]}"], fontsize=8.5)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["start", "end"], fontsize=8.5)
+    if show_xlabel:
+        ax.set_xlabel("2D waveform map", fontsize=10)
+    ax.tick_params(length=0)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.6)
+        spine.set_edgecolor("#d0d0d0")
+
+
+def build_cases(data_path: str) -> list[dict[str, Any]]:
+    cases = [
+        {"dataset": "CBF", "pair": (2, 3), "ylabel": "A. Temporal cue", "patch_start": 7, "legend_loc": "upper right"},
+        {"dataset": "ECG200", "pair": (-1, 1), "ylabel": "B. Morphology cue", "patch_start": 2, "legend_loc": "lower right"},
+    ]
+    for case in cases:
+        labels, values = load_train_array(case["dataset"], data_path)
+        pair = case["pair"]
+        case["series_pair"] = (
+            nearest_centroid_example(labels, values, pair[0]),
+            nearest_centroid_example(labels, values, pair[1]),
+        )
+    return cases
 
 
 def plot_dual_view_motivation(args: argparse.Namespace) -> dict[str, Any]:
     apply_paper_style()
-
-    series, label, split_size = load_sample(args.dataset, args.split, args.data_path, args.sample_index)
-    raw_series, patches = prepare_patches(series, args.patch_size, args.stride)
-    transform = NewTSPseudoImageTransform(
-        ts_patch_size=args.patch_size,
-        ts_stride=0.5,
-        vision_2d_mode=args.vision_2d_mode,
-        image_size=args.image_size,
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "axes.grid": False,
+            "axes.titlesize": 11,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
     )
-    morphology = transform.ts2grayscale_image(series.view(1, -1, 1))[0, 0].detach().cpu().numpy()
 
-    patch_count = patches.shape[0]
-    if patch_count == 0:
-        raise ValueError("No patches could be extracted from the selected series")
+    cases = build_cases(args.data_path)
 
-    focus_patch = args.focus_patch_index
-    if focus_patch < 0:
-        focus_patch = max(0, min(patch_count // 2, patch_count - args.num_patch_rows))
-    focus_patch = max(0, min(focus_patch, max(0, patch_count - args.num_patch_rows)))
-    end_patch = min(patch_count, focus_patch + args.num_patch_rows)
-    shown_patches = normalize_rows(patches[focus_patch:end_patch])
-
-    start_t = focus_patch * args.stride
-    end_t = min(len(raw_series), start_t + args.patch_size + (args.num_patch_rows - 1) * args.stride)
-
-    fig = plt.figure(figsize=(13.8, 4.3))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.35, 1.0, 1.05], wspace=0.22)
-    ax_raw = fig.add_subplot(gs[0, 0])
-    ax_patch = fig.add_subplot(gs[0, 1])
-    ax_morph = fig.add_subplot(gs[0, 2])
-
-    x = np.arange(raw_series.shape[0])
-    ax_raw.plot(x, raw_series, color="#1f1f1f", lw=1.2)
-    ax_raw.axvspan(start_t, end_t, color="#e58a2f", alpha=0.16, lw=0)
-    for offset in range(args.num_patch_rows + 1):
-        boundary = start_t + offset * args.stride
-        if boundary <= raw_series.shape[0]:
-            ax_raw.axvline(boundary, color="#e58a2f", lw=0.8, alpha=0.55, linestyle="--")
-    ax_raw.set_title("Raw waveform")
-    ax_raw.set_xlabel("Time")
-    ax_raw.set_ylabel("Normalized value")
-    ax_raw.text(
-        0.02,
-        0.96,
-        f"Dataset: {args.dataset}  |  label: {label}",
-        transform=ax_raw.transAxes,
-        va="top",
-        ha="left",
-        fontsize=8.7,
-        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.8),
+    fig = plt.figure(figsize=(8.9, 5.25))
+    gs = fig.add_gridspec(
+        2,
+        3,
+        width_ratios=[1.18, 1.05, 1.0],
+        height_ratios=[1, 1],
+        left=0.075,
+        right=0.985,
+        top=0.92,
+        bottom=0.16,
+        wspace=0.34,
+        hspace=0.42,
     )
-    ax_raw.text(
-        0.02,
-        0.08,
-        "Temporal branch preserves ordered dynamics",
-        transform=ax_raw.transAxes,
-        va="bottom",
-        ha="left",
-        fontsize=9,
-        color="#8a4d15",
-    )
-    ax_raw.set_xlim(0, raw_series.shape[0] - 1)
 
-    ax_patch.imshow(
-        shown_patches,
-        aspect="auto",
-        cmap="Blues",
-        interpolation="nearest",
-        origin="lower",
-    )
-    ax_patch.set_title("Temporal patches")
-    ax_patch.set_xlabel("Within-patch time")
-    ax_patch.set_ylabel("Patch index")
-    ax_patch.set_yticks(np.arange(shown_patches.shape[0]))
-    ax_patch.set_yticklabels([f"p{focus_patch + i}" for i in range(shown_patches.shape[0])])
-    ax_patch.set_xticks([0, args.patch_size // 2, args.patch_size - 1])
-    ax_patch.set_xticklabels(["0", f"{args.patch_size // 2}", f"{args.patch_size - 1}"])
-    ax_patch.text(
-        0.02,
-        0.97,
-        "Local trend / phase shift / amplitude change",
-        transform=ax_patch.transAxes,
-        va="top",
-        ha="left",
-        fontsize=8.5,
-        color="#103a5f",
-        bbox=dict(boxstyle="round,pad=0.16", facecolor="white", edgecolor="none", alpha=0.72),
-    )
-    focus_row = min(shown_patches.shape[0] - 1, max(0, args.num_patch_rows // 2))
-    ax_patch.add_patch(
-        Rectangle(
-            (-0.5, focus_row - 0.5),
-            args.patch_size - 0.02,
-            1.0,
-            fill=False,
-            edgecolor="#c23b22",
-            linewidth=1.6,
+    for row, case in enumerate(cases):
+        show_xlabel = row == 1
+        ax_raw = fig.add_subplot(gs[row, 0])
+        ax_patch = fig.add_subplot(gs[row, 1])
+        ax_morph = fig.add_subplot(gs[row, 2])
+        plot_raw_axis(
+            ax_raw,
+            case["dataset"],
+            case["pair"],
+            case["series_pair"],
+            case["ylabel"],
+            case["legend_loc"],
+            show_xlabel=show_xlabel,
         )
-    )
-
-    ax_morph.imshow(
-        morphology,
-        aspect="auto",
-        cmap="gray_r",
-        interpolation="nearest",
-        origin="upper",
-    )
-    ax_morph.set_title("Morphology map")
-    ax_morph.set_xlabel("Within-window position")
-    ax_morph.set_ylabel("Window index")
-    ax_morph.text(
-        0.02,
-        0.97,
-        "Peaks / valleys / motifs / cross-window patterns",
-        transform=ax_morph.transAxes,
-        va="top",
-        ha="left",
-        fontsize=8.5,
-        color="#2f2f2f",
-        bbox=dict(boxstyle="round,pad=0.16", facecolor="white", edgecolor="none", alpha=0.72),
-    )
-    for ax in (ax_raw, ax_patch, ax_morph):
-        ax.tick_params(axis="both", which="both", length=2.5, width=0.7)
-    fig.subplots_adjust(top=0.88, bottom=0.08, left=0.05, right=0.98, wspace=0.26)
+        plot_patch_axis(
+            ax_patch,
+            case["pair"],
+            case["series_pair"],
+            case["patch_start"],
+            args.patch_size,
+            args.stride,
+            show_xlabel=show_xlabel,
+        )
+        plot_morph_axis(
+            ax_morph,
+            case["pair"],
+            case["series_pair"],
+            args.patch_size,
+            args.image_size,
+            show_xlabel=show_xlabel,
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,14 +327,8 @@ def plot_dual_view_motivation(args: argparse.Namespace) -> dict[str, Any]:
     plt.close(fig)
 
     return {
-        "dataset": args.dataset,
-        "split": args.split,
-        "sample_index": args.sample_index,
-        "label": label,
-        "split_size": split_size,
-        "patch_count": patch_count,
-        "focus_patch": focus_patch,
         "artifacts": {kind: str(path.resolve()) for kind, path in artifacts.items()},
+        "cases": [{"dataset": c["dataset"], "pair": c["pair"], "legend_loc": c["legend_loc"]} for c in cases],
     }
 
 
